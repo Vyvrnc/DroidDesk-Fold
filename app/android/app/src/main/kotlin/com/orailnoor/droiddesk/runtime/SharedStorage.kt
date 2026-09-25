@@ -54,5 +54,19 @@ object SharedStorage {
             runCatching { Os.symlink(target.absolutePath, link.path) }
                 .onFailure { Log.w(TAG, "Could not link ${link.path} -> $target", it) }
         }
+        addFileManagerBookmarks(context, root)
+    }
+
+    /** Without these the phone storage is invisible in Thunar; browsing up from home ends in /data/user/0. */
+    private fun addFileManagerBookmarks(context: Context, root: File) {
+        val bookmarks = File(context.filesDir, "home/.config/gtk-3.0/bookmarks")
+        bookmarks.parentFile?.mkdirs()
+        val existing = if (bookmarks.exists()) bookmarks.readLines() else emptyList()
+        val wanted = listOf(
+            "file://${root.absolutePath} Telefon",
+            "file://${File(root, Environment.DIRECTORY_DOWNLOADS).absolutePath} Stažené",
+        )
+        val missing = wanted.filter { line -> existing.none { it.substringBefore(' ') == line.substringBefore(' ') } }
+        if (missing.isNotEmpty()) bookmarks.writeText((existing + missing).joinToString("\n", postfix = "\n"))
     }
 }
