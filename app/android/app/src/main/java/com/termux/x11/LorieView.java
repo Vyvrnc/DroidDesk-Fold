@@ -657,6 +657,11 @@ public class LorieView extends SurfaceView implements InputStub {
         triggerCallback();
     }
 
+    /** Recomputes the X11 resolution after display prefs changed; the server resizes live. */
+    public void reapplyDisplaySettings() {
+        updateViewport();
+    }
+
     public void triggerCallback() {
         requestFocus();
         updateViewport();

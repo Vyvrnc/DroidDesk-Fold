@@ -60,17 +60,8 @@ class X11InputController(private val lorieView: LorieView) {
     private fun handleMotionEvent(view: View, event: MotionEvent): Boolean =
         inputHandler.handleTouchEvent(lorieView, view, event)
 
-    companion object {
-        const val DISPLAY_SCALE_PERCENT = 200
-
-        /** Must run before LorieView is measured so Xwayland starts at the scaled resolution. */
-        fun configureDisplayScale() {
-            MainActivity.getPrefs().apply {
-                displayResolutionMode.put("scaled")
-                displayScale.put(DISPLAY_SCALE_PERCENT)
-                displayStretch.put(true)
-                scaleTouchpad.put(true)
-            }
-        }
+    /** Picks up display pref changes (touchpad scaling depends on the resolution mode). */
+    fun reloadPreferences() {
+        inputHandler.reloadPreferences(MainActivity.getPrefs())
     }
 }

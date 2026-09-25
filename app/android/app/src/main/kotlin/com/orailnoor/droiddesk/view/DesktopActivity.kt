@@ -27,13 +27,16 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import android.view.Gravity
 import android.content.res.ColorStateList
+import android.content.res.Configuration
 import com.termux.x11.MainActivity as TermuxMainActivity
 import com.termux.x11.LorieView
+import com.termux.x11.utils.SamsungDexUtils
 import com.orailnoor.droiddesk.runtime.LinuxRuntime
 import com.orailnoor.droiddesk.runtime.ChrootRuntime
 import com.orailnoor.droiddesk.runtime.ClipboardSync
 import com.orailnoor.droiddesk.x11.X11ServiceClient
 import com.orailnoor.droiddesk.x11.X11InputController
+import com.orailnoor.droiddesk.x11.DisplayProfile
 
 class DesktopActivity : Activity() {
     private var lorieView: LorieView? = null
@@ -48,6 +51,8 @@ class DesktopActivity : Activity() {
     private lateinit var placeholder: FrameLayout
     private var x11ServiceClient: X11ServiceClient? = null
     private var inputController: X11InputController? = null
+    private var screen = DisplayProfile.Screen.WIDE
+    private var scaleButton: Button? = null
     private var inputModeButton: Button? = null
     private var controlOverlay: LinearLayout? = null
     private var collapsedControl: Button? = null
@@ -129,11 +134,39 @@ class DesktopActivity : Activity() {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) enableImmersiveMode()
         if (hasFocus) startClipboardSync() else clipboardSync?.stop()
+        updateDexKeyCapture(hasFocus)
         if (hasFocus && !isSetupDone) {
             isSetupDone = true
             Log.i(TAG, "Window focused — setting up LorieView")
             setupLorieView()
         }
+    }
+
+    /** Fold/unfold and moving to DeX or an external display arrive here (see configChanges). */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val detected = DisplayProfile.detect(this)
+        if (detected == screen) return
+        Log.i(TAG, "Screen changed $screen -> $detected")
+        screen = detected
+        applyDisplayProfile()
+        updateDexKeyCapture(hasWindowFocus())
+    }
+
+    private fun applyDisplayProfile() {
+        DisplayProfile.apply(this, screen)
+        scaleButton?.text = scaleLabel()
+        lorieView?.post {
+            lorieView?.reapplyDisplaySettings()
+            inputController?.reloadPreferences()
+        }
+    }
+
+    private fun scaleLabel() = "${screen.label} ${DisplayProfile.scaleFor(this, screen)} %"
+
+    /** In DeX the Meta key (and shortcuts built on it) belongs to Samsung unless we claim it. */
+    private fun updateDexKeyCapture(hasFocus: Boolean) {
+        SamsungDexUtils.dexMetaKeyCapture(this, hasFocus && screen == DisplayProfile.Screen.DESKTOP)
     }
 
     override fun onResume() {
@@ -190,7 +223,8 @@ class DesktopActivity : Activity() {
 
     private fun setupLorieView() {
         Log.i(TAG, "Setting up LorieView")
-        X11InputController.configureDisplayScale()
+        screen = DisplayProfile.detect(this)
+        DisplayProfile.apply(this, screen)
         TermuxMainActivity.getInstance().initLorieView(this)
         lorieView = TermuxMainActivity.getInstance().lorieView
 
@@ -300,6 +334,13 @@ class DesktopActivity : Activity() {
                 Toast.makeText(this@DesktopActivity, "Input mode: $text", Toast.LENGTH_SHORT).show()
             }
         }
+        scaleButton = controlButton(scaleLabel()).apply {
+            contentDescription = "Change desktop scale for this screen"
+            setOnClickListener {
+                DisplayProfile.cycleScale(this@DesktopActivity, screen)
+                applyDisplayProfile()
+            }
+        }
         val hideButton = controlButton("−").apply {
             contentDescription = "Hide desktop controls"
             setOnClickListener { setControlsCollapsed(true) }
@@ -316,6 +357,9 @@ class DesktopActivity : Activity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT, (42 * density).toInt(),
             ))
             addView(inputModeButton, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, (42 * density).toInt(),
+            ))
+            addView(scaleButton, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, (42 * density).toInt(),
             ))
             addView(hideButton, LinearLayout.LayoutParams(

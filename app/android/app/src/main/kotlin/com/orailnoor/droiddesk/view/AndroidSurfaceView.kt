@@ -1,5 +1,6 @@
 package com.orailnoor.droiddesk.view
 
+import android.app.Activity
 import android.content.Context
 import android.graphics.Color
 import android.util.Log
@@ -9,6 +10,7 @@ import com.termux.x11.MainActivity
 import com.termux.x11.LorieView
 import com.orailnoor.droiddesk.x11.X11ServiceClient
 import com.orailnoor.droiddesk.x11.X11InputController
+import com.orailnoor.droiddesk.x11.DisplayProfile
 
 class AndroidSurfaceView(
     val context: Context,
@@ -25,7 +27,8 @@ class AndroidSurfaceView(
     }
 
     init {
-        X11InputController.configureDisplayScale()
+        val screen = (context as? Activity)?.let(DisplayProfile::detect) ?: DisplayProfile.Screen.WIDE
+        DisplayProfile.apply(context, screen)
         MainActivity.getInstance().initLorieView(context)
         lorieView = MainActivity.getInstance().lorieView
         lorieView.setBackgroundColor(Color.TRANSPARENT)

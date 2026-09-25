@@ -563,15 +563,6 @@ class MainActivity : FlutterActivity() {
                 "startLinux" -> {
                     val desktopEnv = call.argument<String>("de") ?: "xfce4"
                     val mode = call.argument<String>("mode") ?: "x11"
-                    var width = call.argument<Int>("width") ?: 1920
-                    var height = call.argument<Int>("height") ?: 1080
-
-                    if (height > 720) {
-                        val scale = 720.0 / height
-                        width = (width * scale).toInt()
-                        height = 720
-                    }
-
                     startForegroundService()
 
                     if (chrootRuntime.hasRoot()) {
