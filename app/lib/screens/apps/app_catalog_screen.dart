@@ -219,6 +219,17 @@ class _AppCatalogScreenState extends State<AppCatalogScreen>
     );
   }
 
+  Future<void> _installOptional(_FeaturedApp app) async {
+    final ok = await context.read<AppState>().installOptionalApp(app.packageName);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(ok ? '${app.name} installed' : '${app.name} installation failed'),
+        backgroundColor: ok ? DroidTheme.success : DroidTheme.error,
+      ),
+    );
+  }
+
   Future<void> _cancelOperation() async {
     if (_activePackage == null || _cancelling) return;
     setState(() {
@@ -291,7 +302,20 @@ class _AppCatalogScreenState extends State<AppCatalogScreen>
           children: [_featuredView(), _browseView(), _installedView()],
         ),
       ),
-      bottomNavigationBar: _activePackage == null ? null : _operationPanel(),
+      bottomNavigationBar: _activePackage != null
+          ? _operationPanel(
+              status: _operationStatus,
+              progress: _operationProgress,
+              log: _operationLog,
+              onCancel: _cancelOperation,
+            )
+          : context.watch<AppState>().installingOptionalApp != null
+          ? _operationPanel(
+              status: context.read<AppState>().optionalInstallStatus,
+              progress: context.read<AppState>().optionalInstallProgress,
+              log: context.read<AppState>().optionalInstallLog,
+            )
+          : null,
     );
   }
 
@@ -329,9 +353,7 @@ class _AppCatalogScreenState extends State<AppCatalogScreen>
                   : _installedNames.contains(app.packageName),
             ),
             featured: app,
-            onInstall: app.optional
-                ? () => state.installOptionalApp(app.packageName)
-                : null,
+            onInstall: app.optional ? () => _installOptional(app) : null,
           ),
           const SizedBox(height: 10),
         ],
@@ -411,8 +433,10 @@ class _AppCatalogScreenState extends State<AppCatalogScreen>
   }) {
     final installed =
         package.installed || _installedNames.contains(package.name);
-    final busy = _activePackage != null;
-    final active = _activePackage == package.name;
+    final optionalInstall = context.watch<AppState>().installingOptionalApp;
+    final busy = _activePackage != null || optionalInstall != null;
+    final active =
+        _activePackage == package.name || optionalInstall == package.name;
     final color = featured?.color ?? _categoryColor(package.section);
     return Container(
       padding: const EdgeInsets.all(15),
@@ -502,8 +526,13 @@ class _AppCatalogScreenState extends State<AppCatalogScreen>
     );
   }
 
-  Widget _operationPanel() {
-    final clean = _operationLog.replaceAll(
+  Widget _operationPanel({
+    required String status,
+    required double progress,
+    required String log,
+    Future<void> Function()? onCancel,
+  }) {
+    final clean = log.replaceAll(
       RegExp(r'\x1B\[[0-?]*[ -/]*[@-~]'),
       '',
     );
@@ -532,27 +561,28 @@ class _AppCatalogScreenState extends State<AppCatalogScreen>
               children: [
                 Expanded(
                   child: Text(
-                    _operationStatus,
+                    status,
                     style: DroidTheme.headingSm,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
                 Text(
-                  '${(_operationProgress * 100).round()}%',
+                  '${(progress * 100).round()}%',
                   style: DroidTheme.monoSm,
                 ),
               ],
             ),
             const SizedBox(height: 8),
             LinearProgressIndicator(
-              value: _operationProgress > 0 ? _operationProgress : null,
+              value: progress > 0 ? progress : null,
             ),
+            if (onCancel != null) ...[
             const SizedBox(height: 10),
             Align(
               alignment: Alignment.centerRight,
               child: OutlinedButton.icon(
-                onPressed: _cancelling ? null : _cancelOperation,
+                onPressed: _cancelling ? null : onCancel,
                 icon: _cancelling
                     ? const SizedBox(
                         width: 15,
@@ -563,6 +593,7 @@ class _AppCatalogScreenState extends State<AppCatalogScreen>
                 label: Text(_cancelling ? 'Cancelling' : 'Cancel installation'),
               ),
             ),
+            ],
             if (tail.isNotEmpty) ...[
               const SizedBox(height: 8),
               Text(
