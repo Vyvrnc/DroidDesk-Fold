@@ -7,7 +7,7 @@ import java.io.File
 /** Installs DroidDesk's touch-friendly Ubuntu-inspired XFCE defaults once per home. */
 object XfceMobileProfile {
     private const val TAG = "XfceMobileProfile"
-    private const val PROFILE_MARKER = ".droiddesk-xfce-mobile-v5"
+    private const val PROFILE_MARKER = ".droiddesk-xfce-mobile-v6"
     private const val WALLPAPER_ASSET = "droiddesk/ubuntu-touch-wallpaper.jpg"
 
     fun install(
@@ -33,7 +33,7 @@ object XfceMobileProfile {
             File(xfconfDir, "xfce4-desktop.xml").writeText(
                 desktopConfig(xmlEscape(wallpaperPathInSession)),
             )
-            installPanelCss(homeDir)
+            removeOldPanelCss(homeDir)
 
             val panelDir = File(homeDir, ".config/xfce4/panel")
             writeLauncher(
@@ -90,34 +90,19 @@ object XfceMobileProfile {
         )
     }
 
-    private fun installPanelCss(homeDir: File) {
+    private fun removeOldPanelCss(homeDir: File) {
         val cssFile = File(homeDir, ".config/gtk-3.0/gtk.css")
-        cssFile.parentFile?.mkdirs()
+        if (!cssFile.exists()) return
         val startMarker = "/* DroidDesk mobile panel start */"
         val endMarker = "/* DroidDesk mobile panel end */"
-        val managedBlock = """
-            $startMarker
-            .xfce4-panel #separator-4,
-            .xfce4-panel #separator-5,
-            .xfce4-panel #separator-6 {
-              min-width: 52px;
-              padding: 0;
-              margin: 0;
-            }
-            $endMarker
-        """.trimIndent()
-        val existing = if (cssFile.exists()) cssFile.readText() else ""
-        val withoutOldBlock = existing.replace(
+        val withoutOldBlock = cssFile.readText().replace(
             Regex(
                 Regex.escape(startMarker) + ".*?" + Regex.escape(endMarker),
                 setOf(RegexOption.DOT_MATCHES_ALL),
             ),
             "",
         ).trimEnd()
-        cssFile.writeText(
-            if (withoutOldBlock.isEmpty()) "$managedBlock\n"
-            else "$withoutOldBlock\n\n$managedBlock\n",
-        )
+        if (withoutOldBlock.isEmpty()) cssFile.delete() else cssFile.writeText(withoutOldBlock + "\n")
     }
 
     private fun panelConfig(): String = """
@@ -126,32 +111,8 @@ object XfceMobileProfile {
         <channel name="xfce4-panel" version="1.0">
           <property name="configver" type="int" value="2"/>
           <property name="panels" type="array">
-            <value type="int" value="1"/>
             <value type="int" value="2"/>
             <property name="dark-mode" type="bool" value="true"/>
-            <property name="panel-1" type="empty">
-              <property name="position" type="string" value="p=9;x=0;y=0"/>
-              <property name="length" type="uint" value="100"/>
-              <property name="position-locked" type="bool" value="true"/>
-              <property name="autohide-behavior" type="uint" value="0"/>
-              <property name="size" type="uint" value="30"/>
-              <property name="icon-size" type="uint" value="20"/>
-              <property name="background-style" type="uint" value="1"/>
-              <property name="background-rgba" type="array">
-                <value type="double" value="0.000000"/>
-                <value type="double" value="0.000000"/>
-                <value type="double" value="0.000000"/>
-                <value type="double" value="1.000000"/>
-              </property>
-              <property name="plugin-ids" type="array">
-                <value type="int" value="4"/>
-                <value type="int" value="5"/>
-                <value type="int" value="6"/>
-                <value type="int" value="2"/>
-                <value type="int" value="1"/>
-                <value type="int" value="3"/>
-              </property>
-            </property>
             <property name="panel-2" type="empty">
               <property name="position" type="string" value="p=7;x=0;y=0"/>
               <property name="mode" type="uint" value="1"/>
@@ -174,31 +135,21 @@ object XfceMobileProfile {
                 <value type="int" value="22"/>
                 <value type="int" value="23"/>
                 <value type="int" value="24"/>
+                <value type="int" value="2"/>
+                <value type="int" value="3"/>
                 <value type="int" value="25"/>
               </property>
             </property>
           </property>
           <property name="plugins" type="empty">
-            <property name="plugin-1" type="string" value="separator">
-              <property name="expand" type="bool" value="true"/>
-              <property name="style" type="uint" value="0"/>
-            </property>
             <property name="plugin-2" type="string" value="tasklist">
               <property name="show-labels" type="bool" value="false"/>
               <property name="grouping" type="uint" value="1"/>
             </property>
-            <property name="plugin-3" type="string" value="clock"/>
-            <property name="plugin-4" type="string" value="separator">
-              <property name="expand" type="bool" value="false"/>
-              <property name="style" type="uint" value="0"/>
-            </property>
-            <property name="plugin-5" type="string" value="separator">
-              <property name="expand" type="bool" value="false"/>
-              <property name="style" type="uint" value="0"/>
-            </property>
-            <property name="plugin-6" type="string" value="separator">
-              <property name="expand" type="bool" value="false"/>
-              <property name="style" type="uint" value="0"/>
+            <property name="plugin-3" type="string" value="clock">
+              <property name="mode" type="uint" value="2"/>
+              <property name="digital-layout" type="uint" value="3"/>
+              <property name="digital-time-format" type="string" value="%H:%M"/>
             </property>
             <property name="plugin-20" type="string" value="applicationsmenu">
               <property name="show-button-title" type="bool" value="false"/>
