@@ -1055,6 +1055,9 @@ class LinuxRuntime(private val context: Context) {
             "${prefixDir.absolutePath}/etc",
             "/data/data/com.termux/files/usr/etc",
         ).joinToString(":")
+        // GLib launches default apps ("Open With", double-click in Thunar) through
+        // gio-launch-desktop at its compile-time com.termux path, which does not exist here.
+        env["GIO_LAUNCH_DESKTOP"] = "${prefixDir.absolutePath}/libexec/gio-launch-desktop"
         env["GDK_PIXBUF_MODULEDIR"] = "${prefixDir.absolutePath}/lib/gdk-pixbuf-2.0/2.10.0/loaders"
         env["GDK_PIXBUF_MODULE_FILE"] = "${prefixDir.absolutePath}/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
 
