@@ -79,6 +79,16 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
+        <!-- Samsung DeX: without these One UI restarts the app when it moves between
+             the phone screen and DeX, which kills the whole Linux session.
+             https://developer.samsung.com/samsung-dex/modify-optimizing.html -->
+        <meta-data
+            android:name="com.samsung.android.keepalive.density"
+            android:value="true" />
+        <meta-data
+            android:name="com.samsung.android.multidisplay.keep_process_alive"
+            android:value="true" />
+
 
     </application>
 

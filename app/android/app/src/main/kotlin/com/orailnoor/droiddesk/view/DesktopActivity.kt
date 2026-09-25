@@ -150,6 +150,7 @@ class DesktopActivity : Activity() {
         Log.i(TAG, "Screen changed $screen -> $detected")
         screen = detected
         applyDisplayProfile()
+        placeholder.requestApplyInsets()
         updateDexKeyCapture(hasWindowFocus())
     }
 
@@ -159,6 +160,16 @@ class DesktopActivity : Activity() {
         lorieView?.post {
             lorieView?.reapplyDisplaySettings()
             inputController?.reloadPreferences()
+        }
+    }
+
+    /** Fold screens have a punch-hole camera; without this it covers part of the XFCE panel. */
+    private fun applyCutoutInsets(insets: WindowInsets) {
+        val cutout = insets.displayCutout
+        if (cutout == null || screen == DisplayProfile.Screen.DESKTOP) {
+            lorieView?.setContentInsets(0, 0, 0, 0)
+        } else {
+            lorieView?.setContentInsets(cutout.safeInsetLeft, cutout.safeInsetTop, cutout.safeInsetRight, cutout.safeInsetBottom)
         }
     }
 
@@ -241,6 +252,11 @@ class DesktopActivity : Activity() {
         // attaching it here, otherwise Android throws "child already has a parent".
         (lorieView!!.parent as? ViewGroup)?.removeView(lorieView)
         placeholder.addView(lorieView, params)
+        placeholder.setOnApplyWindowInsetsListener { _, insets ->
+            applyCutoutInsets(insets)
+            insets
+        }
+        placeholder.requestApplyInsets()
         loadingOverlay?.bringToFront()
         Log.i(TAG, "LorieView added to placeholder")
 

@@ -2,7 +2,9 @@ package com.orailnoor.droiddesk.x11
 
 import android.app.Activity
 import android.content.Context
+import android.graphics.Point
 import android.view.Display
+import android.view.WindowManager
 import com.termux.x11.MainActivity
 import com.termux.x11.utils.SamsungDexUtils
 
@@ -15,7 +17,7 @@ import com.termux.x11.utils.SamsungDexUtils
  */
 object DisplayProfile {
     enum class Screen(val key: String, val label: String, val defaultScale: Int) {
-        /** Samsung DeX or any non-default display: native pixels, sharp text. */
+        /** Samsung DeX or any non-default display: native pixels, 200 % above 1440p. */
         DESKTOP("desktop", "Monitor", 100),
         /** Tablet-sized panel, e.g. the unfolded inner screen of a Fold. */
         WIDE("wide", "Wide", 200),
@@ -35,7 +37,15 @@ object DisplayProfile {
     }
 
     fun scaleFor(context: Context, screen: Screen): Int =
-        prefs(context).getInt(screen.key, screen.defaultScale)
+        prefs(context).getInt(screen.key, defaultScale(context, screen))
+
+    private fun defaultScale(context: Context, screen: Screen): Int {
+        if (screen != Screen.DESKTOP) return screen.defaultScale
+        val size = Point()
+        @Suppress("DEPRECATION")
+        (context.getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.getRealSize(size)
+        return if (minOf(size.x, size.y) > 1440) 200 else screen.defaultScale
+    }
 
     /** Moves the current screen to the next scale step and persists it. */
     fun cycleScale(context: Context, screen: Screen): Int {

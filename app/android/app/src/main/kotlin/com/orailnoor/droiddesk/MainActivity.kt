@@ -17,6 +17,7 @@ import com.orailnoor.droiddesk.runtime.ChrootRuntime
 import com.orailnoor.droiddesk.runtime.RootShell
 import com.orailnoor.droiddesk.runtime.AndroidAppBridge
 import com.orailnoor.droiddesk.runtime.DesktopIntegration
+import com.orailnoor.droiddesk.runtime.SharedStorage
 import com.orailnoor.droiddesk.view.AndroidSurfaceViewFactory
 import com.orailnoor.droiddesk.x11.X11ServerService
 import kotlin.concurrent.thread
@@ -49,6 +50,14 @@ class MainActivity : FlutterActivity() {
             runAutoChrootSetup()
         }
         handleHomeLaunch(intent)
+        SharedStorage.requestIfNeeded(this)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == SharedStorage.REQUEST_CODE && SharedStorage.isGranted(this)) {
+            SharedStorage.linkIntoHome(this)
+        }
     }
 
     override fun onResume() {

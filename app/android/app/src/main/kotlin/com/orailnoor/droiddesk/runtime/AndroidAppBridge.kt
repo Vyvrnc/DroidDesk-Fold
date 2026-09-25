@@ -301,6 +301,10 @@ object AndroidAppBridge {
             var client: LocalSocket? = null
             try {
                 client = socket.accept()
+                if (client.peerCredentials.uid != android.os.Process.myUid()) {
+                    Log.w(TAG, "Rejected launcher request from uid ${client.peerCredentials.uid}")
+                    continue
+                }
                 val command = client.inputStream.bufferedReader().readLine()?.trim().orEmpty()
                 if (command.startsWith("action:")) {
                     launchSystemAction(context, command.removePrefix("action:"))
