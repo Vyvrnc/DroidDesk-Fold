@@ -1,5 +1,18 @@
 # DroidDesk
 
+> [!NOTE]
+> **This is a modified fork** of [techjarves/DroidDesk-Enhanced](https://github.com/techjarves/DroidDesk-Enhanced) v1.0.1
+> (itself based on [orailnoor/DroidDesk](https://github.com/orailnoor/DroidDesk)), tuned for the Galaxy Z Fold 7 and Samsung DeX.
+> Changes, all in the `fold-dex` history:
+>
+> - Per-screen desktop scale (inner, cover, monitor/DeX) with an on-screen toggle; keeps the desktop out of the camera cutout
+> - DeX: the Linux session survives moving between the phone and DeX; the Meta key goes to XFCE
+> - Shared storage: runtime permission, `~/storage/*` links and Thunar bookmarks
+> - `socket_hook`: rewrites `bind()`/`connect()` Unix socket paths (fixes LibreOffice hanging and restarting in a loop)
+> - Opening files with default apps (`GIO_LAUNCH_DESKTOP`), progress of the Debian install, single XFCE dock instead of overlapping panels
+>
+> APKs are on the [Releases](../../releases) page and can be tracked with [Obtainium](https://github.com/ImranR98/Obtainium).
+
 Run a full Linux desktop on any Android phone. Not a terminal. Not an emulator. A complete desktop environment with direct kernel access -- VS Code, Blender, Metasploit, local AI, all of it.
 
 Connect your phone to a monitor and it becomes a Linux PC. Unplug it and your entire setup comes with you.
