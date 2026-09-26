@@ -24,6 +24,7 @@ static const char *REL_TERMUX_BASE = "data/data/com.termux";
 
 /* Path-based libc wrappers we need to redirect. */
 static int (*real_connect)(int, const struct sockaddr *, socklen_t) = NULL;
+static int (*real_bind)(int, const struct sockaddr *, socklen_t) = NULL;
 static int (*real_open)(const char *, int, ...) = NULL;
 static int (*real_open64)(const char *, int, ...) = NULL;
 static int (*real_openat)(int, const char *, int, ...) = NULL;
@@ -76,6 +77,7 @@ static void do_init() {
         return;
     }
     real_connect = dlsym(RTLD_NEXT, "connect");
+    real_bind = dlsym(RTLD_NEXT, "bind");
     real_open = dlsym(RTLD_NEXT, "open");
     real_open64 = dlsym(RTLD_NEXT, "open64");
     real_openat = dlsym(RTLD_NEXT, "openat");
@@ -201,35 +203,62 @@ static const char* rewrite_at_path(int dirfd, const char* path, char* buf, size_
     return path;
 }
 
+/*
+ * Rewrites a Unix socket address the same way file paths are rewritten, so that
+ * bind() and connect() of one program agree (e.g. LibreOffice's OSL_PIPE single-
+ * instance socket). sun_path holds at most 107 bytes and our prefix is longer
+ * than Termux's, so a rewritten path that no longer fits moves to the abstract
+ * namespace under its original name; that is deterministic for both sides and
+ * leaves no stale socket file behind. Returns 0 when the address is unchanged.
+ */
+static socklen_t rewrite_unix_addr(const struct sockaddr *addr, socklen_t addrlen, struct sockaddr_un *un) {
+    if (!addr || addr->sa_family != AF_UNIX || addrlen <= offsetof(struct sockaddr_un, sun_path)) return 0;
+    memset(un, 0, sizeof(*un));
+    memcpy(un, addr, addrlen > sizeof(*un) ? sizeof(*un) : addrlen);
+    un->sun_path[sizeof(un->sun_path) - 1] = '\0';
+    if (un->sun_path[0] == '\0') return 0; /* already abstract */
+
+    char original[sizeof(un->sun_path)];
+    strcpy(original, un->sun_path);
+    char buf[1024];
+    const char *new_path = NULL;
+
+    /* The X server listens in $TMPDIR, not in $PREFIX/tmp. */
+    const char *termux_x11 = "/data/data/com.termux/files/usr/tmp/.X11-unix/X0";
+    const char *tmp_x11 = "/tmp/.X11-unix/X0";
+    if (strcmp(original, termux_x11) == 0 || strcmp(original, tmp_x11) == 0) {
+        const char *tmpdir = getenv("TMPDIR");
+        snprintf(buf, sizeof(buf), "%s/.X11-unix/X0", tmpdir ? tmpdir : NEW_PREFIX "/tmp");
+        new_path = buf;
+    } else {
+        new_path = rewrite_path(original, buf, sizeof(buf));
+        if (new_path == original) return 0;
+    }
+
+    if (strlen(new_path) < sizeof(un->sun_path)) {
+        memset(un->sun_path, 0, sizeof(un->sun_path));
+        strcpy(un->sun_path, new_path);
+        return offsetof(struct sockaddr_un, sun_path) + strlen(new_path) + 1;
+    }
+    memset(un->sun_path, 0, sizeof(un->sun_path));
+    memcpy(un->sun_path + 1, original, strlen(original));
+    return offsetof(struct sockaddr_un, sun_path) + 1 + strlen(original);
+}
+
 int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     setup();
-    if (addr && addr->sa_family == AF_UNIX) {
-        struct sockaddr_un un;
-        memset(&un, 0, sizeof(un));
-        memcpy(&un, addr, addrlen > sizeof(un) ? sizeof(un) : addrlen);
-
-        const char *termux_target = "/data/data/com.termux/files/usr/tmp/.X11-unix/X0";
-        const char *tmp_target = "/tmp/.X11-unix/X0";
-        const char *new_prefix_tmp = getenv("TMPDIR");
-        if (!new_prefix_tmp) new_prefix_tmp = NEW_PREFIX;
-        static char path_buf[256];
-        const char *new_path = NULL;
-
-        if (strncmp(un.sun_path, termux_target, strlen(termux_target)) == 0) {
-            snprintf(path_buf, sizeof(path_buf), "%s/.X11-unix/X0", new_prefix_tmp);
-            new_path = path_buf;
-        } else if (strncmp(un.sun_path, tmp_target, strlen(tmp_target)) == 0) {
-            snprintf(path_buf, sizeof(path_buf), "%s/.X11-unix/X0", new_prefix_tmp);
-            new_path = path_buf;
-        }
-        if (new_path) {
-            strncpy(un.sun_path, new_path, sizeof(un.sun_path) - 1);
-            un.sun_path[sizeof(un.sun_path) - 1] = '\0';
-            socklen_t new_len = offsetof(struct sockaddr_un, sun_path) + strlen(un.sun_path) + 1;
-            return real_connect(sockfd, (struct sockaddr *)&un, new_len);
-        }
-    }
+    struct sockaddr_un un;
+    socklen_t len = rewrite_unix_addr(addr, addrlen, &un);
+    if (len) return real_connect(sockfd, (struct sockaddr *)&un, len);
     return real_connect(sockfd, addr, addrlen);
+}
+
+int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
+    setup();
+    struct sockaddr_un un;
+    socklen_t len = rewrite_unix_addr(addr, addrlen, &un);
+    if (len) return real_bind(sockfd, (struct sockaddr *)&un, len);
+    return real_bind(sockfd, addr, addrlen);
 }
 
 int open(const char *pathname, int flags, ...) {

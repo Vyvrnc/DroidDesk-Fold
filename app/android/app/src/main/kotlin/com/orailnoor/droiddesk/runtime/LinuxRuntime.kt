@@ -337,19 +337,23 @@ class LinuxRuntime(private val context: Context) {
             val libDir = File(prefixDir, "lib")
             libDir.mkdirs()
             val destHook = File(libDir, "libsocket_hook.so")
-            if (destHook.exists()) return
 
             // Find the hook in jniLibs
-            val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
             val jniDir = File(context.applicationInfo.nativeLibraryDir)
             val srcHook = File(jniDir, "libsocket_hook.so")
+            // Refresh after app updates too, otherwise a fixed hook never reaches $PREFIX.
+            if (destHook.exists() && (!srcHook.exists() || destHook.readBytes().contentEquals(srcHook.readBytes()))) return
             if (srcHook.exists()) {
+                // Write a new inode and rename it into place: running Linux processes have the
+                // old file mapped, and truncating it under them would crash them with SIGBUS.
+                val tmpHook = File(libDir, "libsocket_hook.so.new")
                 srcHook.inputStream().use { input ->
-                    destHook.outputStream().use { output ->
+                    tmpHook.outputStream().use { output ->
                         input.copyTo(output)
                     }
                 }
-                destHook.setExecutable(true, false)
+                tmpHook.setExecutable(true, false)
+                if (!tmpHook.renameTo(destHook)) error("rename to ${destHook.path} failed")
                 Log.i(TAG, "Copied prebuilt socket hook to ${destHook.absolutePath}")
             } else {
                 Log.w(TAG, "Prebuilt socket hook not found in jniLibs at ${srcHook.absolutePath}")
