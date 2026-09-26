@@ -33,3 +33,8 @@ local.properties
 /app/sources.list.*
 /app/test_*.sh
 /app/android/app/close_range_hack.c
+
+# Build output
+*.apk
+*.keystore
+*.jks
