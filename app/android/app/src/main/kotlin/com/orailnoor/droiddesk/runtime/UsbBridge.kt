@@ -29,9 +29,10 @@ import kotlin.concurrent.thread
  * Protocol, one line per request on the abstract socket "droiddesk.usb":
  *   list              -> one tab-separated line per device, then an empty line
  *                        name, vid, pid, mass storage (1/0), manufacturer, product
- *   flash <name> <path>  (stable path, libaums like EtchDroid) writes a raw,
- *                     .xz or .gz image and verifies it by reading it back;
- *   read <name> <path>   copies the whole device into a file. Both stream
+ *   flash <name> <lun|-> <path>  (stable path, libaums like EtchDroid) writes a
+ *                     raw, .xz or .gz image and verifies it by reading it back;
+ *   read <name> <lun|-> <path>   copies the whole device into a file. "-" picks
+ *                     the only inserted card of a multi-slot reader. Both stream
  *                     "progress <done> <total>" lines and end with
  *                     "done <sha256>" or "err <reason>"; closing the socket
  *                     cancels.
@@ -63,12 +64,17 @@ object UsbBridge {
         }
     }
 
+    // Accepted clients, so stop() can end transfers and raw sessions too: once the
+    // foreground service is gone nothing should keep holding a USB device.
+    private val clients = java.util.concurrent.ConcurrentHashMap.newKeySet<LocalSocket>()
+
     fun stop() {
         synchronized(this) {
             val socket = server ?: return
             server = null
             runCatching { socket.close() }
         }
+        clients.forEach { runCatching { it.shutdownInput(); it.close() } }
     }
 
     private fun serve(context: Context, socket: LocalServerSocket) {
@@ -86,7 +92,14 @@ object UsbBridge {
             }
             // One thread per client: "open" blocks on the permission dialog and
             // then holds the device until the client disconnects.
-            thread(name = "usb-bridge-client", isDaemon = true) { handle(context, client) }
+            clients.add(client)
+            thread(name = "usb-bridge-client", isDaemon = true) {
+                try {
+                    handle(context, client)
+                } finally {
+                    clients.remove(client)
+                }
+            }
         }
     }
 
@@ -111,15 +124,19 @@ object UsbBridge {
                     output.write((lines + "\n").toByteArray())
                 }
                 request.startsWith("flash ") || request.startsWith("read ") -> {
-                    val parts = request.split(' ', limit = 3)
+                    // flash|read <device> <lun or -> <path>; the path may contain spaces.
+                    val parts = request.split(' ', limit = 4)
                     val device = parts.getOrNull(1)?.let { usb.deviceList[it] }
-                    val path = parts.getOrNull(2)?.trim().orEmpty()
-                    if (device == null || path.isEmpty()) {
-                        output.write("err usage: flash|read <device> <path>\n".toByteArray())
+                    val lun = parts.getOrNull(2)?.takeIf { it != "-" }?.toIntOrNull()
+                    val path = parts.getOrNull(3)?.trim().orEmpty()
+                    if (device == null || path.isEmpty() || (lun == null && parts.getOrNull(2) != "-")) {
+                        output.write("err usage: flash|read <device> <lun|-> <path>\n".toByteArray())
                     } else if (!usb.hasPermission(device) && !requestPermission(context, usb, device)) {
                         output.write("err permission denied\n".toByteArray())
                     } else {
-                        UsbFlasher(usb, device, output) { reader.readLine()?.trim() == "go" }.run {
+                        UsbFlasher(usb, device, output, lun, isCancelled = { server == null }) {
+                            reader.readLine()?.trim() == "go"
+                        }.run {
                             if (parts[0] == "flash") flash(java.io.File(path)) else readTo(java.io.File(path))
                         }
                     }

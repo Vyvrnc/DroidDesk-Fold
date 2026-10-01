@@ -5,13 +5,14 @@ Without root there is no /dev/sdX; Android hands out USB devices one at a time
 after asking the user. This client talks to UsbBridge in the app.
 
   droiddesk-usb list
-  droiddesk-usb flash IMAGE[.xz|.gz] [DEVICE] [--yes]   write + verify (stable)
-  droiddesk-usb read FILE [DEVICE]                      copy the whole device
+  droiddesk-usb flash IMAGE[.xz|.gz] [DEVICE] [--lun N] [--yes]   write + verify (stable)
+  droiddesk-usb read FILE [DEVICE] [--lun N]                      copy the whole device
   droiddesk-usb exec DEVICE -- COMMAND...               raw usbfs fd for libusb
                                                         tools (experimental)
 
 DEVICE is the name from "list" (/dev/bus/usb/...); it may be left out when
-exactly one mass storage device is attached.
+exactly one mass storage device is attached. --lun picks the slot of a
+multi-slot card reader when more than one card is inserted.
 """
 import os
 import socket
@@ -85,17 +86,19 @@ def ask(question):
         return sys.stdin.readline().strip()
 
 
-def transfer(command, path, dev, assume_yes):
+def transfer(command, path, dev, assume_yes, lun):
     sock = connect()
-    sock.sendall(f"{command} {dev['name']} {path}\n".encode())
+    sock.sendall(f"{command} {dev['name']} {lun if lun is not None else '-'} {path}\n".encode())
     started = time.monotonic()
     phase = "Zápis" if command == "flash" else "Čtení"
     with sock.makefile("r", encoding="utf-8") as lines:
         for line in lines:
             kind, _, rest = line.rstrip("\n").partition(" ")
             if kind == "device":
-                size = int(rest.split()[0])
-                print(f"Zařízení: {describe(dev)}, {human(size)}")
+                fields = rest.split()
+                size = int(fields[0])
+                slot = f", slot {fields[2]} z {fields[3]}" if len(fields) > 3 and fields[3] != "1" else ""
+                print(f"\nZařízení: {describe(dev)}, {human(size)}{slot}")
                 if command == "flash" and not assume_yes:
                     answer = ask(f"VŠECHNA data na tomto zařízení ({human(size)}) budou přepsána.\n"
                                  "Pokračovat? Napiš 'ano': ")
@@ -109,6 +112,9 @@ def transfer(command, path, dev, assume_yes):
                 speed = done / max(time.monotonic() - started, 0.001)
                 share = f"{done * 100 // total:3d} % " if total > 0 else ""
                 print(f"\r{phase}: {share}{human(done)}  {human(speed)}/s   ", end="", flush=True)
+            elif kind == "validate":
+                phase = "Kontrola obrazu"
+                started = time.monotonic()
             elif kind == "verify":
                 print(f"\nOvěřuji zpětným čtením…")
                 phase = "Ověření"
@@ -139,6 +145,13 @@ def raw_exec(dev, command):
 
 
 def main(argv):
+    lun = None
+    if "--lun" in argv:
+        at = argv.index("--lun")
+        if at + 1 >= len(argv) or not argv[at + 1].isdigit():
+            sys.exit("droiddesk-usb: --lun potřebuje číslo slotu")
+        lun = int(argv[at + 1])
+        argv = argv[:at] + argv[at + 2:]
     args = [a for a in argv if a != "--yes"]
     assume_yes = "--yes" in argv
     if not args or args[0] in ("-h", "--help", "help"):
@@ -156,7 +169,7 @@ def main(argv):
         path = os.path.abspath(args[1])
         if command == "flash" and not os.path.isfile(path):
             sys.exit(f"droiddesk-usb: obraz {args[1]} neexistuje")
-        return transfer(command, path, pick(args[2] if len(args) > 2 else None), assume_yes)
+        return transfer(command, path, pick(args[2] if len(args) > 2 else None), assume_yes, lun)
     if command == "exec" and "--" in args and args.index("--") >= 2:
         split = args.index("--")
         return raw_exec(pick(args[1]), args[split + 1:])

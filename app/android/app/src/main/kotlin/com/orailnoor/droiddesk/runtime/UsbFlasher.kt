@@ -10,8 +10,6 @@ import me.jahnen.libaums.core.driver.BlockDeviceDriverFactory
 import me.jahnen.libaums.core.driver.scsi.commands.sense.MediaNotInserted
 import me.jahnen.libaums.core.usb.UsbCommunication
 import me.jahnen.libaums.core.usb.UsbCommunicationFactory
-import org.tukaani.xz.SeekableFileInputStream
-import org.tukaani.xz.SeekableXZInputStream
 import org.tukaani.xz.XZInputStream
 import java.io.BufferedInputStream
 import java.io.File
@@ -32,6 +30,10 @@ class UsbFlasher(
     private val usb: UsbManager,
     private val device: UsbDevice,
     private val output: OutputStream,
+    /** Card reader slot (SCSI LUN); null picks the only populated one. */
+    private val lun: Int?,
+    /** Checked between chunks; true once the bridge is shutting down. */
+    private val isCancelled: () -> Boolean,
     /** Called after the device line; returns false to stop before any write. */
     private val confirm: () -> Boolean,
 ) {
@@ -43,61 +45,77 @@ class UsbFlasher(
 
     private var lastProgress = 0L
 
-    fun flash(image: File) = withBlockDevice { block ->
-        if (!image.isFile) return@withBlockDevice fail("no such image ${image.path}")
-        val capacity = block.blocks * block.blockSize
-        val total = uncompressedSize(image)
-        if (total > capacity) {
-            return@withBlockDevice fail("image is $total bytes, the device only $capacity")
+    fun flash(image: File) {
+        if (!image.isFile) return fail("no such image ${image.path}")
+        // A compressed image is decoded once in full before anything is written:
+        // its size and integrity are only known at the end of the stream, and a
+        // corrupt or oversized image must not get as far as the partition table.
+        val (total, sourceDigest) = if (isCompressed(image)) {
+            line("validate")
+            measure(image) ?: return
+        } else {
+            image.length() to null
         }
-        val digest = MessageDigest.getInstance("SHA-256")
-        val buffer = ByteBuffer.allocate(CHUNK)
-        var written = 0L
-        var lba = 0L
-        openImage(image).use { input ->
-            while (true) {
-                val read = fill(input, buffer.array())
-                if (read <= 0) break
-                if (written + read > capacity) return@withBlockDevice fail("image is larger than the device ($capacity bytes)")
-                digest.update(buffer.array(), 0, read)
-                // The device takes whole blocks; pad the last one with zeros.
-                val padded = (read + block.blockSize - 1) / block.blockSize * block.blockSize
-                java.util.Arrays.fill(buffer.array(), read, padded, 0)
-                buffer.clear().limit(padded)
-                block.write(lba, buffer)
-                lba += padded / block.blockSize
-                written += read
-                progress(written, total)
+        withBlockDevice(
+            precheck = { capacity ->
+                if (total > capacity) "image is $total bytes, the device only $capacity" else null
+            },
+        ) { block ->
+            val digest = MessageDigest.getInstance("SHA-256")
+            val buffer = ByteBuffer.allocate(CHUNK)
+            var written = 0L
+            var lba = 0L
+            openImage(image).use { input ->
+                while (true) {
+                    checkCancelled()
+                    val read = fill(input, buffer.array())
+                    if (read <= 0) break
+                    if (written + read > total) return@withBlockDevice fail("the image changed while flashing")
+                    digest.update(buffer.array(), 0, read)
+                    // The device takes whole blocks; pad the last one with zeros.
+                    val padded = (read + block.blockSize - 1) / block.blockSize * block.blockSize
+                    java.util.Arrays.fill(buffer.array(), read, padded, 0)
+                    buffer.clear().limit(padded)
+                    block.write(lba, buffer)
+                    lba += padded / block.blockSize
+                    written += read
+                    progress(written, total)
+                }
             }
+            val expected = hex(digest.digest())
+            if (sourceDigest != null && sourceDigest != expected) {
+                return@withBlockDevice fail("the image changed while flashing")
+            }
+            line("verify")
+            val check = MessageDigest.getInstance("SHA-256")
+            var verified = 0L
+            lba = 0L
+            while (verified < written) {
+                checkCancelled()
+                val want = minOf(CHUNK.toLong(), written - verified).toInt()
+                val padded = (want + block.blockSize - 1) / block.blockSize * block.blockSize
+                buffer.clear().limit(padded)
+                block.read(lba, buffer)
+                check.update(buffer.array(), 0, want)
+                lba += padded / block.blockSize
+                verified += want
+                progress(verified, written)
+            }
+            val actual = hex(check.digest())
+            if (actual != expected) return@withBlockDevice fail("verify failed: wrote $expected, read back $actual")
+            line("done $expected")
         }
-        val expected = hex(digest.digest())
-        line("verify")
-        val check = MessageDigest.getInstance("SHA-256")
-        var verified = 0L
-        lba = 0L
-        while (verified < written) {
-            val want = minOf(CHUNK.toLong(), written - verified).toInt()
-            val padded = (want + block.blockSize - 1) / block.blockSize * block.blockSize
-            buffer.clear().limit(padded)
-            block.read(lba, buffer)
-            check.update(buffer.array(), 0, want)
-            lba += padded / block.blockSize
-            verified += want
-            progress(verified, written)
-        }
-        val actual = hex(check.digest())
-        if (actual != expected) return@withBlockDevice fail("verify failed: wrote $expected, read back $actual")
-        line("done $expected")
     }
 
     fun readTo(target: File) = withBlockDevice { block ->
-        val total = block.blocks * block.blockSize
+        val total = capacityOf(block)
         val digest = MessageDigest.getInstance("SHA-256")
         val buffer = ByteBuffer.allocate(CHUNK - CHUNK % block.blockSize)
         var done = 0L
         var lba = 0L
         target.outputStream().buffered(CHUNK).use { out ->
             while (done < total) {
+                checkCancelled()
                 val want = minOf(buffer.capacity().toLong(), total - done).toInt()
                 buffer.clear().limit(want)
                 block.read(lba, buffer)
@@ -111,7 +129,21 @@ class UsbFlasher(
         line("done ${hex(digest.digest())}")
     }
 
-    private fun withBlockDevice(action: (BlockDeviceDriver) -> Unit) {
+    /**
+     * libaums 0.10.0 reports READ CAPACITY(10)'s *last* LBA as a signed Int in
+     * `blocks`: the count is one more, read unsigned (up to 2 TiB at 512 B).
+     */
+    private fun capacityOf(block: BlockDeviceDriver): Long =
+        ((block.blocks and 0xFFFFFFFFL) + 1) * block.blockSize
+
+    private fun checkCancelled() {
+        if (isCancelled()) throw java.io.IOException("cancelled: DroidDesk is shutting down")
+    }
+
+    private fun withBlockDevice(
+        precheck: (capacity: Long) -> String? = { null },
+        action: (BlockDeviceDriver) -> Unit,
+    ) {
         val iface = massStorageInterface() ?: return fail("not a USB mass storage device (BOT/SCSI)")
         val endpoints = (0 until iface.endpointCount).map(iface::getEndpoint)
             .filter { it.type == UsbConstants.USB_ENDPOINT_XFER_BULK }
@@ -123,18 +155,31 @@ class UsbFlasher(
             communication = UsbCommunicationFactory.createUsbCommunication(usb, device, iface, epOut, epIn)
             val maxLun = ByteArray(1)
             communication.controlTransfer(161, 254, 0, iface.id, maxLun, 1)
-            // Card readers expose one LUN per slot; take the first with a medium.
-            val block = (0..maxLun[0].toInt()).firstNotNullOfOrNull { lun ->
-                BlockDeviceDriverFactory.createBlockDevice(communication, lun = lun.toByte()).let {
+            // Card readers expose one LUN per slot. Never guess between two
+            // inserted cards: the user has to name the slot.
+            val media = (0..maxLun[0].toInt()).mapNotNull { slot ->
+                BlockDeviceDriverFactory.createBlockDevice(communication, lun = slot.toByte()).let {
                     try {
                         it.init()
-                        it
+                        slot to it
                     } catch (_: MediaNotInserted) {
                         null
                     }
                 }
-            } ?: return fail("no medium in the device")
-            line("device ${block.blocks * block.blockSize} ${block.blockSize}")
+            }
+            val (slot, block) = when {
+                media.isEmpty() -> return fail("no medium in the device")
+                lun != null -> media.firstOrNull { it.first == lun }
+                    ?: return fail("no medium in slot $lun (populated: ${media.joinToString { "${it.first}" }})")
+                media.size > 1 -> return fail(
+                    "several cards inserted, choose one with --lun: " +
+                        media.joinToString { "${it.first} (${capacityOf(it.second)} bytes)" },
+                )
+                else -> media.single()
+            }
+            val capacity = capacityOf(block)
+            precheck(capacity)?.let { return fail(it) }
+            line("device $capacity ${block.blockSize} $slot ${media.size}")
             if (!confirm()) return fail("cancelled")
             action(block)
         } catch (error: Exception) {
@@ -152,22 +197,51 @@ class UsbFlasher(
                 it.interfaceSubclass == 0x06 && it.interfaceProtocol == 0x50
         }
 
-    private fun openImage(image: File): InputStream {
-        val raw = BufferedInputStream(FileInputStream(image), CHUNK)
-        return when (image.extension.lowercase()) {
+    private fun openImage(image: File): InputStream =
+        decoder(image, BufferedInputStream(FileInputStream(image), CHUNK))
+
+    private fun decoder(image: File, raw: InputStream): InputStream =
+        when (image.extension.lowercase()) {
             "xz" -> XZInputStream(raw)
             "gz" -> GZIPInputStream(raw, CHUNK)
             else -> raw
         }
+
+    private fun isCompressed(image: File) = image.extension.lowercase() in setOf("xz", "gz")
+
+    /**
+     * Decodes the whole image without touching the device and returns its
+     * uncompressed size and SHA-256, or reports the error and returns null.
+     * The decoders check their own CRCs, so a truncated or corrupt file fails here.
+     */
+    private fun measure(image: File): Pair<Long, String>? = try {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buffer = ByteArray(CHUNK)
+        var total = 0L
+        val compressed = image.length()
+        val counting = CountingInputStream(FileInputStream(image))
+        decoder(image, BufferedInputStream(counting, CHUNK)).use { input ->
+            while (true) {
+                checkCancelled()
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+                total += read
+                progress(counting.count, compressed)
+            }
+        }
+        total to hex(digest.digest())
+    } catch (error: Exception) {
+        Log.w(TAG, "Image validation failed", error)
+        fail("the image is damaged or not ${image.extension}: ${error.message ?: error.javaClass.simpleName}")
+        null
     }
 
-    /** Uncompressed size, or -1 when it cannot be known up front (.gz). */
-    private fun uncompressedSize(image: File): Long = when (image.extension.lowercase()) {
-        "xz" -> runCatching {
-            SeekableXZInputStream(SeekableFileInputStream(image)).use { it.length() }
-        }.getOrDefault(-1L)
-        "gz" -> -1L
-        else -> image.length()
+    private class CountingInputStream(input: InputStream) : java.io.FilterInputStream(input) {
+        var count = 0L
+        override fun read(): Int = super.read().also { if (it >= 0) count++ }
+        override fun read(b: ByteArray, off: Int, len: Int): Int =
+            super.read(b, off, len).also { if (it > 0) count += it }
     }
 
     private fun fill(input: InputStream, array: ByteArray): Int {
