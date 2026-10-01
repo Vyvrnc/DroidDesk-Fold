@@ -24,6 +24,9 @@ class LinuxRuntime(private val context: Context) {
         private const val SHEBANG_MARKER = ".relocated_text_paths_v3"
         private const val ELF_PATCH_MARKER = ".elf_runpaths_patched"
         private const val DE_MARKER = ".de_installed"
+        // Release asset built by tools/mesa-kgsl/build.sh (tag mesa-kgsl-<version>).
+        private const val MESA_KGSL_VERSION = "26.2.3"
+        private const val MESA_KGSL_SHA256 = "993db4dc3502632ff4e9b78a00c05238bf90b83dc95b4be7fa5ce56cd8e5b05e"
 
         // ELF64 constants
         private const val ELFMAG0: Byte = 0x7f
@@ -281,6 +284,9 @@ class LinuxRuntime(private val context: Context) {
         val timeZone = java.util.TimeZone.getDefault().id
         val locale = java.util.Locale.getDefault()
         val localeName = "${locale.language}_${locale.country}.UTF-8"
+        val mesaKgslUrl = "https://github.com/Vyvrnc/DroidDesk-Fold/releases/download/" +
+            "mesa-kgsl-$MESA_KGSL_VERSION/mesa-kgsl-$MESA_KGSL_VERSION-arm64.tar.xz"
+        val mesaKgslSha256 = MESA_KGSL_SHA256
         val setupScript = File(binDir, "debian-setup")
         setupScript.writeText(
             """
@@ -296,7 +302,7 @@ class LinuxRuntime(private val context: Context) {
             set -e
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
-            apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates dbus-x11
+            apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates dbus-x11 xz-utils
 
             if [ -f "/usr/share/zoneinfo/$timeZone" ]; then
                 ln -sf "/usr/share/zoneinfo/$timeZone" /etc/localtime
@@ -339,6 +345,79 @@ class LinuxRuntime(private val context: Context) {
             export WEBKIT_DISABLE_COMPOSITING_MODE=1
             DROIDDESK_GUI_ENV
 
+            # proot-distro's termux-profile.sh appends the Termux bin directory to
+            # PATH. Its bionic binaries cannot link inside Debian ("CANNOT LINK
+            # liblzma.so.5" when xz was missing), so drop it again afterwards.
+            cat > /etc/profile.d/zz-droiddesk-path.sh <<'DROIDDESK_PATH'
+            droiddesk_path=
+            IFS=:
+            for droiddesk_dir in ${'$'}PATH; do
+                case "${'$'}droiddesk_dir" in
+                    */files/usr/bin|*/files/usr/bin/*) ;;
+                    *) droiddesk_path="${'$'}{droiddesk_path:+${'$'}droiddesk_path:}${'$'}droiddesk_dir" ;;
+                esac
+            done
+            unset IFS droiddesk_dir
+            PATH="${'$'}droiddesk_path"
+            unset droiddesk_path
+            DROIDDESK_PATH
+
+            # Hardware OpenGL: Debian's Mesa cannot drive Adreno through KGSL, so a
+            # separate build (Zink over Turnip/KGSL, tools/mesa-kgsl) goes to
+            # /opt/mesa-kgsl and gpu-run uses it per app. A failed download keeps
+            # llvmpipe.
+            if [ -e /dev/kgsl-3d0 ] && [ ! -d /opt/mesa-kgsl ]; then
+                if curl -fsSLo /tmp/mesa-kgsl.tar.xz "$mesaKgslUrl" &&
+                    echo "$mesaKgslSha256  /tmp/mesa-kgsl.tar.xz" | sha256sum -c -; then
+                    tar -C / -xJf /tmp/mesa-kgsl.tar.xz
+                else
+                    echo "Hardware OpenGL not installed (download failed), software rendering stays"
+                fi
+                rm -f /tmp/mesa-kgsl.tar.xz
+            fi
+            cat > /usr/local/bin/gpu-run <<'DROIDDESK_GPU_RUN'
+            #!/bin/sh
+            # Runs one program with hardware OpenGL from /opt/mesa-kgsl.
+            M=/opt/mesa-kgsl
+            L=${'$'}M/lib/aarch64-linux-gnu
+            [ -d "${'$'}L" ] || exec "${'$'}@"
+            unset LIBGL_ALWAYS_SOFTWARE
+            export LD_LIBRARY_PATH="${'$'}L${'$'}{LD_LIBRARY_PATH:+:${'$'}LD_LIBRARY_PATH}"
+            export LIBGL_DRIVERS_PATH="${'$'}L/dri"
+            export __GLX_VENDOR_LIBRARY_NAME=mesa
+            export __EGL_VENDOR_LIBRARY_FILENAMES="${'$'}M/share/glvnd/egl_vendor.d/50_mesa.json"
+            export GBM_BACKENDS_PATH="${'$'}L/gbm"
+            export MESA_LOADER_DRIVER_OVERRIDE=zink
+            export GALLIUM_DRIVER=zink
+            export VK_ICD_FILENAMES="${'$'}M/share/vulkan/icd.d/freedreno_icd.aarch64.json"
+            export VK_DRIVER_FILES="${'$'}VK_ICD_FILENAMES"
+            # Zink's threaded context flushes into a kopper swapchain that is not
+            # acquired without DRI3 and crashes (OrcaSlicer "New Project").
+            export GALLIUM_THREAD=0
+            exec "${'$'}@"
+            DROIDDESK_GPU_RUN
+            chmod 755 /usr/local/bin/gpu-run
+            cat > /usr/local/bin/droiddesk-gpu <<'DROIDDESK_GPU'
+            #!/bin/sh
+            # Switches hardware OpenGL for menu entries: droiddesk-gpu on|off|status
+            case "${'$'}1" in
+                on) rm -f /etc/droiddesk/gpu-off ;;
+                off) mkdir -p /etc/droiddesk && touch /etc/droiddesk/gpu-off ;;
+                status|"") ;;
+                *) echo "Usage: droiddesk-gpu on|off|status" >&2; exit 2 ;;
+            esac
+            if [ ! -d /opt/mesa-kgsl ]; then
+                echo "Hardware OpenGL: not installed (run debian-setup)"
+            elif [ -f /etc/droiddesk/gpu-off ]; then
+                echo "Hardware OpenGL: off"
+            else
+                echo "Hardware OpenGL: on"
+            fi
+            [ -n "${'$'}1" ] && [ "${'$'}1" != status ] && /usr/local/sbin/droiddesk-menu-sync
+            exit 0
+            DROIDDESK_GPU
+            chmod 755 /usr/local/bin/droiddesk-gpu
+
             # Mirror Debian's menu entries into the XFCE menu on the Termux side.
             # Files go straight into applications/: garcon ignores a new subfolder.
             cat > /usr/local/sbin/droiddesk-menu-sync <<'DROIDDESK_MENU_SYNC'
@@ -346,6 +425,10 @@ class LinuxRuntime(private val context: Context) {
             RF="${File(prefixDir, "var/lib/proot-distro/containers/debian/rootfs").absolutePath}"
             OUT="${File(homeDir, ".local/share/applications").absolutePath}"
             RUN="${File(binDir, "debian-run").absolutePath}"
+            GPU=
+            if [ -d /opt/mesa-kgsl ] && [ ! -f /etc/droiddesk/gpu-off ] && [ -w /dev/kgsl-3d0 ]; then
+                GPU=/usr/local/bin/gpu-run
+            fi
             mkdir -p "${'$'}OUT"; rm -f "${'$'}OUT"/debian-*.desktop
             find_icon() {
                 case "${'$'}1" in /*) [ -f "${'$'}1" ] && echo "${'$'}RF${'$'}1"; return;; esac
@@ -366,7 +449,7 @@ class LinuxRuntime(private val context: Context) {
                     grep -vE '^(Exec|TryExec|Icon|Name(\[[^]]*\])?|DBusActivatable|Actions)=' > "${'$'}out"
                 {
                     echo "Name=${'$'}name (Debian)"
-                    echo "Exec=${'$'}RUN dbus-launch --exit-with-session ${'$'}exec_line"
+                    echo "Exec=${'$'}RUN ${'$'}GPU dbus-launch --exit-with-session ${'$'}exec_line"
                     echo "Icon=$(find_icon "${'$'}icon")"
                 } >> "${'$'}out"
             done
@@ -382,6 +465,103 @@ class LinuxRuntime(private val context: Context) {
             """.trimIndent() + "\n",
         )
         setupScript.setExecutable(true, false)
+    }
+
+    /**
+     * Session tweaks that need a running xfconfd, so they run from XFCE's
+     * autostart instead of being written into the profile XML. The window
+     * manager part runs once per home; the battery part repairs the dock
+     * whenever genmon is installed but its plugin is missing.
+     */
+    private fun writeXfceTweaks() {
+        try {
+            val batteryScript = File(binDir, "droiddesk-battery")
+            batteryScript.writeText(
+                """
+                #!${File(binDir, "bash").absolutePath}
+                # Output for the dock's genmon plugin; DroidDeskService writes the file.
+                read -r level charging 2>/dev/null < "${tmpDir.absolutePath}/droiddesk-battery" || exit 0
+                if [ "${'$'}charging" = 1 ]; then
+                    echo "<txt>⚡${'$'}level %</txt><tool>Baterie ${'$'}level %, nabíjí se</tool>"
+                else
+                    echo "<txt>${'$'}level %</txt><tool>Baterie ${'$'}level %</tool>"
+                fi
+                """.trimIndent() + "\n",
+            )
+            batteryScript.setExecutable(true, false)
+
+            val tweaksScript = File(binDir, "droiddesk-xfce-tweaks")
+            tweaksScript.writeText(
+                """
+                #!${File(binDir, "bash").absolutePath}
+                marker="${'$'}HOME/.config/droiddesk/xfce-tweaks-v1"
+                if [ ! -f "${'$'}marker" ]; then
+                    # Dragging a window to the edge should tile it, not jump to the
+                    # next workspace. Termux:X11 composites on its own, and xfwm4's
+                    # software compositor only costs CPU here.
+                    xfconf-query -c xfwm4 -p /general/wrap_windows -n -t bool -s false
+                    xfconf-query -c xfwm4 -p /general/use_compositing -n -t bool -s false
+                    # Only extend an existing custom shortcut set: creating one with
+                    # four keys would replace all default xfwm4 shortcuts.
+                    if xfconf-query -c xfce4-keyboard-shortcuts -p /xfwm4/custom/override >/dev/null 2>&1; then
+                        for pair in "<Super>Left=tile_left_key" "<Super>Right=tile_right_key" \
+                            "<Super>Up=maximize_window_key" "<Super>Down=tile_down_key"; do
+                            key="/xfwm4/custom/${'$'}{pair%%=*}"
+                            xfconf-query -c xfce4-keyboard-shortcuts -p "${'$'}key" >/dev/null 2>&1 ||
+                                xfconf-query -c xfce4-keyboard-shortcuts -p "${'$'}key" -n -t string -s "${'$'}{pair#*=}"
+                        done
+                    fi
+                    mkdir -p "${'$'}(dirname "${'$'}marker")" && touch "${'$'}marker"
+                fi
+
+                # Battery in the dock, just before the clock (plugin 3).
+                if [ -f "${File(prefixDir, "lib/xfce4/panel/plugins/libgenmon.so").absolutePath}" ] &&
+                    ! xfconf-query -c xfce4-panel -p /plugins/plugin-26 >/dev/null 2>&1; then
+                    xfconf-query -c xfce4-panel -p /plugins/plugin-26 -n -t string -s genmon
+                    xfconf-query -c xfce4-panel -p /plugins/plugin-26/command -n -t string -s "${batteryScript.absolutePath}"
+                    xfconf-query -c xfce4-panel -p /plugins/plugin-26/use-label -n -t bool -s false
+                    xfconf-query -c xfce4-panel -p /plugins/plugin-26/update-period -n -t int -s 30000
+                    args=()
+                    for id in ${'$'}(xfconf-query -c xfce4-panel -p /panels/panel-2/plugin-ids | grep -E '^[0-9]+${'$'}'); do
+                        [ "${'$'}id" = 26 ] && continue
+                        [ "${'$'}id" = 3 ] && args+=(-t int -s 26)
+                        args+=(-t int -s "${'$'}id")
+                    done
+                    xfconf-query -c xfce4-panel -p /panels/panel-2/plugin-ids -a "${'$'}{args[@]}"
+                    xfce4-panel -r
+                fi
+                """.trimIndent() + "\n",
+            )
+            tweaksScript.setExecutable(true, false)
+
+            val autostartDir = File(homeDir, ".config/autostart").apply { mkdirs() }
+            File(autostartDir, "droiddesk-xfce-tweaks.desktop").writeText(
+                """
+                [Desktop Entry]
+                Type=Application
+                Name=DroidDesk XFCE tweaks
+                Exec=${tweaksScript.absolutePath}
+                NoDisplay=true
+                """.trimIndent() + "\n",
+            )
+            // termux-battery-status needs the Termux:API app, which DroidDesk does
+            // not have, so the power manager's helper hangs forever. Keep a user's
+            // own override if there is one.
+            val powerManager = File(autostartDir, "xfce4-power-manager.desktop")
+            if (!powerManager.exists()) {
+                powerManager.writeText(
+                    """
+                    [Desktop Entry]
+                    Type=Application
+                    Name=Power Manager
+                    Exec=xfce4-power-manager
+                    Hidden=true
+                    """.trimIndent() + "\n",
+                )
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to write XFCE tweaks: ${e.message}")
+        }
     }
 
     private fun clearProotDownloadCache() {
@@ -1554,7 +1734,7 @@ class LinuxRuntime(private val context: Context) {
             "lxqt" -> "lxqt qterminal pcmanfm-qt featherpad"
             "mate" -> "mate mate-terminal"
             "kde" -> "plasma-desktop konsole dolphin"
-            else -> "xfce4 xfce4-terminal xfce4-whiskermenu-plugin xfce4-notifyd thunar mousepad"
+            else -> "xfce4 xfce4-terminal xfce4-whiskermenu-plugin xfce4-notifyd xfce4-genmon-plugin thunar mousepad"
         }
         if (!installPackageGroup("pkg install -y $desktopPackages")) {
             Log.e(TAG, "$selectedDesktop package install failed")
@@ -1930,6 +2110,7 @@ class LinuxRuntime(private val context: Context) {
                 homeDir = homeDir,
                 python = File(prefixDir, "bin/python3"),
             )
+            writeXfceTweaks()
         }
 
         // X11ServerService owns this socket. Never delete it from the client runtime.

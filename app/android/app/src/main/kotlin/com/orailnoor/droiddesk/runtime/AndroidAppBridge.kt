@@ -314,7 +314,13 @@ object AndroidAppBridge {
             val safeName = packageName.replace(Regex("[^A-Za-z0-9_.-]"), "_")
             (30 + index) to "droiddesk-android-$safeName.desktop"
         }
-        val pluginIds = listOf(20, 21, 22, 23) + dock.map { it.first } + listOf(24, 2, 3, 25)
+        // Plugin 26 is the battery (genmon), added by droiddesk-xfce-tweaks.
+        val battery = if (File(context.filesDir, "usr/lib/xfce4/panel/plugins/libgenmon.so").exists()) {
+            listOf(26)
+        } else {
+            emptyList()
+        }
+        val pluginIds = listOf(20, 21, 22, 23) + dock.map { it.first } + listOf(24, 2) + battery + listOf(3, 25)
         return buildString {
             for (id in 30..37) {
                 append("xfconf-query -c xfce4-panel -p /plugins/plugin-$id -r >/dev/null 2>&1 || true; ")

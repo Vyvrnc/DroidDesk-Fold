@@ -52,3 +52,9 @@ and an upstream Mesa report (show the text to Matěj first).
 Build reproducibly (Docker, arm64 trixie under emulation) -> release asset -> debian-setup unpacks it to /opt/mesa-kgsl;
 app toggle "HW acceleration" switches droiddesk-gui.sh to these variables only if /opt/mesa-kgsl exists and
 /dev/kgsl-3d0 is rw; fallback llvmpipe.
+
+## Released asset
+Release `mesa-kgsl-26.2.3`, asset `mesa-kgsl-26.2.3-arm64.tar.xz`,
+sha256 993db4dc3502632ff4e9b78a00c05238bf90b83dc95b4be7fa5ce56cd8e5b05e (6.7 MB, ~45 MB unpacked).
+Built natively on the Fold 7 with the options above (subproject-extras excluded); `build.sh` is the
+reproducible path for the next version. `MESA_KGSL_SHA256` in LinuxRuntime.kt must match the asset.

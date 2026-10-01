@@ -5,11 +5,14 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.ServiceConnection
 import android.content.pm.ServiceInfo
+import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -18,6 +21,7 @@ import androidx.core.app.ServiceCompat
 import com.orailnoor.droiddesk.MainActivity
 import com.orailnoor.droiddesk.runtime.AndroidAppBridge
 import com.orailnoor.droiddesk.x11.X11ServerService
+import java.io.File
 
 /**
  * Foreground service that keeps the Linux runtime alive.
@@ -46,6 +50,26 @@ class DroidDeskService : Service() {
     }
     private var x11Bound = false
 
+    // XFCE has no battery source here: xfce4-power-manager waits forever on
+    // termux-api, which needs the Termux:API app. Publish the level to a file
+    // that the dock's genmon plugin reads (droiddesk-battery).
+    private val batteryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+            val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
+            if (level < 0 || scale <= 0) return
+            val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+            val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                status == BatteryManager.BATTERY_STATUS_FULL
+            try {
+                File(filesDir, "tmp").mkdirs()
+                File(filesDir, "tmp/droiddesk-battery")
+                    .writeText("${level * 100 / scale} ${if (charging) 1 else 0}\n")
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         AndroidAppBridge.start(this)
@@ -56,6 +80,7 @@ class DroidDeskService : Service() {
             x11Connection,
             Context.BIND_AUTO_CREATE or Context.BIND_IMPORTANT,
         )
+        registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -78,6 +103,7 @@ class DroidDeskService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        unregisterReceiver(batteryReceiver)
         if (x11Bound) {
             unbindService(x11Connection)
             x11Bound = false
