@@ -468,6 +468,31 @@ class LinuxRuntime(private val context: Context) {
             DROIDDESK_GPU
             chmod 755 /usr/local/bin/droiddesk-gpu
 
+            # droiddesk-open from Debian: translate the container path to the host
+            # path, then hand it to the Termux-side bridge client.
+            cat > /usr/local/bin/droiddesk-open <<'DROIDDESK_OPEN'
+            #!/bin/sh
+            [ ${'$'}# -ge 1 ] || { echo "Usage: droiddesk-open FILE|URL" >&2; exit 2; }
+            for target; do :; done
+            case "${'$'}target" in
+                file://*) target="${'$'}{target#file://}" ;;
+                [A-Za-z]*:*) url=1 ;;
+            esac
+            if [ -z "${'$'}url" ]; then
+                target=${'$'}(realpath -- "${'$'}target") || exit 1
+                case "${'$'}target" in
+                    /tmp/*) target="${tmpDir.absolutePath}/${'$'}{target#/tmp/}" ;;
+                    /storage/*|/sdcard/*|/data/*) ;;
+                    *) target="${File(prefixDir, "var/lib/proot-distro/containers/debian/rootfs").absolutePath}${'$'}target" ;;
+                esac
+            fi
+            LD_LIBRARY_PATH="${File(prefixDir, "lib").absolutePath}" exec "${File(binDir, "python3").absolutePath}" \
+                "${File(homeDir, ".local/bin/droiddesk-launch-android-app.py").absolutePath}" "open:${'$'}target"
+            DROIDDESK_OPEN
+            chmod 755 /usr/local/bin/droiddesk-open
+            # Without xdg-utils, let "open URL/file" in Debian apps reach Android.
+            [ -e /usr/bin/xdg-open ] || ln -sf /usr/local/bin/droiddesk-open /usr/local/bin/xdg-open
+
             # Mirror Debian's menu entries into the XFCE menu on the Termux side.
             # Files go straight into applications/: garcon ignores a new subfolder.
             cat > /usr/local/sbin/droiddesk-menu-sync <<'DROIDDESK_MENU_SYNC'
@@ -537,6 +562,49 @@ class LinuxRuntime(private val context: Context) {
                 """.trimIndent() + "\n",
             )
             batteryScript.setExecutable(true, false)
+
+            // Opens a file or URL in an Android app through AndroidAppBridge.
+            val bridgeClient = File(homeDir, ".local/bin/droiddesk-launch-android-app.py")
+            val openScript = File(binDir, "droiddesk-open")
+            openScript.writeText(
+                """
+                #!${File(binDir, "bash").absolutePath}
+                # droiddesk-open FILE|URL — open in an Android app. Leading options
+                # (termux-open's --view, --send, --content-type X) are ignored.
+                [ ${'$'}# -ge 1 ] || { echo "Usage: droiddesk-open FILE|URL" >&2; exit 2; }
+                for target; do :; done
+                case "${'$'}target" in
+                    file://*) target="${'$'}{target#file://}" ;;
+                    [A-Za-z]*:*) exec "${File(binDir, "python3").absolutePath}" "${bridgeClient.absolutePath}" "open:${'$'}target" ;;
+                esac
+                target=${'$'}(realpath -- "${'$'}target") || exit 1
+                exec "${File(binDir, "python3").absolutePath}" "${bridgeClient.absolutePath}" "open:${'$'}target"
+                """.trimIndent() + "\n",
+            )
+            openScript.setExecutable(true, false)
+            // termux-open broadcasts to the Termux app, which is not installed.
+            // termux-tools upgrades restore it, so it is rewritten on every start.
+            File(binDir, "termux-open").let { termuxOpen ->
+                termuxOpen.delete()
+                termuxOpen.writeText(
+                    "#!${File(binDir, "bash").absolutePath}\nexec \"${openScript.absolutePath}\" \"${'$'}@\"\n",
+                )
+                termuxOpen.setExecutable(true, false)
+            }
+            File(homeDir, ".local/share/applications").mkdirs()
+            File(homeDir, ".local/share/applications/droiddesk-open.desktop").writeText(
+                """
+                [Desktop Entry]
+                Type=Application
+                Name=Otevřít v Androidu
+                Comment=Open with an Android app
+                Exec=${openScript.absolutePath} %f
+                Icon=phone
+                NoDisplay=true
+                Terminal=false
+                MimeType=application/pdf;image/jpeg;image/png;image/gif;image/webp;video/mp4;video/x-matroska;video/webm;audio/mpeg;audio/ogg;audio/flac;audio/x-wav;text/plain;text/html;text/csv;application/zip;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.openxmlformats-officedocument.presentationml.presentation;application/msword;application/vnd.ms-excel;application/vnd.android.package-archive;
+                """.trimIndent() + "\n",
+            )
 
             val tweaksScript = File(binDir, "droiddesk-xfce-tweaks")
             tweaksScript.writeText(

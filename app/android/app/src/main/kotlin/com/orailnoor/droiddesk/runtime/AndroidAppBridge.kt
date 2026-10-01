@@ -10,6 +10,8 @@ import android.net.LocalSocket
 import android.net.Uri
 import android.provider.Settings
 import android.util.Log
+import android.webkit.MimeTypeMap
+import androidx.core.content.FileProvider
 import java.io.File
 import kotlin.concurrent.thread
 
@@ -352,6 +354,8 @@ object AndroidAppBridge {
                 val command = client.inputStream.bufferedReader().readLine()?.trim().orEmpty()
                 if (command.startsWith("action:")) {
                     launchSystemAction(context, command.removePrefix("action:"))
+                } else if (command.startsWith("open:")) {
+                    openInAndroid(context, command.removePrefix("open:"))
                 } else {
                     launchPackage(context, command)
                 }
@@ -370,6 +374,38 @@ object AndroidAppBridge {
         return runCatching { context.startActivity(intent); true }
             .onFailure { Log.w(TAG, "Could not launch Android package $packageName", it) }
             .getOrDefault(false)
+    }
+
+    /**
+     * droiddesk-open: a URL opens in its Android handler, a file (absolute host
+     * path) goes out as a content:// URI. termux-open cannot do this here: it
+     * broadcasts to the Termux app, which is not installed.
+     */
+    private fun openInAndroid(context: Context, target: String) {
+        val intent = if (Regex("^[A-Za-z][A-Za-z0-9+.-]*:").containsMatchIn(target) &&
+            !target.startsWith("file:")
+        ) {
+            Intent(Intent.ACTION_VIEW, Uri.parse(target))
+        } else {
+            val file = File(Uri.parse(target).path ?: target).canonicalFile
+            if (!file.isFile) {
+                Log.w(TAG, "droiddesk-open: no such file $file")
+                return
+            }
+            val uri = runCatching {
+                FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+            }.getOrElse {
+                Log.w(TAG, "droiddesk-open: $file is outside the shareable paths", it)
+                return
+            }
+            val type = MimeTypeMap.getSingleton()
+                .getMimeTypeFromExtension(file.extension.lowercase()) ?: "*/*"
+            Intent(Intent.ACTION_VIEW).setDataAndType(uri, type)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        val chooser = Intent.createChooser(intent, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { context.startActivity(chooser) }
+            .onFailure { Log.w(TAG, "droiddesk-open: nothing can open $target", it) }
     }
 
     fun launchSystemAction(context: Context, action: String) {

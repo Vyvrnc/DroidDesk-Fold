@@ -89,6 +89,16 @@
             android:name="com.samsung.android.multidisplay.keep_process_alive"
             android:value="true" />
 
+        <!-- droiddesk-open: hands Linux files to Android apps as content:// URIs. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/droiddesk_open_paths" />
+        </provider>
 
     </application>
 
