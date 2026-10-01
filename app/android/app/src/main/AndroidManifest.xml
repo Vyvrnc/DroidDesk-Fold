@@ -3,6 +3,8 @@
     <!-- Network: download rootfs, apt packages -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- droiddesk-usb: flash drives and card readers through UsbBridge. -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
     <!-- Keep Linux processes alive -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

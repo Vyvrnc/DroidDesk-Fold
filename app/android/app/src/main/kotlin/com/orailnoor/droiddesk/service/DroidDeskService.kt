@@ -23,6 +23,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.orailnoor.droiddesk.MainActivity
 import com.orailnoor.droiddesk.runtime.AndroidAppBridge
+import com.orailnoor.droiddesk.runtime.UsbBridge
 import com.orailnoor.droiddesk.x11.X11ServerService
 import java.io.File
 
@@ -112,6 +113,7 @@ class DroidDeskService : Service() {
     override fun onCreate() {
         super.onCreate()
         AndroidAppBridge.start(this)
+        UsbBridge.start(this)
         createNotificationChannel()
         acquireWakeLock()
         x11Bound = bindService(
@@ -154,6 +156,7 @@ class DroidDeskService : Service() {
             x11Bound = false
         }
         AndroidAppBridge.stop()
+        UsbBridge.stop()
         releaseWakeLock()
         super.onDestroy()
     }

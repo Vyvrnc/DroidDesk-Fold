@@ -493,6 +493,38 @@ class LinuxRuntime(private val context: Context) {
             # Without xdg-utils, let "open URL/file" in Debian apps reach Android.
             [ -e /usr/bin/xdg-open ] || ln -sf /usr/local/bin/droiddesk-open /usr/local/bin/xdg-open
 
+            # droiddesk-usb from Debian: the app reads/writes host paths, and the
+            # raw "exec" command runs its program back inside Debian.
+            cat > /usr/local/bin/droiddesk-usb <<'DROIDDESK_USB'
+            #!/bin/sh
+            host_path() {
+                p=${'$'}(realpath -m -- "${'$'}1")
+                case "${'$'}p" in
+                    /tmp/*) echo "${tmpDir.absolutePath}/${'$'}{p#/tmp/}" ;;
+                    /storage/*|/sdcard/*|/data/*) echo "${'$'}p" ;;
+                    *) echo "${File(prefixDir, "var/lib/proot-distro/containers/debian/rootfs").absolutePath}${'$'}p" ;;
+                esac
+            }
+            client() {
+                LD_LIBRARY_PATH="${File(prefixDir, "lib").absolutePath}" exec "${File(binDir, "python3").absolutePath}" \
+                    "${File(binDir, "droiddesk-usb.py").absolutePath}" "${'$'}@"
+            }
+            case "${'$'}1" in
+                flash|read)
+                    [ -n "${'$'}2" ] || client "${'$'}@"
+                    command=${'$'}1 path=${'$'}(host_path "${'$'}2")
+                    shift 2
+                    client "${'$'}command" "${'$'}path" "${'$'}@" ;;
+                exec)
+                    device=${'$'}2
+                    shift 2
+                    [ "${'$'}1" = -- ] && shift
+                    client exec "${'$'}device" -- "${File(binDir, "debian-run").absolutePath}" "${'$'}@" ;;
+                *) client "${'$'}@" ;;
+            esac
+            DROIDDESK_USB
+            chmod 755 /usr/local/bin/droiddesk-usb
+
             # Mirror Debian's menu entries into the XFCE menu on the Termux side.
             # Files go straight into applications/: garcon ignores a new subfolder.
             cat > /usr/local/sbin/droiddesk-menu-sync <<'DROIDDESK_MENU_SYNC'
@@ -562,6 +594,19 @@ class LinuxRuntime(private val context: Context) {
                 """.trimIndent() + "\n",
             )
             batteryScript.setExecutable(true, false)
+
+            // USB flash drives and card readers through UsbBridge.
+            val usbClient = File(binDir, "droiddesk-usb.py")
+            context.assets.open("droiddesk-usb.py").use { input ->
+                usbClient.outputStream().use(input::copyTo)
+            }
+            File(binDir, "droiddesk-usb").let { usbCommand ->
+                usbCommand.writeText(
+                    "#!${File(binDir, "bash").absolutePath}\n" +
+                        "exec \"${File(binDir, "python3").absolutePath}\" \"${usbClient.absolutePath}\" \"${'$'}@\"\n",
+                )
+                usbCommand.setExecutable(true, false)
+            }
 
             // Opens a file or URL in an Android app through AndroidAppBridge.
             val bridgeClient = File(homeDir, ".local/bin/droiddesk-launch-android-app.py")
