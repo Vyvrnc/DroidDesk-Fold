@@ -126,13 +126,13 @@ class InputConnectionWrapper implements InputConnection {
 
     @Override
     public boolean setComposingText(CharSequence text, int newCursorPosition) {
-        Log.d(TAG, "setComposingText(" + text + ", " + newCursorPosition + ")");
+        Log.d(TAG, "setComposingText()");
         return wrapped.setComposingText(text, newCursorPosition);
     }
 
     @Override
     public boolean setComposingText(@NonNull CharSequence text, int newCursorPosition, TextAttribute textAttribute) {
-        Log.d(TAG, "setComposingText(" + text + ", " + newCursorPosition + ", " + textAttribute + ")");
+        Log.d(TAG, "setComposingText()");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             return wrapped.setComposingText(text, newCursorPosition, textAttribute);
         } else return false;
@@ -160,13 +160,13 @@ class InputConnectionWrapper implements InputConnection {
 
     @Override
     public boolean commitText(CharSequence text, int newCursorPosition) {
-        Log.d(TAG, "commitText(" + text + ", " + newCursorPosition + ")");
+        Log.d(TAG, "commitText()");
         return wrapped.commitText(text, newCursorPosition);
     }
 
     @Override
     public boolean commitText(@NonNull CharSequence text, int newCursorPosition, TextAttribute textAttribute) {
-        Log.d(TAG, "commitText(" + text + ", " + newCursorPosition + ", " + textAttribute + ")");
+        Log.d(TAG, "commitText()");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             return wrapped.commitText(text, newCursorPosition, textAttribute);
         } else return false;
@@ -174,13 +174,13 @@ class InputConnectionWrapper implements InputConnection {
 
     @Override
     public boolean commitCompletion(CompletionInfo text) {
-        Log.d(TAG, "commitCompletion(" + text + ")");
+        Log.d(TAG, "commitCompletion()");
         return wrapped.commitCompletion(text);
     }
 
     @Override
     public boolean commitCorrection(CorrectionInfo correctionInfo) {
-        Log.d(TAG, "commitCorrection(" + correctionInfo + ")");
+        Log.d(TAG, "commitCorrection()");
         return wrapped.commitCorrection(correctionInfo);
     }
 
@@ -216,7 +216,7 @@ class InputConnectionWrapper implements InputConnection {
 
     @Override
     public boolean sendKeyEvent(KeyEvent event) {
-        Log.d(TAG, "sendKeyEvent(" + event + ")");
+        Log.d(TAG, "sendKeyEvent(action=" + event.getAction() + ")");
         return wrapped.sendKeyEvent(event);
     }
 
@@ -242,13 +242,13 @@ class InputConnectionWrapper implements InputConnection {
 
     @Override
     public boolean performPrivateCommand(String action, Bundle data) {
-        Log.d(TAG, "performPrivateCommand(" + action + ", " + data + ")");
+        Log.d(TAG, "performPrivateCommand()");
         return wrapped.performPrivateCommand(action, data);
     }
 
     @Override
     public void performHandwritingGesture(@NonNull HandwritingGesture gesture, Executor executor, IntConsumer consumer) {
-        Log.d(TAG, "performHandwritingGesture(" + gesture + ", " + executor + ", " + consumer + ")");
+        Log.d(TAG, "performHandwritingGesture()");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             wrapped.performHandwritingGesture(gesture, executor, consumer);
         }
@@ -256,7 +256,7 @@ class InputConnectionWrapper implements InputConnection {
 
     @Override
     public boolean previewHandwritingGesture(@NonNull PreviewableHandwritingGesture gesture, CancellationSignal cancellationSignal) {
-        Log.d(TAG, "previewHandwritingGesture(" + gesture + ", " + cancellationSignal + ")");
+        Log.d(TAG, "previewHandwritingGesture()");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             return wrapped.previewHandwritingGesture(gesture, cancellationSignal);
         } else return false;
@@ -298,7 +298,7 @@ class InputConnectionWrapper implements InputConnection {
 
     @Override
     public boolean commitContent(@NonNull InputContentInfo inputContentInfo, int flags, Bundle opts) {
-        Log.d(TAG, "commitContent(" + inputContentInfo + ", " + flags + ", " + opts + ")");
+        Log.d(TAG, "commitContent()");
         return wrapped.commitContent(inputContentInfo, flags, opts);
     }
 
@@ -324,7 +324,7 @@ class InputConnectionWrapper implements InputConnection {
                                @NonNull CharSequence text,
                                int newCursorPosition,
                                TextAttribute textAttribute) {
-        Log.d(TAG, "replaceText(" + start + ", " + end + ", " + text + ", " + newCursorPosition + ", " + textAttribute + ")");
+        Log.d(TAG, "replaceText()");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             return wrapped.replaceText(start, end, text, newCursorPosition, textAttribute);
         } else return false;
@@ -485,14 +485,14 @@ public class LorieView extends SurfaceView implements InputStub {
          *
          * @noinspection SameReturnValue*/
         boolean replaceText(CharSequence newText, boolean reuse) {
-            int oldLen = currentComposingText != null ? currentComposingText.length() : 0;
-            int newLen = newText != null ? newText.length() : 0;
+            int oldLen = currentComposingText != null ? Character.codePointCount(currentComposingText, 0, currentComposingText.length()) : 0;
+            int newLen = newText != null ? Character.codePointCount(newText, 0, newText.length()) : 0;
             if (oldLen > 0 && newLen > 0 && (currentComposingText.toString().startsWith(newText.toString())
                     || newText.toString().startsWith(currentComposingText.toString()))) {
                 for (int i=0; i < oldLen - newLen; i++)
                     sendKey(KeyEvent.KEYCODE_DEL);
-                for (int i=oldLen; i<newLen; i++)
-                    sendTextEvent(String.valueOf(newText.charAt(i)).getBytes(UTF_8));
+                if (newLen > oldLen)
+                    sendTextEvent(newText.toString().substring(Character.offsetByCodePoints(newText, 0, oldLen)).getBytes(UTF_8));
             } else {
                 for (int i = 0; i < oldLen; i++)
                     sendKey(KeyEvent.KEYCODE_DEL);
@@ -902,7 +902,7 @@ public class LorieView extends SurfaceView implements InputStub {
         if (clip != null) {
             String text = String.valueOf(clipboard.getText());
             sendClipboardEvent(text.getBytes(UTF_8));
-            Log.d("CLIP", "sending clipboard contents: " + text);
+            Log.d("CLIP", "sending clipboard contents, length=" + text.length());
         }
     }
 

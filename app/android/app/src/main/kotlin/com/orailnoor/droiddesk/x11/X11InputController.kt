@@ -44,6 +44,7 @@ class X11InputController(private val lorieView: LorieView) {
     }
 
     fun dispose() {
+        inputHandler.dispose()
         MainActivity.getInstance().setKeyHandler(null)
         lorieView.setOnTouchListener(null)
         lorieView.setOnGenericMotionListener(null)

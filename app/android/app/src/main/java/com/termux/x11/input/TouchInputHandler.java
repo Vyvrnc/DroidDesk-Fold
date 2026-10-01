@@ -85,6 +85,8 @@ public class TouchInputHandler {
     private final HardwareMouseListener mHMListener = new HardwareMouseListener();
     private final DexListener mDexListener;
     private final TouchInputHandler mTouchpadHandler;
+    private final InputManager mInputManager;
+    private final InputManager.InputDeviceListener mInputDeviceListener;
 
     /** Used to disambiguate a 2-finger gesture as a swipe or a pinch. */
     private final SwipeDetector mSwipePinchDetector;
@@ -209,7 +211,8 @@ public class TouchInputHandler {
         mTouchpadHandler = isTouchpad ? null : new TouchInputHandler(activity, mRenderData, injector, true);
 
         refreshInputDevices();
-        ((InputManager) mActivity.getSystemService(Context.INPUT_SERVICE)).registerInputDeviceListener(new InputManager.InputDeviceListener() {
+        mInputManager = (InputManager) mActivity.getSystemService(Context.INPUT_SERVICE);
+        mInputDeviceListener = new InputManager.InputDeviceListener() {
             @Override
             public void onInputDeviceAdded(int deviceId) {
                 InputDevice dev = InputDevice.getDevice(deviceId);
@@ -231,12 +234,19 @@ public class TouchInputHandler {
                 android.util.Log.d("InputDeviceListener", "changed " + name);
                 refreshInputDevices();
             }
-        }, null);
+        };
+        mInputManager.registerInputDeviceListener(mInputDeviceListener, null);
 
     }
 
     public TouchInputHandler(MainActivity activity, final InputEventSender injector) {
         this(activity, null, injector, false);
+    }
+
+    public void dispose() {
+        mInputManager.unregisterInputDeviceListener(mInputDeviceListener);
+        if (mTouchpadHandler != null)
+            mTouchpadHandler.dispose();
     }
 
     static public void refreshInputDevices() {

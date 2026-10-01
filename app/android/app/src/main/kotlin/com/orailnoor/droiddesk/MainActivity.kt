@@ -46,9 +46,6 @@ class MainActivity : FlutterActivity() {
         chrootRuntime = ChrootRuntime(this)
         desktopIntegration = DesktopIntegration(this)
 
-        if (intent.getBooleanExtra("autoSetup", false)) {
-            runAutoChrootSetup()
-        }
         handleHomeLaunch(intent)
         SharedStorage.requestIfNeeded(this)
     }
@@ -118,85 +115,6 @@ class MainActivity : FlutterActivity() {
                     putExtra("mode", if (rooted) "chroot" else "termux")
                     putExtra("de", desktopEnv)
                 })
-            }
-        }
-    }
-
-    /**
-     * Hidden developer/auto-tester path: download, extract, install, and launch
-     * the chroot desktop without any Flutter UI interaction.
-     */
-    private fun runAutoChrootSetup() {
-        thread(name = "auto-chroot-setup") {
-            try {
-                Log.i(TAG, "Auto-setup: checking root...")
-                if (!chrootRuntime.hasRoot()) {
-                    runOnUiThread {
-                        android.widget.Toast.makeText(this, "Auto-setup requires root", android.widget.Toast.LENGTH_LONG).show()
-                    }
-                    return@thread
-                }
-
-                startForegroundService()
-
-                if (!chrootRuntime.isRootfsReady()) {
-                    Log.i(TAG, "Auto-setup: downloading rootfs...")
-                    val dlLatch = java.util.concurrent.CountDownLatch(1)
-                    var dlOk = false
-                    chrootRuntime.downloadRootfs { progress, _ ->
-                        if (progress >= 1.0 || progress < 0) {
-                            dlOk = progress >= 1.0
-                            dlLatch.countDown()
-                        }
-                    }
-                    dlLatch.await()
-                    if (!dlOk) throw RuntimeException("Rootfs download failed")
-
-                    Log.i(TAG, "Auto-setup: extracting rootfs...")
-                    val exLatch = java.util.concurrent.CountDownLatch(1)
-                    var exOk = false
-                    chrootRuntime.extractRootfs { progress, _ ->
-                        if (progress >= 1.0 || progress < 0) {
-                            exOk = progress >= 1.0
-                            exLatch.countDown()
-                        }
-                    }
-                    exLatch.await()
-                    if (!exOk) throw RuntimeException("Rootfs extraction failed")
-                }
-
-                if (!chrootRuntime.isDesktopInstalled()) {
-                    Log.i(TAG, "Auto-setup: installing desktop environment...")
-                    val inLatch = java.util.concurrent.CountDownLatch(1)
-                    var inOk = false
-                    chrootRuntime.installDesktopEnvironment(
-                        desktopEnv = "xfce4",
-                        onProgress = { progress, _ ->
-                            if (progress >= 1.0 || progress < 0) {
-                                inOk = progress >= 1.0
-                                inLatch.countDown()
-                            }
-                        },
-                        onLog = {}
-                    )
-                    inLatch.await()
-                    if (!inOk) throw RuntimeException("Desktop installation failed")
-                }
-
-                Log.i(TAG, "Auto-setup: launching desktop...")
-                runOnUiThread {
-                    val intent = Intent(this@MainActivity, com.orailnoor.droiddesk.view.DesktopActivity::class.java).apply {
-                        putExtra("startSession", !chrootRuntime.isRunning())
-                        putExtra("mode", "chroot")
-                        putExtra("de", "xfce4")
-                    }
-                    startActivity(intent)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Auto-setup failed", e)
-                runOnUiThread {
-                    android.widget.Toast.makeText(this, "Auto-setup failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
-                }
             }
         }
     }

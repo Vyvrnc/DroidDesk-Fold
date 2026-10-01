@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:droiddesk/services/platform_bridge.dart';
@@ -36,6 +38,10 @@ class AppState extends ChangeNotifier {
   bool _isProotTerminal = false;
 
   // Terminal history
+  static const _maxTerminalLines = 2000;
+  static const _maxTerminalCharacters = 256 * 1024; // ~512 KB of UTF-16 text
+  Timer? _terminalNotifyTimer;
+  int _terminalCharactersReceived = 0;
   final List<String> _terminalOutput = [
     'DroidDesk Linux Terminal\nType commands below.\n',
   ];
@@ -136,8 +142,6 @@ class AppState extends ChangeNotifier {
     };
 
     DroidDeskPlatform.onTerminalOutput = (text) {
-      if (_terminalOutput.isEmpty) _terminalOutput.add('');
-
       final cleanedText = text.replaceAll(RegExp(r'.*\r(?!\n)'), '');
       if (_setupStep == 3) {
         _setupLog += cleanedText;
@@ -153,16 +157,8 @@ class AppState extends ChangeNotifier {
           );
         }
       }
-      final lines = cleanedText.split('\n');
-
-      for (int i = 0; i < lines.length; i++) {
-        if (i == 0) {
-          _terminalOutput[_terminalOutput.length - 1] += lines[i];
-        } else {
-          _terminalOutput.add(lines[i]);
-        }
-      }
-      notifyListeners();
+      _terminalCharactersReceived += cleanedText.length;
+      appendTerminalOutput(cleanedText);
     };
 
     DroidDeskPlatform.onOptionalInstallProgress = (progress, status) {
@@ -473,12 +469,32 @@ class AppState extends ChangeNotifier {
   }
 
   Future<String> executeCommand(String command) async {
+    final receivedBefore = _terminalCharactersReceived;
     try {
       _terminalOutput.add('\$ $command\n');
+      _trimTerminalOutput();
       notifyListeners();
-      return await DroidDeskPlatform.executeCommand(command);
+      final result = await DroidDeskPlatform.executeCommand(command);
+      if (result.startsWith('Error:') ||
+          RegExp(r'^Exit code: (?!0$)\d+$').hasMatch(result)) {
+        _appendCommandError(result, receivedBefore);
+      }
+      return result;
     } catch (e) {
-      return "Error executing command: $e";
+      final error = "Error executing command: $e";
+      _appendCommandError(error, receivedBefore);
+      return error;
+    }
+  }
+
+  void _appendCommandError(String result, int receivedBefore) {
+    final error = result.split(' Output: \n').first;
+    final output = _terminalOutput.join('\n');
+    final streamedLength = (_terminalCharactersReceived - receivedBefore)
+        .clamp(0, output.length)
+        .toInt();
+    if (!output.substring(output.length - streamedLength).contains(error)) {
+      appendTerminalOutput('\n$error\n');
     }
   }
 
@@ -495,11 +511,51 @@ class AppState extends ChangeNotifier {
 
   void appendTerminalOutput(String output) {
     if (_terminalOutput.isEmpty) _terminalOutput.add('');
-    _terminalOutput[_terminalOutput.length - 1] += output;
-    notifyListeners();
+    final lines = output.split('\n');
+    _terminalOutput[_terminalOutput.length - 1] += lines.first;
+    _terminalOutput.addAll(lines.skip(1));
+    _trimTerminalOutput();
+    _terminalNotifyTimer ??= Timer(const Duration(milliseconds: 100), () {
+      _terminalNotifyTimer = null;
+      notifyListeners();
+    });
+  }
+
+  void _trimTerminalOutput() {
+    if (_terminalOutput.length > _maxTerminalLines) {
+      _terminalOutput.removeRange(0, _terminalOutput.length - _maxTerminalLines);
+    }
+    var characters = _terminalOutput.fold<int>(0, (sum, line) => sum + line.length);
+    var removeCount = 0;
+    while (characters > _maxTerminalCharacters &&
+        removeCount < _terminalOutput.length - 1) {
+      characters -= _terminalOutput[removeCount++].length;
+    }
+    if (removeCount > 0) _terminalOutput.removeRange(0, removeCount);
+    if (characters > _maxTerminalCharacters) {
+      final line = _terminalOutput.first;
+      var start = line.length - _maxTerminalCharacters;
+      if (start > 0 &&
+          line.codeUnitAt(start) >= 0xDC00 &&
+          line.codeUnitAt(start) <= 0xDFFF &&
+          line.codeUnitAt(start - 1) >= 0xD800 &&
+          line.codeUnitAt(start - 1) <= 0xDBFF) {
+        start++;
+      }
+      _terminalOutput[0] = line.substring(start);
+    }
+  }
+
+  @override
+  void dispose() {
+    _terminalNotifyTimer?.cancel();
+    DroidDeskPlatform.onTerminalOutput = null;
+    super.dispose();
   }
 
   void clearTerminal() {
+    _terminalNotifyTimer?.cancel();
+    _terminalNotifyTimer = null;
     _terminalOutput.clear();
     _terminalOutput.add('DroidDesk Linux Terminal\nType commands below.\n');
     notifyListeners();

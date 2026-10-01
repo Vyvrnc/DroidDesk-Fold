@@ -108,6 +108,35 @@ class HomeScreen extends StatelessWidget {
                 ),
               ),
 
+              if (state.errorMessage != null)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: DroidTheme.surface,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: DroidTheme.error),
+                      ),
+                      child: ListTile(
+                        leading: const Icon(
+                          Icons.error_outline_rounded,
+                          color: DroidTheme.error,
+                        ),
+                        title: Text(
+                          state.errorMessage!,
+                          style: DroidTheme.bodySm,
+                        ),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.close_rounded),
+                          tooltip: 'Dismiss error',
+                          onPressed: state.clearError,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+
               // ── Quick Actions ──
               SliverToBoxAdapter(
                 child: Padding(

@@ -11,6 +11,8 @@ import static com.termux.x11.input.InputStub.*;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 import android.graphics.PointF;
+import android.util.SparseBooleanArray;
+import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 
@@ -120,7 +122,7 @@ public final class InputEventSender {
         mInjector.sendMouseWheelEvent(distanceX, distanceY);
     }
 
-    final boolean[] pointers = new boolean[10];
+    final SparseBooleanArray pointers = new SparseBooleanArray();
     /**
      * Extracts the touch point data from a MotionEvent, converts each point into a marshallable
      * object and passes the set of points to the JNI layer to be transmitted to the remote host.
@@ -132,27 +134,36 @@ public final class InputEventSender {
     public void sendTouchEvent(MotionEvent event, RenderData renderData) {
         int action = event.getActionMasked();
 
+        if (action == ACTION_CANCEL) {
+            for (int p = 0; p < pointers.size(); p++)
+                mInjector.sendTouchEvent(XI_TouchEnd, pointers.keyAt(p), 0, 0);
+            pointers.clear();
+            return;
+        }
+
         if (action == ACTION_MOVE || action == ACTION_HOVER_MOVE || action == ACTION_HOVER_ENTER || action == ACTION_HOVER_EXIT) {
             // In order to process all of the events associated with an ACTION_MOVE event, we need
             // to walk the list of historical events in order and add each event to our list, then
             // retrieve the current move event data.
             int pointerCount = event.getPointerCount();
 
-            for (int p = 0; p < pointerCount; p++)
-                pointers[event.getPointerId(p)] = false;
+            for (int p = 0; p < pointers.size(); p++)
+                pointers.setValueAt(p, false);
 
             for (int p = 0; p < pointerCount; p++) {
                 renderData.mapScreenPoint(event.getX(p), event.getY(p), mappedPoint);
                 int x = clamp((int) mappedPoint[0], 0, renderData.screenWidth);
                 int y = clamp((int) mappedPoint[1], 0, renderData.screenHeight);
-                pointers[event.getPointerId(p)] = true;
+                pointers.put(event.getPointerId(p), true);
                 mInjector.sendTouchEvent(XI_TouchUpdate, event.getPointerId(p), x, y);
             }
 
             // Sometimes Android does not send ACTION_POINTER_UP/ACTION_UP so some pointers are "stuck" in pressed state.
-            for (int p = 0; p < 10; p++) {
-                if (!pointers[p])
-                    mInjector.sendTouchEvent(XI_TouchEnd, p, 0, 0);
+            for (int p = pointers.size() - 1; p >= 0; p--) {
+                if (!pointers.valueAt(p)) {
+                    mInjector.sendTouchEvent(XI_TouchEnd, pointers.keyAt(p), 0, 0);
+                    pointers.removeAt(p);
+                }
             }
         } else {
             // For all other events, we only want to grab the current/active pointer.  The event
@@ -167,6 +178,10 @@ public final class InputEventSender {
             if (a == XI_TouchEnd)
                 mInjector.sendTouchEvent(XI_TouchUpdate, id, x, y);
             mInjector.sendTouchEvent(a, id, x, y);
+            if (a == XI_TouchBegin)
+                pointers.put(id, true);
+            else
+                pointers.delete(id);
         }
     }
 
@@ -180,7 +195,7 @@ public final class InputEventSender {
         boolean pressed = e.getAction() == KeyEvent.ACTION_DOWN;
 
         if ((e.getFlags() & KeyEvent.FLAG_CANCELED) == KeyEvent.FLAG_CANCELED) {
-            android.util.Log.d("KeyEvent", "We've got key event with FLAG_CANCELED, it will not be consumed. Details: " + e);
+            android.util.Log.d("KeyEvent", "We've got key event with FLAG_CANCELED, it will not be consumed.");
             return true;
         }
 
@@ -195,7 +210,7 @@ public final class InputEventSender {
             if (e.getCharacters() != null)
                 mInjector.sendTextEvent(e.getCharacters().getBytes(UTF_8));
             else if (e.getUnicodeChar() != 0)
-                mInjector.sendTextEvent(String.valueOf((char)e.getUnicodeChar()).getBytes(UTF_8));
+                mInjector.sendTextEvent(new String(Character.toChars(e.getUnicodeChar() & KeyCharacterMap.COMBINING_ACCENT_MASK)).getBytes(UTF_8));
             return true;
         }
 
@@ -203,7 +218,7 @@ public final class InputEventSender {
                 || ((e.getMetaState() & META_ALT_RIGHT_ON) != 0 && (e.getCharacters() != null || e.getUnicodeChar() != 0)); // For layouts with AltGr
         // For Enter getUnicodeChar() returns 10 (line feed), but we still
         // want to send it as KeyEvent.
-        char unicode = keyCode != KEYCODE_ENTER ? (char) e.getUnicodeChar() : 0;
+        int unicode = keyCode != KEYCODE_ENTER ? e.getUnicodeChar() & KeyCharacterMap.COMBINING_ACCENT_MASK : 0;
         int scancode = (preferScancodes || !no_modifiers) ? e.getScanCode(): 0;
 
         if (!preferScancodes) {
@@ -212,7 +227,7 @@ public final class InputEventSender {
                 if ((e.getMetaState() & META_ALT_RIGHT_ON) != 0)
                     mInjector.sendKeyEvent(0, KEYCODE_ALT_RIGHT, false); // For layouts with AltGr
 
-                mInjector.sendTextEvent(String.valueOf(unicode).getBytes(UTF_8));
+                mInjector.sendTextEvent(new String(Character.toChars(unicode)).getBytes(UTF_8));
 
                 if ((e.getMetaState() & META_ALT_RIGHT_ON) != 0)
                     mInjector.sendKeyEvent(0, KEYCODE_ALT_RIGHT, true); // For layouts with AltGr
