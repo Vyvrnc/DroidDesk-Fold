@@ -77,7 +77,7 @@ class X11ServiceClient(
         // away. Keep the isolated X server started while the Linux session is
         // running so returning to the desktop can reuse the live connection.
         appContext.startService(intent)
-        bound = appContext.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        bound = appContext.bindService(intent, connection, Context.BIND_AUTO_CREATE or Context.BIND_IMPORTANT)
         if (!bound) postError("Android refused the X11 service binding", null)
     }
 

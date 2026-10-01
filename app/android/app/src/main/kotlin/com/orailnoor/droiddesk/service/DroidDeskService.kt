@@ -5,7 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
@@ -14,6 +17,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.orailnoor.droiddesk.MainActivity
 import com.orailnoor.droiddesk.runtime.AndroidAppBridge
+import com.orailnoor.droiddesk.x11.X11ServerService
 
 /**
  * Foreground service that keeps the Linux runtime alive.
@@ -31,11 +35,27 @@ class DroidDeskService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
 
+    // The X server runs in its own :x11 process. Its only binding came from
+    // DesktopActivity, so once the activity went away the process sank to a
+    // plain started service and lmkd killed it first (LOW_MEMORY in exit-info),
+    // taking the whole XFCE session with it. Binding it from this foreground
+    // service lends it the same priority for as long as the session runs.
+    private val x11Connection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName, service: IBinder) {}
+        override fun onServiceDisconnected(name: ComponentName) {}
+    }
+    private var x11Bound = false
+
     override fun onCreate() {
         super.onCreate()
         AndroidAppBridge.start(this)
         createNotificationChannel()
         acquireWakeLock()
+        x11Bound = bindService(
+            Intent(this, X11ServerService::class.java),
+            x11Connection,
+            Context.BIND_AUTO_CREATE or Context.BIND_IMPORTANT,
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -58,6 +78,10 @@ class DroidDeskService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        if (x11Bound) {
+            unbindService(x11Connection)
+            x11Bound = false
+        }
         AndroidAppBridge.stop()
         releaseWakeLock()
         super.onDestroy()
