@@ -2211,26 +2211,32 @@ class LinuxRuntime(private val context: Context) {
 
             # Native Android audio. AAudio is reliable on modern Android while
             # OpenSL ES remains the compatibility fallback for older devices.
-            pulseaudio -k >/dev/null 2>&1 || true
+            # A daemon left over from a previous session can stop answering:
+            # "pulseaudio -k" then fails and every pactl call hangs, which kept
+            # XFCE from starting (black screen with a cursor). Kill it outright
+            # and never let pactl block the desktop.
+            timeout 2 pulseaudio -k >/dev/null 2>&1 || true
+            pkill -9 -x pulseaudio >/dev/null 2>&1 || true
             if [ "${if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) "1" else "0"}" = "1" ]; then
                 pulseaudio --start --exit-idle-time=-1 \
                     --load=module-aaudio-sink >/dev/null 2>&1 || true
                 audio_ready=0
                 for attempt in 1 2 3 4 5 6 7 8 9 10; do
-                    if pactl list short sinks 2>/dev/null | grep -q AAudio_sink; then
+                    if timeout 2 pactl list short sinks 2>/dev/null | grep -q AAudio_sink; then
                         audio_ready=1
                         break
                     fi
                     sleep 0.1
                 done
                 if [ "${'$'}audio_ready" != "1" ]; then
-                    pulseaudio -k >/dev/null 2>&1 || true
+                    timeout 2 pulseaudio -k >/dev/null 2>&1 || true
+                    pkill -9 -x pulseaudio >/dev/null 2>&1 || true
                     pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
                 fi
             else
                 pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
             fi
-            echo "DIAG: PulseAudio sinks: ${'$'}(pactl list short sinks 2>/dev/null | cut -f2 | tr '\n' ' ')"
+            echo "DIAG: PulseAudio sinks: ${'$'}(timeout 2 pactl list short sinks 2>/dev/null | cut -f2 | tr '\n' ' ')"
 
             echo "DIAG: Launching $desktopCommand natively on DISPLAY=:0 ..."
             exec $desktopCommand
