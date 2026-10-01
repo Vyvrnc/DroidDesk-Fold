@@ -23,6 +23,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.orailnoor.droiddesk.MainActivity
 import com.orailnoor.droiddesk.runtime.AndroidAppBridge
+import com.orailnoor.droiddesk.runtime.LinuxRuntime
 import com.orailnoor.droiddesk.runtime.UsbBridge
 import com.orailnoor.droiddesk.x11.X11ServerService
 import java.io.File
@@ -39,6 +40,40 @@ class DroidDeskService : Service() {
     companion object {
         const val CHANNEL_ID = "droiddesk_service"
         const val NOTIFICATION_ID = 1001
+
+        // The last network seen, so a Debian installed later on an unchanged
+        // network still gets Android's DNS (see writeDebianResolvConf).
+        @Volatile private var lastLinkProperties: LinkProperties? = null
+
+        /** Rewrites the Debian resolv.conf from the last known network, if any. */
+        fun applyDebianDns(context: Context) {
+            lastLinkProperties?.let { writeDebianResolvConf(context, it) }
+        }
+
+        private fun writeDebianResolvConf(context: Context, linkProperties: LinkProperties) {
+            val servers = linkProperties.dnsServers
+                .filterNot { it.isLinkLocalAddress }
+                .mapNotNull { it.hostAddress }
+                .take(3)
+            if (servers.isEmpty()) return
+            val etc = File(LinuxRuntime.debianRootfs(context.filesDir), "etc")
+            if (!etc.isDirectory) return
+            try {
+                val resolvConf = File(etc, "resolv.conf")
+                // A symlink would point at a path that only exists inside a real system.
+                if (java.nio.file.Files.isSymbolicLink(resolvConf.toPath())) resolvConf.delete()
+                resolvConf.writeText(
+                    buildString {
+                        append("# Written by DroidDesk from Android's active network\n")
+                        servers.forEach { append("nameserver ").append(it).append('\n') }
+                        linkProperties.domains?.takeIf { it.isNotBlank() }?.let {
+                            append("search ").append(it.replace(',', ' ')).append('\n')
+                        }
+                    },
+                )
+            } catch (_: Exception) {
+            }
+        }
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
@@ -81,32 +116,8 @@ class DroidDeskService : Service() {
     // directly and need nothing.
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
-            writeDebianResolvConf(linkProperties)
-        }
-    }
-
-    private fun writeDebianResolvConf(linkProperties: LinkProperties) {
-        val servers = linkProperties.dnsServers
-            .filterNot { it.isLinkLocalAddress }
-            .mapNotNull { it.hostAddress }
-            .take(3)
-        if (servers.isEmpty()) return
-        val etc = File(filesDir, "usr/var/lib/proot-distro/containers/debian/rootfs/etc")
-        if (!etc.isDirectory) return
-        try {
-            val resolvConf = File(etc, "resolv.conf")
-            // A symlink would point at a path that only exists inside a real system.
-            if (java.nio.file.Files.isSymbolicLink(resolvConf.toPath())) resolvConf.delete()
-            resolvConf.writeText(
-                buildString {
-                    append("# Written by DroidDesk from Android's active network\n")
-                    servers.forEach { append("nameserver ").append(it).append('\n') }
-                    linkProperties.domains?.takeIf { it.isNotBlank() }?.let {
-                        append("search ").append(it.replace(',', ' ')).append('\n')
-                    }
-                },
-            )
-        } catch (_: Exception) {
+            lastLinkProperties = linkProperties
+            writeDebianResolvConf(this@DroidDeskService, linkProperties)
         }
     }
 

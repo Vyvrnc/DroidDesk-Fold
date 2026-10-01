@@ -387,7 +387,10 @@ object AndroidAppBridge {
         ) {
             Intent(Intent.ACTION_VIEW, Uri.parse(target))
         } else {
-            val file = File(Uri.parse(target).path ?: target).canonicalFile
+            // Only an explicit file: URI is parsed; a bare path is taken as is, so
+            // names like "report#1.pdf" or "50%.png" keep their # ? and %.
+            val path = if (target.startsWith("file:")) Uri.parse(target).path else target
+            val file = File(path ?: return).canonicalFile
             if (!file.isFile) {
                 Log.w(TAG, "droiddesk-open: no such file $file")
                 return

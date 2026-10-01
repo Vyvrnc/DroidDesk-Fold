@@ -28,6 +28,18 @@ class LinuxRuntime(private val context: Context) {
         private const val MESA_KGSL_VERSION = "26.2.3"
         private const val MESA_KGSL_SHA256 = "993db4dc3502632ff4e9b78a00c05238bf90b83dc95b4be7fa5ce56cd8e5b05e"
 
+        /**
+         * Host path of the Debian rootfs. proot-distro 5.4+ uses
+         * containers/debian/rootfs; installs from older releases keep
+         * installed-rootfs/debian, and path translation must follow either.
+         */
+        fun debianRootfs(filesDir: File): File {
+            val proot = File(filesDir, "usr/var/lib/proot-distro")
+            val current = File(proot, "containers/debian/rootfs")
+            val legacy = File(proot, "installed-rootfs/debian")
+            return if (!current.isDirectory && legacy.isDirectory) legacy else current
+        }
+
         // ELF64 constants
         private const val ELFMAG0: Byte = 0x7f
         private const val ELFMAG1: Byte = 'E'.code.toByte()
@@ -312,7 +324,7 @@ class LinuxRuntime(private val context: Context) {
             set -e
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
-            apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates dbus-x11 xz-utils
+            apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates dbus-x11 xz-utils pulseaudio-utils libnotify-bin
 
             if [ -f "/usr/share/zoneinfo/$timeZone" ]; then
                 ln -sf "/usr/share/zoneinfo/$timeZone" /etc/localtime
@@ -471,11 +483,12 @@ class LinuxRuntime(private val context: Context) {
             # droiddesk-open from Debian: translate the container path to the host
             # path, then hand it to the Termux-side bridge client.
             cat > /usr/local/bin/droiddesk-open <<'DROIDDESK_OPEN'
-            #!/bin/sh
+            #!/bin/bash
             [ ${'$'}# -ge 1 ] || { echo "Usage: droiddesk-open FILE|URL" >&2; exit 2; }
             for target; do :; done
             case "${'$'}target" in
-                file://*) target="${'$'}{target#file://}" ;;
+                file://*) target="${'$'}{target#file://}"; target="${'$'}{target#localhost}"
+                    bs='\x'; target=${'$'}(printf '%b' "${'$'}{target//%/${'$'}bs}") ;;
                 [A-Za-z]*:*) url=1 ;;
             esac
             if [ -z "${'$'}url" ]; then
@@ -483,7 +496,7 @@ class LinuxRuntime(private val context: Context) {
                 case "${'$'}target" in
                     /tmp/*) target="${tmpDir.absolutePath}/${'$'}{target#/tmp/}" ;;
                     /storage/*|/sdcard/*|/data/*) ;;
-                    *) target="${File(prefixDir, "var/lib/proot-distro/containers/debian/rootfs").absolutePath}${'$'}target" ;;
+                    *) target="${debianRootfs(baseDir).absolutePath}${'$'}target" ;;
                 esac
             fi
             LD_LIBRARY_PATH="${File(prefixDir, "lib").absolutePath}" exec "${File(binDir, "python3").absolutePath}" \
@@ -502,7 +515,7 @@ class LinuxRuntime(private val context: Context) {
                 case "${'$'}p" in
                     /tmp/*) echo "${tmpDir.absolutePath}/${'$'}{p#/tmp/}" ;;
                     /storage/*|/sdcard/*|/data/*) echo "${'$'}p" ;;
-                    *) echo "${File(prefixDir, "var/lib/proot-distro/containers/debian/rootfs").absolutePath}${'$'}p" ;;
+                    *) echo "${debianRootfs(baseDir).absolutePath}${'$'}p" ;;
                 esac
             }
             client() {
@@ -529,7 +542,7 @@ class LinuxRuntime(private val context: Context) {
             # Files go straight into applications/: garcon ignores a new subfolder.
             cat > /usr/local/sbin/droiddesk-menu-sync <<'DROIDDESK_MENU_SYNC'
             #!/bin/sh
-            RF="${File(prefixDir, "var/lib/proot-distro/containers/debian/rootfs").absolutePath}"
+            RF="${debianRootfs(baseDir).absolutePath}"
             OUT="${File(homeDir, ".local/share/applications").absolutePath}"
             RUN="${File(binDir, "debian-run").absolutePath}"
             mkdir -p "${'$'}OUT"; rm -f "${'$'}OUT"/debian-*.desktop
@@ -621,7 +634,8 @@ class LinuxRuntime(private val context: Context) {
                 [ ${'$'}# -ge 1 ] || { echo "Usage: droiddesk-open FILE|URL" >&2; exit 2; }
                 for target; do :; done
                 case "${'$'}target" in
-                    file://*) target="${'$'}{target#file://}" ;;
+                    file://*) target="${'$'}{target#file://}"; target="${'$'}{target#localhost}"
+                    bs='\x'; target=${'$'}(printf '%b' "${'$'}{target//%/${'$'}bs}") ;;
                     [A-Za-z]*:*) exec "${File(binDir, "python3").absolutePath}" "${bridgeClient.absolutePath}" "open:${'$'}target" ;;
                 esac
                 target=${'$'}(realpath -- "${'$'}target") || exit 1
@@ -1848,6 +1862,10 @@ class LinuxRuntime(private val context: Context) {
         onProgress?.invoke(0.85, "Creating Debian shell shortcut...")
         writeDebianLauncher()
 
+        // The service only rewrites DNS on network changes; a fresh rootfs on an
+        // unchanged network would keep proot-distro's 8.8.8.8 until then.
+        com.orailnoor.droiddesk.service.DroidDeskService.applyDebianDns(context)
+
         // Basic tools, time zone and locale. Debian itself is usable without them,
         // so a failure here (e.g. no network) does not fail the installation.
         onProgress?.invoke(0.9, "Installing basic Debian tools...")
@@ -2404,7 +2422,7 @@ class LinuxRuntime(private val context: Context) {
             if [ "${if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) "1" else "0"}" = "1" ]; then
                 pulseaudio --start --exit-idle-time=-1 \
                     --load=module-aaudio-sink \
-                    --load="module-native-protocol-tcp auth-ip-acl=127.0.0.1 auth-anonymous=1" >/dev/null 2>&1 || true
+                    --load="module-native-protocol-tcp listen=127.0.0.1 auth-ip-acl=127.0.0.1" >/dev/null 2>&1 || true
                 audio_ready=0
                 for attempt in 1 2 3 4 5 6 7 8 9 10; do
                     if timeout 2 pactl list short sinks 2>/dev/null | grep -q AAudio_sink; then
@@ -2416,13 +2434,15 @@ class LinuxRuntime(private val context: Context) {
                 if [ "${'$'}audio_ready" != "1" ]; then
                     timeout 2 pulseaudio -k >/dev/null 2>&1 || true
                     pkill -9 -x pulseaudio >/dev/null 2>&1 || true
-                    pulseaudio --start --exit-idle-time=-1 --load="module-native-protocol-tcp auth-ip-acl=127.0.0.1 auth-anonymous=1" >/dev/null 2>&1 || true
+                    pulseaudio --start --exit-idle-time=-1 --load="module-native-protocol-tcp listen=127.0.0.1 auth-ip-acl=127.0.0.1" >/dev/null 2>&1 || true
                 fi
             else
-                pulseaudio --start --exit-idle-time=-1 --load="module-native-protocol-tcp auth-ip-acl=127.0.0.1 auth-anonymous=1" >/dev/null 2>&1 || true
+                pulseaudio --start --exit-idle-time=-1 --load="module-native-protocol-tcp listen=127.0.0.1 auth-ip-acl=127.0.0.1" >/dev/null 2>&1 || true
             fi
             # The TCP module is for Debian programs: proot-distro sets
             # PULSE_SERVER=127.0.0.1 there. Termux programs keep the native socket.
+            # listen= keeps it off the Wi-Fi; auth-anonymous would have let anyone
+            # on the network play or record past the IP ACL.
             echo "DIAG: PulseAudio sinks: ${'$'}(timeout 2 pactl list short sinks 2>/dev/null | cut -f2 | tr '\n' ' ')"
 
             echo "DIAG: Launching $desktopCommand natively on DISPLAY=:0 ..."
