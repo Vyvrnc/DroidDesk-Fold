@@ -385,6 +385,24 @@ class LinuxRuntime(private val context: Context) {
             # through KGSL. WebKitGTK's WebProcess crashes when it tries to sandbox
             # with bwrap here.
             cat > /etc/profile.d/droiddesk-gui.sh <<'DROIDDESK_GUI_ENV'
+            # The XFCE session's Mesa settings (zink override, Termux's Vulkan ICD,
+            # Termux library paths) leak in through proot-distro and point at
+            # bionic files; with hardware OpenGL off they made apps fail to load
+            # zink instead of using llvmpipe. Start from a clean slate.
+            unset MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER LIBGL_ALWAYS_SOFTWARE \
+                LIBGL_DRIVERS_PATH VK_ICD_FILENAMES VK_DRIVER_FILES \
+                __GLX_VENDOR_LIBRARY_NAME __EGL_VENDOR_LIBRARY_FILENAMES GBM_BACKENDS_PATH
+            droiddesk_ld=
+            IFS=:
+            for droiddesk_dir in ${'$'}{LD_LIBRARY_PATH-}; do
+                case "${'$'}droiddesk_dir" in
+                    ""|*/files/usr/lib|*/files/usr/lib/*|/opt/mesa-kgsl/*) ;;
+                    *) droiddesk_ld="${'$'}{droiddesk_ld:+${'$'}droiddesk_ld:}${'$'}droiddesk_dir" ;;
+                esac
+            done
+            unset IFS droiddesk_dir
+            if [ -n "${'$'}droiddesk_ld" ]; then export LD_LIBRARY_PATH="${'$'}droiddesk_ld"; else unset LD_LIBRARY_PATH; fi
+            unset droiddesk_ld
             export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
             export WEBKIT_DISABLE_COMPOSITING_MODE=1
             if [ -d /opt/mesa-kgsl ] && [ ! -f /etc/droiddesk/gpu-off ] && [ -w /dev/kgsl-3d0 ] &&
