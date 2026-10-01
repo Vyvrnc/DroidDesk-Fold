@@ -335,14 +335,21 @@ class LinuxRuntime(private val context: Context) {
             # Autoremove after purging flatpak/bubblewrap once took gpgv with it.
             apt-mark manual gpgv gnupg >/dev/null 2>&1 || true
 
-            # Debian's Mesa cannot drive Adreno through KGSL, so GL apps need llvmpipe.
-            # WebKitGTK's WebProcess crashes when it tries to sandbox with bwrap here.
-            # Login shells (start-debian, debian-run) read this; drop it once GPU works.
+            # Login shells (start-debian, debian-run) read this. With hardware OpenGL
+            # on (droiddesk-gpu), every Debian program gets the /opt/mesa-kgsl
+            # environment; otherwise llvmpipe, as Debian's Mesa cannot drive Adreno
+            # through KGSL. WebKitGTK's WebProcess crashes when it tries to sandbox
+            # with bwrap here.
             cat > /etc/profile.d/droiddesk-gui.sh <<'DROIDDESK_GUI_ENV'
-            export LIBGL_ALWAYS_SOFTWARE=1
-            export GALLIUM_DRIVER=llvmpipe
             export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
             export WEBKIT_DISABLE_COMPOSITING_MODE=1
+            if [ -d /opt/mesa-kgsl ] && [ ! -f /etc/droiddesk/gpu-off ] && [ -w /dev/kgsl-3d0 ] &&
+                [ -f /etc/droiddesk/gpu-env.sh ]; then
+                . /etc/droiddesk/gpu-env.sh
+            else
+                export LIBGL_ALWAYS_SOFTWARE=1
+                export GALLIUM_DRIVER=llvmpipe
+            fi
             DROIDDESK_GUI_ENV
 
             # proot-distro's termux-profile.sh appends the Termux bin directory to
@@ -375,31 +382,42 @@ class LinuxRuntime(private val context: Context) {
                 fi
                 rm -f /tmp/mesa-kgsl.tar.xz
             fi
+            mkdir -p /etc/droiddesk
+            cat > /etc/droiddesk/gpu-env.sh <<'DROIDDESK_GPU_ENV'
+            # Hardware OpenGL from /opt/mesa-kgsl; sourced by droiddesk-gui.sh and gpu-run.
+            droiddesk_mesa=/opt/mesa-kgsl
+            droiddesk_lib=${'$'}droiddesk_mesa/lib/aarch64-linux-gnu
+            if [ -d "${'$'}droiddesk_lib" ]; then
+                unset LIBGL_ALWAYS_SOFTWARE
+                case ":${'$'}{LD_LIBRARY_PATH}:" in
+                    *":${'$'}droiddesk_lib:"*) ;;
+                    *) export LD_LIBRARY_PATH="${'$'}droiddesk_lib${'$'}{LD_LIBRARY_PATH:+:${'$'}LD_LIBRARY_PATH}" ;;
+                esac
+                export LIBGL_DRIVERS_PATH="${'$'}droiddesk_lib/dri"
+                export __GLX_VENDOR_LIBRARY_NAME=mesa
+                export __EGL_VENDOR_LIBRARY_FILENAMES="${'$'}droiddesk_mesa/share/glvnd/egl_vendor.d/50_mesa.json"
+                export GBM_BACKENDS_PATH="${'$'}droiddesk_lib/gbm"
+                export MESA_LOADER_DRIVER_OVERRIDE=zink
+                export GALLIUM_DRIVER=zink
+                export VK_ICD_FILENAMES="${'$'}droiddesk_mesa/share/vulkan/icd.d/freedreno_icd.aarch64.json"
+                export VK_DRIVER_FILES="${'$'}VK_ICD_FILENAMES"
+                # Zink's threaded context flushes into a kopper swapchain that is not
+                # acquired without DRI3 and crashes (OrcaSlicer "New Project").
+                export GALLIUM_THREAD=0
+            fi
+            unset droiddesk_mesa droiddesk_lib
+            DROIDDESK_GPU_ENV
             cat > /usr/local/bin/gpu-run <<'DROIDDESK_GPU_RUN'
             #!/bin/sh
-            # Runs one program with hardware OpenGL from /opt/mesa-kgsl.
-            M=/opt/mesa-kgsl
-            L=${'$'}M/lib/aarch64-linux-gnu
-            [ -d "${'$'}L" ] || exec "${'$'}@"
-            unset LIBGL_ALWAYS_SOFTWARE
-            export LD_LIBRARY_PATH="${'$'}L${'$'}{LD_LIBRARY_PATH:+:${'$'}LD_LIBRARY_PATH}"
-            export LIBGL_DRIVERS_PATH="${'$'}L/dri"
-            export __GLX_VENDOR_LIBRARY_NAME=mesa
-            export __EGL_VENDOR_LIBRARY_FILENAMES="${'$'}M/share/glvnd/egl_vendor.d/50_mesa.json"
-            export GBM_BACKENDS_PATH="${'$'}L/gbm"
-            export MESA_LOADER_DRIVER_OVERRIDE=zink
-            export GALLIUM_DRIVER=zink
-            export VK_ICD_FILENAMES="${'$'}M/share/vulkan/icd.d/freedreno_icd.aarch64.json"
-            export VK_DRIVER_FILES="${'$'}VK_ICD_FILENAMES"
-            # Zink's threaded context flushes into a kopper swapchain that is not
-            # acquired without DRI3 and crashes (OrcaSlicer "New Project").
-            export GALLIUM_THREAD=0
+            # Runs one program with hardware OpenGL even while droiddesk-gpu is off.
+            . /etc/droiddesk/gpu-env.sh
             exec "${'$'}@"
             DROIDDESK_GPU_RUN
             chmod 755 /usr/local/bin/gpu-run
             cat > /usr/local/bin/droiddesk-gpu <<'DROIDDESK_GPU'
             #!/bin/sh
-            # Switches hardware OpenGL for menu entries: droiddesk-gpu on|off|status
+            # Switches hardware OpenGL for all Debian programs: droiddesk-gpu on|off|status
+            # Takes effect in newly started shells and apps.
             case "${'$'}1" in
                 on) rm -f /etc/droiddesk/gpu-off ;;
                 off) mkdir -p /etc/droiddesk && touch /etc/droiddesk/gpu-off ;;
@@ -413,7 +431,7 @@ class LinuxRuntime(private val context: Context) {
             else
                 echo "Hardware OpenGL: on"
             fi
-            [ -n "${'$'}1" ] && [ "${'$'}1" != status ] && /usr/local/sbin/droiddesk-menu-sync
+            [ -n "${'$'}1" ] && [ "${'$'}1" != status ] && echo "Applies to newly started shells and apps."
             exit 0
             DROIDDESK_GPU
             chmod 755 /usr/local/bin/droiddesk-gpu
@@ -425,10 +443,6 @@ class LinuxRuntime(private val context: Context) {
             RF="${File(prefixDir, "var/lib/proot-distro/containers/debian/rootfs").absolutePath}"
             OUT="${File(homeDir, ".local/share/applications").absolutePath}"
             RUN="${File(binDir, "debian-run").absolutePath}"
-            GPU=
-            if [ -d /opt/mesa-kgsl ] && [ ! -f /etc/droiddesk/gpu-off ] && [ -w /dev/kgsl-3d0 ]; then
-                GPU=/usr/local/bin/gpu-run
-            fi
             mkdir -p "${'$'}OUT"; rm -f "${'$'}OUT"/debian-*.desktop
             find_icon() {
                 case "${'$'}1" in /*) [ -f "${'$'}1" ] && echo "${'$'}RF${'$'}1"; return;; esac
@@ -449,7 +463,7 @@ class LinuxRuntime(private val context: Context) {
                     grep -vE '^(Exec|TryExec|Icon|Name(\[[^]]*\])?|DBusActivatable|Actions)=' > "${'$'}out"
                 {
                     echo "Name=${'$'}name (Debian)"
-                    echo "Exec=${'$'}RUN ${'$'}GPU dbus-launch --exit-with-session ${'$'}exec_line"
+                    echo "Exec=${'$'}RUN dbus-launch --exit-with-session ${'$'}exec_line"
                     echo "Icon=$(find_icon "${'$'}icon")"
                 } >> "${'$'}out"
             done
