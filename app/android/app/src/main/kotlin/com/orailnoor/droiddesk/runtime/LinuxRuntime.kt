@@ -257,6 +257,25 @@ class LinuxRuntime(private val context: Context) {
         )
         claudeLauncher.setExecutable(true, false)
 
+        // Runs one Debian command from the Termux side, e.g. from a menu entry.
+        val runLauncher = File(binDir, "debian-run")
+        runLauncher.writeText(
+            """
+            #!${File(binDir, "bash").absolutePath}
+            export DISPLAY="${'$'}{DISPLAY:-:0}"
+            export TMPDIR="${tmpDir.absolutePath}"
+            mkdir -p "${tmpDir.absolutePath}/proot"
+            exec "${File(binDir, "proot-distro").absolutePath}" login debian \
+                --bind "${tmpDir.absolutePath}:/tmp" \
+                --env PROOT_TMP_DIR="${tmpDir.absolutePath}/proot" \
+                --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
+                --env PROOT_LOADER_32="${File(prefixDir, "libexec/proot/loader32").absolutePath}" -- \
+                env DISPLAY="${'$'}DISPLAY" TERM="${'$'}{TERM:-xterm-256color}" \
+                bash -lc 'cd ~; exec "${'$'}@"' debian-run "${'$'}@"
+            """.trimIndent() + "\n",
+        )
+        runLauncher.setExecutable(true, false)
+
         // The proot-distro rootfs ships without basic tools, in UTC and without a
         // locale. Idempotent, so it is safe to rerun by hand on older installs.
         val timeZone = java.util.TimeZone.getDefault().id
@@ -277,17 +296,18 @@ class LinuxRuntime(private val context: Context) {
             set -e
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
-            apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates
+            apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates dbus-x11
 
             if [ -f "/usr/share/zoneinfo/$timeZone" ]; then
                 ln -sf "/usr/share/zoneinfo/$timeZone" /etc/localtime
                 echo "$timeZone" > /etc/timezone
             fi
 
-            if grep -q "^# *$localeName UTF-8" /etc/locale.gen; then
-                sed -i "s/^# *$localeName UTF-8/$localeName UTF-8/" /etc/locale.gen
-                locale-gen
-            fi
+            # GUI apps such as PrusaSlicer abort when their UI language is not generated.
+            for name in en_US.UTF-8 cs_CZ.UTF-8 $localeName; do
+                sed -i "s/^# *${'$'}name UTF-8/${'$'}name UTF-8/" /etc/locale.gen
+            done
+            locale-gen
             echo "LANG=C.UTF-8" > /etc/default/locale
 
             mkdir -p /etc/droiddesk
