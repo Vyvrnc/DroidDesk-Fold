@@ -596,17 +596,19 @@ class LinuxRuntime(private val context: Context) {
             batteryScript.setExecutable(true, false)
 
             // USB flash drives and card readers through UsbBridge.
-            val usbClient = File(binDir, "droiddesk-usb.py")
-            context.assets.open("droiddesk/droiddesk-usb.py").use { input ->
-                usbClient.outputStream().use(input::copyTo)
-            }
-            File(binDir, "droiddesk-usb").let { usbCommand ->
-                usbCommand.writeText(
-                    "#!${File(binDir, "bash").absolutePath}\n" +
-                        "exec \"${File(binDir, "python3").absolutePath}\" \"${usbClient.absolutePath}\" \"${'$'}@\"\n",
-                )
-                usbCommand.setExecutable(true, false)
-            }
+            runCatching {
+                val usbClient = File(binDir, "droiddesk-usb.py")
+                context.assets.open("droiddesk/droiddesk-usb.py").use { input ->
+                    usbClient.outputStream().use(input::copyTo)
+                }
+                File(binDir, "droiddesk-usb").let { usbCommand ->
+                    usbCommand.writeText(
+                        "#!${File(binDir, "bash").absolutePath}\n" +
+                            "exec \"${File(binDir, "python3").absolutePath}\" \"${usbClient.absolutePath}\" \"${'$'}@\"\n",
+                    )
+                    usbCommand.setExecutable(true, false)
+                }
+            }.onFailure { Log.w(TAG, "Failed to install droiddesk-usb: ${it.message}") }
 
             // Opens a file or URL in an Android app through AndroidAppBridge.
             val bridgeClient = File(homeDir, ".local/bin/droiddesk-launch-android-app.py")
