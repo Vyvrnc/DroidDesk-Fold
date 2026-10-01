@@ -11,7 +11,25 @@
 > - `socket_hook`: rewrites `bind()`/`connect()` Unix socket paths (fixes LibreOffice hanging and restarting in a loop)
 > - Opening files with default apps (`GIO_LAUNCH_DESKTOP`), progress of the Debian install, single XFCE dock instead of overlapping panels
 >
+> **Stability**
+> - The X server process (`:x11`) keeps the session's priority, so Android no longer kills it under memory pressure after minimizing
+> - A stale PulseAudio from a previous session can no longer block the desktop start (black screen with a cursor)
+> - The loading screen retries the X connection and no longer hangs on "Almost ready" after the phone wakes up
+> - `socket_hook` also redirects `execve()` of compiled-in `com.termux` paths (e.g. bash's command-not-found handler)
+>
+> **Debian container** (proot, for glibc programs such as the native Claude Code build)
+> - `start-debian`, `debian-run CMD`, `claude-debian [args]` (Claude Code in `~/projekty/Claude`)
+> - `debian-setup` (run once, idempotent): basic tools, Android time zone and locales, Android fonts (emoji, CJK), Debian apps in the XFCE menu, faster apt, Termux binaries removed from Debian's `PATH`
+> - Hardware OpenGL through Zink on Turnip/KGSL (Adreno), a separate Mesa build in `/opt/mesa-kgsl` ([release asset](../../releases/tag/mesa-kgsl-26.2.3), build notes in `tools/mesa-kgsl`); `droiddesk-gpu on|off`, `gpu-run CMD`
+> - Sound (PulseAudio over TCP on 127.0.0.1), the XFCE session bus (notifications), OTG drives under `/storage`, DNS taken from Android's active network (follows a VPN)
+>
+> **Desktop and Android integration**
+> - `droiddesk-open FILE|URL` opens files and links in Android apps (also `termux-open`, Thunar "Otevřít v Androidu")
+> - `droiddesk-usb`: flash drives and card readers without root — `flash IMAGE[.xz|.gz]` with read-back verify, `read FILE`, and an experimental `exec DEVICE -- CMD` that hands a libusb program the usbfs descriptor. Flashing uses [libaums](https://github.com/magnusja/libaums), the layer [EtchDroid](https://github.com/EtchDroid/EtchDroid) uses
+> - Battery level in the dock, Android apps removed from the dock stay removed, windows tile at screen edges (Super+arrows), no xfwm4 compositor
+>
 > APKs are on the [Releases](../../releases) page and can be tracked with [Obtainium](https://github.com/ImranR98/Obtainium).
+> After updating an existing install, run `debian-setup` once in the terminal.
 
 Run a full Linux desktop on any Android phone. Not a terminal. Not an emulator. A complete desktop environment with direct kernel access -- VS Code, Blender, Metasploit, local AI, all of it.
 
