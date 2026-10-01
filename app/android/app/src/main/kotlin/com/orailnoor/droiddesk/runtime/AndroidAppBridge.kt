@@ -207,7 +207,11 @@ object AndroidAppBridge {
         appsDir: File,
     ) {
         val byPackage = activities.associateBy { it.activityInfo.packageName }
-        val dockEntries = getDockPackages(context).mapIndexedNotNull { index, packageName ->
+        val panelFile = File(homeDir, ".config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml")
+        forgetDockAppsRemovedInPanel(context, panelFile)
+        val dockPackages = getDockPackages(context)
+        rememberSyncedDock(context, dockPackages)
+        val dockEntries = dockPackages.mapIndexedNotNull { index, packageName ->
             if (!byPackage.containsKey(packageName)) return@mapIndexedNotNull null
             val safeName = packageName.replace(Regex("[^A-Za-z0-9_.-]"), "_")
             val source = File(appsDir, "$safeName.desktop")
@@ -222,7 +226,6 @@ object AndroidAppBridge {
             id to dockFile.name
         }
 
-        val panelFile = File(homeDir, ".config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml")
         if (!panelFile.isFile) return
         val idStart = "<!-- DroidDesk Android dock ids start -->"
         val idEnd = "<!-- DroidDesk Android dock ids end -->"
@@ -270,8 +273,43 @@ object AndroidAppBridge {
         Log.i(TAG, "Added ${dockEntries.size} installed Android apps to the XFCE dock")
     }
 
+    /**
+     * The dock list lives in preferences and is rewritten into the panel on every
+     * start, so an app removed in XFCE (right click > Remove) used to come back.
+     * Compare the panel with what was synced last time and drop the missing ones.
+     */
+    private fun forgetDockAppsRemovedInPanel(context: Context, panelFile: File) {
+        val preferences = context.getSharedPreferences("desktop_integration", Context.MODE_PRIVATE)
+        val synced = preferences.getString("dock_synced", null) ?: return
+        if (!panelFile.isFile) return
+        val panelIds = panelPluginIds(panelFile.readText()) ?: return
+        val removed = synced.split(',').mapNotNull { entry ->
+            val (id, packageName) = entry.split(':', limit = 2).takeIf { it.size == 2 } ?: return@mapNotNull null
+            packageName.takeIf { id.toIntOrNull() !in panelIds }
+        }.toSet()
+        if (removed.isEmpty()) return
+        setDockPackages(context, getDockPackages(context).filterNot { it in removed })
+        Log.i(TAG, "Removed from the dock in XFCE, forgetting: $removed")
+    }
+
+    private fun rememberSyncedDock(context: Context, packages: List<String>) {
+        context.getSharedPreferences("desktop_integration", Context.MODE_PRIVATE).edit()
+            .putString("dock_synced", packages.mapIndexed { index, name -> "${30 + index}:$name" }.joinToString(","))
+            .commit()
+    }
+
+    /** Plugin ids of the dock (panel-2), or null when the file cannot be read that way. */
+    private fun panelPluginIds(xml: String): Set<Int>? {
+        val panel = xml.indexOf("<property name=\"panel-2\"").takeIf { it >= 0 } ?: return null
+        val ids = xml.indexOf("<property name=\"plugin-ids\"", panel).takeIf { it >= 0 } ?: return null
+        val end = xml.indexOf("</property>", ids).takeIf { it >= 0 } ?: return null
+        return Regex("value=\"(\\d+)\"").findAll(xml.substring(ids, end))
+            .map { it.groupValues[1].toInt() }.toSet()
+    }
+
     /** Updates the active xfconf session; editing its XML file alone is not enough while XFCE is running. */
     fun xfceDockCommand(context: Context): String {
+        rememberSyncedDock(context, getDockPackages(context))
         val dock = getDockPackages(context).mapIndexed { index, packageName ->
             val safeName = packageName.replace(Regex("[^A-Za-z0-9_.-]"), "_")
             (30 + index) to "droiddesk-android-$safeName.desktop"
