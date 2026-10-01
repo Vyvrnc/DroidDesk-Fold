@@ -326,6 +326,57 @@ class LinuxRuntime(private val context: Context) {
             DROIDDESK_BASHRC
             grep -q /etc/droiddesk/bashrc ~/.bashrc 2>/dev/null ||
                 echo '[ -f /etc/droiddesk/bashrc ] && . /etc/droiddesk/bashrc' >> ~/.bashrc
+            # Autoremove after purging flatpak/bubblewrap once took gpgv with it.
+            apt-mark manual gpgv gnupg >/dev/null 2>&1 || true
+
+            # Debian's Mesa cannot drive Adreno through KGSL, so GL apps need llvmpipe.
+            # WebKitGTK's WebProcess crashes when it tries to sandbox with bwrap here.
+            # Login shells (start-debian, debian-run) read this; drop it once GPU works.
+            cat > /etc/profile.d/droiddesk-gui.sh <<'DROIDDESK_GUI_ENV'
+            export LIBGL_ALWAYS_SOFTWARE=1
+            export GALLIUM_DRIVER=llvmpipe
+            export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+            export WEBKIT_DISABLE_COMPOSITING_MODE=1
+            DROIDDESK_GUI_ENV
+
+            # Mirror Debian's menu entries into the XFCE menu on the Termux side.
+            # Files go straight into applications/: garcon ignores a new subfolder.
+            cat > /usr/local/sbin/droiddesk-menu-sync <<'DROIDDESK_MENU_SYNC'
+            #!/bin/sh
+            RF="${File(prefixDir, "var/lib/proot-distro/containers/debian/rootfs").absolutePath}"
+            OUT="${File(homeDir, ".local/share/applications").absolutePath}"
+            RUN="${File(binDir, "debian-run").absolutePath}"
+            mkdir -p "${'$'}OUT"; rm -f "${'$'}OUT"/debian-*.desktop
+            find_icon() {
+                case "${'$'}1" in /*) [ -f "${'$'}1" ] && echo "${'$'}RF${'$'}1"; return;; esac
+                f=$(ls /usr/share/icons/hicolor/*/apps/"${'$'}1".png /usr/share/icons/hicolor/scalable/apps/"${'$'}1".svg /usr/share/pixmaps/"${'$'}1".* 2>/dev/null | sort -V | tail -1)
+                [ -n "${'$'}f" ] && echo "${'$'}RF${'$'}f" || echo "${'$'}1"
+            }
+            for d in /usr/share/applications/*.desktop /usr/local/share/applications/*.desktop; do
+                [ -f "${'$'}d" ] || continue
+                grep -qE '^(NoDisplay|Hidden)=true' "${'$'}d" && continue
+                grep -q '^Terminal=true' "${'$'}d" && continue
+                grep -qE '^OnlyShowIn=' "${'$'}d" && continue
+                exec_line=$(sed -n 's/^Exec=//p' "${'$'}d" | head -1); [ -n "${'$'}exec_line" ] || continue
+                icon=$(sed -n 's/^Icon=//p' "${'$'}d" | head -1)
+                name=$(sed -n 's/^Name=//p' "${'$'}d" | head -1)
+                out="${'$'}OUT/debian-$(basename "${'$'}d")"
+                # Main [Desktop Entry] section only, without Actions.
+                awk '/^\[/{s=(${'$'}0=="[Desktop Entry]")} s' "${'$'}d" |
+                    grep -vE '^(Exec|TryExec|Icon|Name(\[[^]]*\])?|DBusActivatable|Actions)=' > "${'$'}out"
+                {
+                    echo "Name=${'$'}name (Debian)"
+                    echo "Exec=${'$'}RUN dbus-launch --exit-with-session ${'$'}exec_line"
+                    echo "Icon=$(find_icon "${'$'}icon")"
+                } >> "${'$'}out"
+            done
+            echo "droiddesk-menu-sync: $(ls "${'$'}OUT"/debian-*.desktop 2>/dev/null | wc -l) entries -> ${'$'}OUT"
+            DROIDDESK_MENU_SYNC
+            chmod 755 /usr/local/sbin/droiddesk-menu-sync
+            echo 'DPkg::Post-Invoke { "[ -x /usr/local/sbin/droiddesk-menu-sync ] && /usr/local/sbin/droiddesk-menu-sync >/dev/null 2>&1 || true"; };' \
+                > /etc/apt/apt.conf.d/99droiddesk-menu-sync
+            /usr/local/sbin/droiddesk-menu-sync
+
             echo "DroidDesk Debian setup done"
             DROIDDESK_DEBIAN_SETUP
             """.trimIndent() + "\n",
