@@ -565,3 +565,47 @@ void *dlopen(const char *filename, int flag) {
     }
     return ret;
 }
+
+/*
+ * Program paths compiled into Termux packages (bash.bashrc's command-not-found
+ * handler, scripts calling $PREFIX/bin/... absolutely) point at com.termux,
+ * which does not exist here. stat/access above already redirect, so "-x" tests
+ * pass and the exec itself then fails with ENOENT. Only com.termux paths are
+ * rewritten: they cannot work unmodified, while FHS paths such as /bin/sh
+ * resolve through Android's own symlinks and keep their current behaviour.
+ */
+static const char* rewrite_exec_path(const char* path, char* buf, size_t buf_size) {
+    if (path && strncmp(path, "/data/data/com.termux/", strlen("/data/data/com.termux/")) == 0) {
+        return rewrite_path(path, buf, buf_size);
+    }
+    return path;
+}
+
+static int (*real_execve)(const char *, char *const [], char *const []) = NULL;
+static int (*real_execv)(const char *, char *const []) = NULL;
+static int (*real_execvp)(const char *, char *const []) = NULL;
+static int (*real_execvpe)(const char *, char *const [], char *const []) = NULL;
+
+int execve(const char *pathname, char *const argv[], char *const envp[]) {
+    if (!real_execve) real_execve = dlsym(RTLD_NEXT, "execve");
+    char buf[1024];
+    return real_execve(rewrite_exec_path(pathname, buf, sizeof(buf)), argv, envp);
+}
+
+int execv(const char *pathname, char *const argv[]) {
+    if (!real_execv) real_execv = dlsym(RTLD_NEXT, "execv");
+    char buf[1024];
+    return real_execv(rewrite_exec_path(pathname, buf, sizeof(buf)), argv);
+}
+
+int execvp(const char *file, char *const argv[]) {
+    if (!real_execvp) real_execvp = dlsym(RTLD_NEXT, "execvp");
+    char buf[1024];
+    return real_execvp(rewrite_exec_path(file, buf, sizeof(buf)), argv);
+}
+
+int execvpe(const char *file, char *const argv[], char *const envp[]) {
+    if (!real_execvpe) real_execvpe = dlsym(RTLD_NEXT, "execvpe");
+    char buf[1024];
+    return real_execvpe(rewrite_exec_path(file, buf, sizeof(buf)), argv, envp);
+}

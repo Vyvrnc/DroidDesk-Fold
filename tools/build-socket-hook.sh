@@ -16,5 +16,5 @@ T=/opt/android-sdk-linux/ndk/$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
 cd /repo/app
 \$T/aarch64-linux-android29-clang -shared -fPIC -O2 -Wall \
   -o android/app/src/main/jniLibs/arm64-v8a/libsocket_hook.so assets/socket_hook.c -ldl -llog
-\$T/llvm-nm -D --defined-only android/app/src/main/jniLibs/arm64-v8a/libsocket_hook.so | grep -w -E 'bind|connect|open'
+\$T/llvm-nm -D --defined-only android/app/src/main/jniLibs/arm64-v8a/libsocket_hook.so | grep -w -E 'bind|connect|open|execve|execvp'
 "
