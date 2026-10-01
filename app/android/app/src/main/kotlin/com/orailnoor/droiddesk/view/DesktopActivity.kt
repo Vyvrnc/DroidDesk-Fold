@@ -103,8 +103,37 @@ class DesktopActivity : Activity() {
         }
     }
 
+    // The X11 bind/connect had no timeout: when it did not complete after the
+    // phone woke up, the loading overlay stayed on "Almost ready" forever although
+    // X and XFCE were running. Retry the connection, then reveal the desktop anyway.
+    private var watchdogTicks = 0
+    private val connectWatchdog = object : Runnable {
+        override fun run() {
+            if (desktopRevealed || isFinishing || isDestroyed) return
+            watchdogTicks++
+            when {
+                watchdogTicks >= WATCHDOG_MAX_TICKS -> {
+                    Log.w(TAG, "Desktop still hidden after ${watchdogTicks * WATCHDOG_TICK_MS / 1000} s, revealing it")
+                    revealDesktop(false)
+                    return
+                }
+                !LorieView.connected() && lorieView != null -> {
+                    Log.w(TAG, "No X11 connection yet, reconnecting (attempt $watchdogTicks)")
+                    x11ServiceClient?.disconnect()
+                    x11ServiceClient = null
+                    connectionRequested = true
+                    connectToX11Service()
+                }
+            }
+            loadingMessageHandler.postDelayed(this, WATCHDOG_TICK_MS)
+        }
+    }
+
     companion object {
         private const val TAG = "DesktopActivity"
+        private const val WATCHDOG_TICK_MS = 20_000L
+        // Long enough for a cold session start (waitForDesktopReady allows 45 s).
+        private const val WATCHDOG_MAX_TICKS = 5
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -127,6 +156,7 @@ class DesktopActivity : Activity() {
         // until a decor view has been created by setContentView().
         enableImmersiveMode()
 
+        loadingMessageHandler.postDelayed(connectWatchdog, WATCHDOG_TICK_MS)
         Log.i(TAG, "DesktopActivity created mode=$sessionMode startSession=$shouldStartSession")
     }
 
@@ -599,6 +629,7 @@ class DesktopActivity : Activity() {
             desktopRevealed = true
             loadingMessageHandler.removeCallbacks(loadingMessageTicker)
             loadingMessageHandler.removeCallbacks(loadingEstimateTicker)
+            loadingMessageHandler.removeCallbacks(connectWatchdog)
             if (!ready) Log.w(TAG, "Revealing desktop after readiness timeout")
             Log.i(TAG, "Desktop revealed ready=$ready")
             loadingOverlay?.animate()
@@ -624,6 +655,7 @@ class DesktopActivity : Activity() {
         clipboardSync = null
         loadingMessageHandler.removeCallbacks(loadingMessageTicker)
         loadingMessageHandler.removeCallbacks(loadingEstimateTicker)
+        loadingMessageHandler.removeCallbacks(connectWatchdog)
         surfaceCallback?.let { callback -> lorieView?.holder?.removeCallback(callback) }
         surfaceCallback = null
         inputController?.dispose()

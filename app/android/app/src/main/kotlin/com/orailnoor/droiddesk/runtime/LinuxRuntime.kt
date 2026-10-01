@@ -2319,7 +2319,12 @@ class LinuxRuntime(private val context: Context) {
                         builder.environment().putAll(getTermuxEnv())
                     }
                     .start()
-                    .waitFor() == 0
+                    .let { process ->
+                        // A hung pgrep must not stall the readiness loop past its deadline.
+                        val done = process.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)
+                        if (!done) process.destroyForcibly()
+                        done && process.exitValue() == 0
+                    }
             }.getOrDefault(false)
             if (ready) {
                 Thread.sleep(650)
