@@ -222,6 +222,22 @@ Add this line:
 | `bash ~/proot-menu-sync.sh` | Sync Proot apps to desktop menu |
 | `bash ~/stop-linux.sh` | Stop all sessions |
 
+Commands of this fork's DroidDesk app (in its terminal):
+
+| Command | What It Does |
+|---|---|
+| `start-debian` | Shell in the Debian container (use it instead of plain `proot-distro login`) |
+| `debian-run CMD…` | Run one Debian program from the Termux side |
+| `claude-debian [args]` | Claude Code inside Debian, in `~/projekty/Claude` (e.g. `claude-debian --resume`) |
+| `debian-setup` | Install/refresh the Debian integration (tools, locale, time zone, fonts, menu, GPU); safe to repeat |
+| `droiddesk-gpu on\|off\|status` | Hardware OpenGL for Debian programs (applies to newly started apps) |
+| `gpu-run CMD…` | One Debian program with hardware OpenGL even while it is switched off |
+| `droiddesk-open [--android] FILE\|URL` | Open with the Linux app, or in Android with `--android` / when no Linux app fits |
+| `droiddesk-usb list` | USB devices attached to the phone |
+| `droiddesk-usb flash IMAGE[.xz\|.gz] [DEVICE] [--lun N]` | Write a disk image to a flash drive or card and verify it |
+| `droiddesk-usb read FILE [DEVICE] [--lun N]` | Copy a whole flash drive or card into a file |
+| `droiddesk-usb exec DEVICE -- CMD…` | Experimental: give a libusb program the USB device (`DROIDDESK_USB_FD`) |
+
 ## Notes
 
 > [!WARNING]

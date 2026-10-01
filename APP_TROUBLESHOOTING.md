@@ -2,6 +2,28 @@
 
 Welcome to the DroidDesk troubleshooting guide. This document explains how to fix common issues when installing and running Linux applications inside the DroidDesk container.
 
+## This fork: desktop and Debian
+
+**Black screen with a mouse cursor after restarting the desktop.** X is running but XFCE did not start, usually because a PulseAudio left over from the previous session stopped answering. Fixed in 1.0.1-fold.5; on older builds run `pkill -9 pulseaudio` in DroidDesk's own terminal.
+
+**Stuck on "Almost ready" after the phone wakes up.** Since 1.0.1-fold.5 the X connection is retried every 20 s and the desktop is shown after 100 s at the latest. If it still happens, switch to another app and back.
+
+**The whole desktop disappears after minimizing.** Android killed the X server process under memory pressure (`adb shell dumpsys activity exit-info com.orailnoor.droiddesk` shows `:x11 … LOW_MEMORY`). Since 1.0.1-fold.4 it keeps the session's priority. Large apps (slicers, browsers with many tabs) still need free RAM; close Android apps you do not need.
+
+**`proot-distro login debian` fails with "can't create temporary directory".** Use `start-debian` (or `debian-run`, `claude-debian`): they set `PROOT_TMP_DIR` and the loader for DroidDesk's prefix.
+
+**"CANNOT LINK EXECUTABLE … libandroid-support.so" inside Debian.** A Termux program was found on Debian's `PATH`. Run `debian-setup` once; it removes the Termux bin directory from Debian's `PATH`.
+
+**Native Linux binaries fail with "required file not found" (Claude Code, Brave, AppImages).** They need glibc; Termux uses Android's Bionic. Run them in the Debian container (`start-debian`, then install there).
+
+**No sound from Debian programs.** Debian talks to PulseAudio over TCP on 127.0.0.1. Update to 1.0.1-fold.5+ and restart the desktop; `pactl info` (package `pulseaudio-utils`) in Debian should show a sink.
+
+**3D apps are slow or crash in Debian.** `droiddesk-gpu status` shows whether hardware OpenGL is on. If an app crashes with it, try `droiddesk-gpu off` (software rendering) and report the app.
+
+**Links open in an Android browser instead of Firefox.** Since 1.0.1-fold.6 `droiddesk-open` and `xdg-open` use the Linux default app from `mimeapps.list` first. Set it with `xdg-mime default firefox.desktop x-scheme-handler/https` if needed.
+
+**`droiddesk-usb` says "several cards inserted".** Multi-slot card readers expose one slot per LUN; choose the card with `--lun N` (the error lists the slots and sizes). Android asks for USB permission the first time; accept it on the phone.
+
 ## The "Running as root without --no-sandbox is not supported" Error
 
 Because DroidDesk utilizes a PRoot environment, you are logged in as the `root` user by default. Modern Electron and Chromium-based applications have strict security sandboxes that refuse to run as root.
