@@ -187,6 +187,8 @@ class LinuxRuntime(private val context: Context) {
             mkdir -p "${tmpDir.absolutePath}/proot"
             exec "${File(binDir, "proot-distro").absolutePath}" login debian \
                 --bind "${tmpDir.absolutePath}:/tmp" \
+                --bind /storage:/storage \
+                --env DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/dbus-session" \
                 --env PROOT_TMP_DIR="${tmpDir.absolutePath}/proot" \
                 --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
                 --env PROOT_LOADER_32="${File(prefixDir, "libexec/proot/loader32").absolutePath}" -- \
@@ -204,6 +206,8 @@ class LinuxRuntime(private val context: Context) {
             mode="${'$'}{1:-gui}"
             exec "${File(binDir, "proot-distro").absolutePath}" login debian \
                 --bind "${tmpDir.absolutePath}:/tmp" \
+                --bind /storage:/storage \
+                --env DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/dbus-session" \
                 --env PROOT_TMP_DIR="${tmpDir.absolutePath}/proot" \
                 --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
                 --env PROOT_LOADER_32="${File(prefixDir, "libexec/proot/loader32").absolutePath}" -- \
@@ -251,6 +255,8 @@ class LinuxRuntime(private val context: Context) {
             mkdir -p "${tmpDir.absolutePath}/proot"
             exec "${File(binDir, "proot-distro").absolutePath}" login debian \
                 --bind "${tmpDir.absolutePath}:/tmp" \
+                --bind /storage:/storage \
+                --env DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/dbus-session" \
                 --env PROOT_TMP_DIR="${tmpDir.absolutePath}/proot" \
                 --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
                 --env PROOT_LOADER_32="${File(prefixDir, "libexec/proot/loader32").absolutePath}" -- \
@@ -270,6 +276,8 @@ class LinuxRuntime(private val context: Context) {
             mkdir -p "${tmpDir.absolutePath}/proot"
             exec "${File(binDir, "proot-distro").absolutePath}" login debian \
                 --bind "${tmpDir.absolutePath}:/tmp" \
+                --bind /storage:/storage \
+                --env DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/dbus-session" \
                 --env PROOT_TMP_DIR="${tmpDir.absolutePath}/proot" \
                 --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
                 --env PROOT_LOADER_32="${File(prefixDir, "libexec/proot/loader32").absolutePath}" -- \
@@ -295,6 +303,8 @@ class LinuxRuntime(private val context: Context) {
             mkdir -p "${tmpDir.absolutePath}/proot"
             exec "${File(binDir, "proot-distro").absolutePath}" login debian \
                 --bind "${tmpDir.absolutePath}:/tmp" \
+                --bind /storage:/storage \
+                --env DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/dbus-session" \
                 --env PROOT_TMP_DIR="${tmpDir.absolutePath}/proot" \
                 --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
                 --env PROOT_LOADER_32="${File(prefixDir, "libexec/proot/loader32").absolutePath}" -- \
@@ -327,13 +337,35 @@ class LinuxRuntime(private val context: Context) {
             HISTCONTROL=ignoreboth:erasedups
             shopt -s histappend
             PROMPT_COMMAND="history -a${'$'}{PROMPT_COMMAND:+; ${'$'}PROMPT_COMMAND}"
-            [ -f /usr/share/bash-completion/bash_completion ] && . /usr/share/bash-completion/bash_completion
+            # Login shells already load it through /etc/profile.d/bash_completion.sh.
+            [ -z "${'$'}BASH_COMPLETION_VERSINFO" ] && [ -f /usr/share/bash-completion/bash_completion ] &&
+                . /usr/share/bash-completion/bash_completion
             [ -f /usr/share/doc/fzf/examples/key-bindings.bash ] && . /usr/share/doc/fzf/examples/key-bindings.bash
             DROIDDESK_BASHRC
             grep -q /etc/droiddesk/bashrc ~/.bashrc 2>/dev/null ||
                 echo '[ -f /etc/droiddesk/bashrc ] && . /etc/droiddesk/bashrc' >> ~/.bashrc
             # Autoremove after purging flatpak/bubblewrap once took gpgv with it.
             apt-mark manual gpgv gnupg >/dev/null 2>&1 || true
+
+            # The Docker-style rootfs keeps apt from caching and makes every apt
+            # call ~1 s slower (apt-cache 950 -> 77 ms without them).
+            rm -f /etc/apt/apt.conf.d/docker-clean /etc/apt/apt.conf.d/docker-gzip-indexes
+
+            # Android's own fonts (emoji, CJK) are bound into the container.
+            if [ -d /system/fonts ]; then
+                cat > /etc/fonts/local.conf <<'DROIDDESK_FONTS'
+            <?xml version="1.0"?>
+            <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+            <fontconfig>
+              <dir>/system/fonts</dir>
+              <alias>
+                <family>emoji</family>
+                <prefer><family>Noto Color Emoji</family></prefer>
+              </alias>
+            </fontconfig>
+            DROIDDESK_FONTS
+                fc-cache -f >/dev/null 2>&1 || true
+            fi
 
             # Login shells (start-debian, debian-run) read this. With hardware OpenGL
             # on (droiddesk-gpu), every Debian program gets the /opt/mesa-kgsl
@@ -463,7 +495,9 @@ class LinuxRuntime(private val context: Context) {
                     grep -vE '^(Exec|TryExec|Icon|Name(\[[^]]*\])?|DBusActivatable|Actions)=' > "${'$'}out"
                 {
                     echo "Name=${'$'}name (Debian)"
-                    echo "Exec=${'$'}RUN dbus-launch --exit-with-session ${'$'}exec_line"
+                    # debian-run passes the XFCE session bus, so notifications and
+                    # portals work; dbus-launch used to leave a private bus per app.
+                    echo "Exec=${'$'}RUN ${'$'}exec_line"
                     echo "Icon=$(find_icon "${'$'}icon")"
                 } >> "${'$'}out"
             done
@@ -526,6 +560,16 @@ class LinuxRuntime(private val context: Context) {
                         done
                     fi
                     mkdir -p "${'$'}(dirname "${'$'}marker")" && touch "${'$'}marker"
+                fi
+
+                marker2="${'$'}HOME/.config/droiddesk/xfce-tweaks-v2"
+                if [ ! -f "${'$'}marker2" ]; then
+                    xfconf-query -c xfce4-terminal -p /scrolling-lines -n -t uint -s 20000
+                    if command -v xdg-mime >/dev/null &&
+                        ! grep -q '^text/plain=' "${'$'}HOME/.config/mimeapps.list" 2>/dev/null; then
+                        xdg-mime default org.xfce.mousepad.desktop text/plain
+                    fi
+                    mkdir -p "${'$'}(dirname "${'$'}marker2")" && touch "${'$'}marker2"
                 fi
 
                 # A vertical panel (mode 1) rotates text plugins such as the battery
@@ -2244,7 +2288,8 @@ class LinuxRuntime(private val context: Context) {
             pkill -9 -x pulseaudio >/dev/null 2>&1 || true
             if [ "${if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) "1" else "0"}" = "1" ]; then
                 pulseaudio --start --exit-idle-time=-1 \
-                    --load=module-aaudio-sink >/dev/null 2>&1 || true
+                    --load=module-aaudio-sink \
+                    --load="module-native-protocol-tcp auth-ip-acl=127.0.0.1 auth-anonymous=1" >/dev/null 2>&1 || true
                 audio_ready=0
                 for attempt in 1 2 3 4 5 6 7 8 9 10; do
                     if timeout 2 pactl list short sinks 2>/dev/null | grep -q AAudio_sink; then
@@ -2256,11 +2301,13 @@ class LinuxRuntime(private val context: Context) {
                 if [ "${'$'}audio_ready" != "1" ]; then
                     timeout 2 pulseaudio -k >/dev/null 2>&1 || true
                     pkill -9 -x pulseaudio >/dev/null 2>&1 || true
-                    pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+                    pulseaudio --start --exit-idle-time=-1 --load="module-native-protocol-tcp auth-ip-acl=127.0.0.1 auth-anonymous=1" >/dev/null 2>&1 || true
                 fi
             else
-                pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+                pulseaudio --start --exit-idle-time=-1 --load="module-native-protocol-tcp auth-ip-acl=127.0.0.1 auth-anonymous=1" >/dev/null 2>&1 || true
             fi
+            # The TCP module is for Debian programs: proot-distro sets
+            # PULSE_SERVER=127.0.0.1 there. Termux programs keep the native socket.
             echo "DIAG: PulseAudio sinks: ${'$'}(timeout 2 pactl list short sinks 2>/dev/null | cut -f2 | tr '\n' ' ')"
 
             echo "DIAG: Launching $desktopCommand natively on DISPLAY=:0 ..."
