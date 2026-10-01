@@ -12,6 +12,9 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.ServiceConnection
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
 import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
@@ -70,6 +73,42 @@ class DroidDeskService : Service() {
         }
     }
 
+    // Debian's glibc resolver reads /etc/resolv.conf, which proot-distro fills
+    // with 8.8.8.8, so it ignored Android's VPN (e.g. a company VPN) and the
+    // network's own DNS. Mirror the DNS servers of the default network, which
+    // is the VPN while one is active. Termux's bionic programs ask Android
+    // directly and need nothing.
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+            writeDebianResolvConf(linkProperties)
+        }
+    }
+
+    private fun writeDebianResolvConf(linkProperties: LinkProperties) {
+        val servers = linkProperties.dnsServers
+            .filterNot { it.isLinkLocalAddress }
+            .mapNotNull { it.hostAddress }
+            .take(3)
+        if (servers.isEmpty()) return
+        val etc = File(filesDir, "usr/var/lib/proot-distro/containers/debian/rootfs/etc")
+        if (!etc.isDirectory) return
+        try {
+            val resolvConf = File(etc, "resolv.conf")
+            // A symlink would point at a path that only exists inside a real system.
+            if (java.nio.file.Files.isSymbolicLink(resolvConf.toPath())) resolvConf.delete()
+            resolvConf.writeText(
+                buildString {
+                    append("# Written by DroidDesk from Android's active network\n")
+                    servers.forEach { append("nameserver ").append(it).append('\n') }
+                    linkProperties.domains?.takeIf { it.isNotBlank() }?.let {
+                        append("search ").append(it.replace(',', ' ')).append('\n')
+                    }
+                },
+            )
+        } catch (_: Exception) {
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         AndroidAppBridge.start(this)
@@ -81,6 +120,9 @@ class DroidDeskService : Service() {
             Context.BIND_AUTO_CREATE or Context.BIND_IMPORTANT,
         )
         registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        runCatching {
+            getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(networkCallback)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -104,6 +146,9 @@ class DroidDeskService : Service() {
 
     override fun onDestroy() {
         unregisterReceiver(batteryReceiver)
+        runCatching {
+            getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkCallback)
+        }
         if (x11Bound) {
             unbindService(x11Connection)
             x11Bound = false
