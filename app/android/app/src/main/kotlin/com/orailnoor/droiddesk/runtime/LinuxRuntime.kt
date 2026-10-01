@@ -484,7 +484,9 @@ class LinuxRuntime(private val context: Context) {
             # path, then hand it to the Termux-side bridge client.
             cat > /usr/local/bin/droiddesk-open <<'DROIDDESK_OPEN'
             #!/bin/bash
-            [ ${'$'}# -ge 1 ] || { echo "Usage: droiddesk-open FILE|URL" >&2; exit 2; }
+            [ ${'$'}# -ge 1 ] || { echo "Usage: droiddesk-open [--android] FILE|URL" >&2; exit 2; }
+            mode=xdg
+            for target; do [ "${'$'}target" = --android ] && mode=open; done
             for target; do :; done
             case "${'$'}target" in
                 file://*) target="${'$'}{target#file://}"; target="${'$'}{target#localhost}"
@@ -500,7 +502,7 @@ class LinuxRuntime(private val context: Context) {
                 esac
             fi
             LD_LIBRARY_PATH="${File(prefixDir, "lib").absolutePath}" exec "${File(binDir, "python3").absolutePath}" \
-                "${File(homeDir, ".local/bin/droiddesk-launch-android-app.py").absolutePath}" "open:${'$'}target"
+                "${File(homeDir, ".local/bin/droiddesk-launch-android-app.py").absolutePath}" "${'$'}mode:${'$'}target"
             DROIDDESK_OPEN
             chmod 755 /usr/local/bin/droiddesk-open
             # Without xdg-utils, let "open URL/file" in Debian apps reach Android.
@@ -629,17 +631,21 @@ class LinuxRuntime(private val context: Context) {
             openScript.writeText(
                 """
                 #!${File(binDir, "bash").absolutePath}
-                # droiddesk-open FILE|URL — open in an Android app. Leading options
-                # (termux-open's --view, --send, --content-type X) are ignored.
-                [ ${'$'}# -ge 1 ] || { echo "Usage: droiddesk-open FILE|URL" >&2; exit 2; }
+                # droiddesk-open [--android] FILE|URL — open with the Linux app set in
+                # mimeapps.list, or in an Android app when there is none (--android:
+                # always Android). Other leading options (termux-open's --view, --send,
+                # --content-type X) are ignored.
+                [ ${'$'}# -ge 1 ] || { echo "Usage: droiddesk-open [--android] FILE|URL" >&2; exit 2; }
+                mode=xdg
+                for target; do [ "${'$'}target" = --android ] && mode=open; done
                 for target; do :; done
                 case "${'$'}target" in
                     file://*) target="${'$'}{target#file://}"; target="${'$'}{target#localhost}"
                     bs='\x'; target=${'$'}(printf '%b' "${'$'}{target//%/${'$'}bs}") ;;
-                    [A-Za-z]*:*) exec "${File(binDir, "python3").absolutePath}" "${bridgeClient.absolutePath}" "open:${'$'}target" ;;
+                    [A-Za-z]*:*) exec "${File(binDir, "python3").absolutePath}" "${bridgeClient.absolutePath}" "${'$'}mode:${'$'}target" ;;
                 esac
                 target=${'$'}(realpath -- "${'$'}target") || exit 1
-                exec "${File(binDir, "python3").absolutePath}" "${bridgeClient.absolutePath}" "open:${'$'}target"
+                exec "${File(binDir, "python3").absolutePath}" "${bridgeClient.absolutePath}" "${'$'}mode:${'$'}target"
                 """.trimIndent() + "\n",
             )
             openScript.setExecutable(true, false)
@@ -659,11 +665,10 @@ class LinuxRuntime(private val context: Context) {
                 Type=Application
                 Name=Otevřít v Androidu
                 Comment=Open with an Android app
-                Exec=${openScript.absolutePath} %f
+                Exec=${openScript.absolutePath} --android %f
                 Icon=phone
                 NoDisplay=true
                 Terminal=false
-                MimeType=application/pdf;image/jpeg;image/png;image/gif;image/webp;video/mp4;video/x-matroska;video/webm;audio/mpeg;audio/ogg;audio/flac;audio/x-wav;text/plain;text/html;text/csv;application/zip;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.openxmlformats-officedocument.presentationml.presentation;application/msword;application/vnd.ms-excel;application/vnd.android.package-archive;
                 """.trimIndent() + "\n",
             )
 
@@ -1536,6 +1541,34 @@ class LinuxRuntime(private val context: Context) {
     }
 
     private fun File.readTextOrNull(): String? = runCatching { readText() }.getOrNull()
+
+    /**
+     * droiddesk-open prefers Linux apps (mimeapps.list: Firefox, Mousepad, …)
+     * so the user stays on the desktop. Runs gio/exo-open in the XFCE session's
+     * environment; Debian programs cannot do that themselves because Termux
+     * programs started inside proot do not find the X socket. Returns false when
+     * no Linux app handles the target, so the caller can fall back to Android.
+     */
+    fun openWithLinuxApp(target: String): Boolean {
+        if (!isBootstrapped()) return false
+        val script = "if [ -e \"\$1\" ]; then exec gio open \"\$1\"; fi; gio open \"\$1\" || exec exo-open \"\$1\""
+        return runCatching {
+            val process = ProcessBuilder(File(binDir, "bash").absolutePath, "-c", script, "droiddesk-open", target)
+                .directory(homeDir)
+                .redirectErrorStream(true)
+                .redirectOutput(ProcessBuilder.Redirect.to(File("/dev/null")))
+                .also { builder ->
+                    builder.environment().clear()
+                    builder.environment().putAll(getTermuxEnv())
+                    builder.environment()["DBUS_SESSION_BUS_ADDRESS"] =
+                        "unix:path=${File(tmpDir, "dbus-session").absolutePath}"
+                }
+                .start()
+            val done = process.waitFor(15, java.util.concurrent.TimeUnit.SECONDS)
+            if (!done) process.destroyForcibly()
+            done && process.exitValue() == 0
+        }.getOrDefault(false)
+    }
 
     // ── Environment Configuration ──
 

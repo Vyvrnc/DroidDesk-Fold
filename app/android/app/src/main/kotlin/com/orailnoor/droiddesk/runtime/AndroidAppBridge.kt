@@ -356,6 +356,10 @@ object AndroidAppBridge {
                     launchSystemAction(context, command.removePrefix("action:"))
                 } else if (command.startsWith("open:")) {
                     openInAndroid(context, command.removePrefix("open:"))
+                } else if (command.startsWith("xdg:")) {
+                    // Linux app first; Android only when nothing on the desktop takes it.
+                    val target = command.removePrefix("xdg:")
+                    if (!LinuxRuntime(context).openWithLinuxApp(target)) openInAndroid(context, target)
                 } else {
                     launchPackage(context, command)
                 }
