@@ -514,6 +514,17 @@ class LinuxRuntime(private val context: Context) {
                     mkdir -p "${'$'}(dirname "${'$'}marker")" && touch "${'$'}marker"
                 fi
 
+                # A vertical panel (mode 1) rotates text plugins such as the battery
+                # label; Deskbar (mode 2) keeps the same dock with horizontal text.
+                # Once only, so a user who switches back to vertical keeps it.
+                mode_marker="${'$'}HOME/.config/droiddesk/xfce-panel-deskbar-v1"
+                if [ ! -f "${'$'}mode_marker" ]; then
+                    if [ "${'$'}(xfconf-query -c xfce4-panel -p /panels/panel-2/mode 2>/dev/null)" = 1 ]; then
+                        xfconf-query -c xfce4-panel -p /panels/panel-2/mode -s 2
+                    fi
+                    mkdir -p "${'$'}(dirname "${'$'}mode_marker")" && touch "${'$'}mode_marker"
+                fi
+
                 # Battery in the dock, just before the clock (plugin 3).
                 if [ -f "${File(prefixDir, "lib/xfce4/panel/plugins/libgenmon.so").absolutePath}" ] &&
                     ! xfconf-query -c xfce4-panel -p /plugins/plugin-26 >/dev/null 2>&1; then

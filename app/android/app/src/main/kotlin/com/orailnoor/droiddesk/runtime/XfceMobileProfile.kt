@@ -115,7 +115,7 @@ object XfceMobileProfile {
             <property name="dark-mode" type="bool" value="true"/>
             <property name="panel-2" type="empty">
               <property name="position" type="string" value="p=7;x=0;y=0"/>
-              <property name="mode" type="uint" value="1"/>
+              <property name="mode" type="uint" value="2"/>
               <property name="length" type="uint" value="100"/>
               <property name="length-adjust" type="bool" value="false"/>
               <property name="position-locked" type="bool" value="true"/>
