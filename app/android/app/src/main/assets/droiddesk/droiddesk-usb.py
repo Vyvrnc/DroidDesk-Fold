@@ -145,6 +145,13 @@ def raw_exec(dev, command):
 
 
 def main(argv):
+    if argv and argv[0] == "exec":
+        # Everything after "--" belongs to the child command, untouched.
+        if "--" not in argv or argv.index("--") < 2:
+            print(__doc__.strip(), file=sys.stderr)
+            return 2
+        split = argv.index("--")
+        return raw_exec(pick(argv[1]), argv[split + 1:])
     lun = None
     if "--lun" in argv:
         at = argv.index("--lun")
@@ -170,9 +177,6 @@ def main(argv):
         if command == "flash" and not os.path.isfile(path):
             sys.exit(f"droiddesk-usb: obraz {args[1]} neexistuje")
         return transfer(command, path, pick(args[2] if len(args) > 2 else None), assume_yes, lun)
-    if command == "exec" and "--" in args and args.index("--") >= 2:
-        split = args.index("--")
-        return raw_exec(pick(args[1]), args[split + 1:])
     print(__doc__.strip(), file=sys.stderr)
     return 2
 

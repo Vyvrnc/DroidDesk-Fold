@@ -47,7 +47,12 @@ class DroidDeskService : Service() {
 
         /** Rewrites the Debian resolv.conf from the last known network, if any. */
         fun applyDebianDns(context: Context) {
-            lastLinkProperties?.let { writeDebianResolvConf(context, it) }
+            // Debian can be installed before the service ever ran; ask Android directly then.
+            val linkProperties = lastLinkProperties ?: runCatching {
+                val connectivity = context.getSystemService(ConnectivityManager::class.java)
+                connectivity.getLinkProperties(connectivity.activeNetwork)
+            }.getOrNull()
+            linkProperties?.let { writeDebianResolvConf(context, it) }
         }
 
         private fun writeDebianResolvConf(context: Context, linkProperties: LinkProperties) {
