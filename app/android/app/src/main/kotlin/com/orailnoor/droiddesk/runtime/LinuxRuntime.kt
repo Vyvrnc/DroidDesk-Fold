@@ -597,7 +597,7 @@ class LinuxRuntime(private val context: Context) {
 
             // USB flash drives and card readers through UsbBridge.
             val usbClient = File(binDir, "droiddesk-usb.py")
-            context.assets.open("droiddesk-usb.py").use { input ->
+            context.assets.open("droiddesk/droiddesk-usb.py").use { input ->
                 usbClient.outputStream().use(input::copyTo)
             }
             File(binDir, "droiddesk-usb").let { usbCommand ->
