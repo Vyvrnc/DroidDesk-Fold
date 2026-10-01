@@ -1022,17 +1022,24 @@ class LinuxRuntime(private val context: Context) {
                 # dpkg requires admindir to be inside root. Strip any caller-provided
                 # --root/--admindir (and their values) and prepend our own before any
                 # trailing filenames/apt separators so dpkg parses them as options.
+                # Kept arguments are re-appended to "${'$'}@" so names with spaces or
+                # wildcard characters stay single, unexpanded arguments.
                 caller_dir="${'$'}PWD"
-                args=""
-                while [ ${'$'}# -gt 0 ]; do
-                    case "${'$'}1" in
+                remaining=${'$'}#
+                while [ "${'$'}remaining" -gt 0 ]; do
+                    arg="${'$'}1"
+                    shift
+                    remaining=${'$'}((remaining - 1))
+                    case "${'$'}arg" in
                         --admindir=*|--root=*)
                             ;;
                         --admindir|--root)
-                            shift
+                            if [ "${'$'}remaining" -gt 0 ]; then
+                                shift
+                                remaining=${'$'}((remaining - 1))
+                            fi
                             ;;
                         *)
-                            arg="${'$'}1"
                             case "${'$'}arg" in
                                 /*)
                                     ;;
@@ -1042,15 +1049,14 @@ class LinuxRuntime(private val context: Context) {
                                     fi
                                     ;;
                             esac
-                            args="${'$'}args ${'$'}arg"
+                            set -- "${'$'}@" "${'$'}arg"
                             ;;
                     esac
-                    shift
                 done
                 cd "${prefixDir.absolutePath}" || exit 1
                 scan_marker="${tmpDir.absolutePath}/dpkg-shebang-scan-${'$'}${'$'}"
                 : > "${'$'}scan_marker"
-                "${dpkgReal.absolutePath}" --force-not-root --force-script-chrootless --root="${dpkgRoot.absolutePath}" --admindir="${dpkgRoot.absolutePath}/var/lib/dpkg" ${'$'}args
+                "${dpkgReal.absolutePath}" --force-not-root --force-script-chrootless --root="${dpkgRoot.absolutePath}" --admindir="${dpkgRoot.absolutePath}/var/lib/dpkg" "${'$'}@"
                 status=${'$'}?
                 "${relocateShebangs.absolutePath}" "${'$'}scan_marker"
                 rm -f "${'$'}scan_marker"
@@ -1504,6 +1510,7 @@ class LinuxRuntime(private val context: Context) {
         )
 
         val clang = File(prefixDir, "bin/clang")
+        val hookTmp = File(prefixDir, "lib/.libsocket_hook.so.new")
         if (clang.exists()) {
             Log.i(TAG, "Compiling socket_hook.c natively using clang...")
             val compileCmd = listOf(
@@ -1511,7 +1518,10 @@ class LinuxRuntime(private val context: Context) {
                 "-shared", "-fPIC",
                 hookBuildC.absolutePath,
                 "-I", tmpDir.absolutePath,
-                "-o", hookSo.absolutePath,
+                // Running Linux programs have the current library mapped; build
+                // beside it and rename, so a failed or partial build never
+                // replaces the working one.
+                "-o", hookTmp.absolutePath,
                 "-ldl", "-llog"
             )
             try {
@@ -1526,10 +1536,13 @@ class LinuxRuntime(private val context: Context) {
                 val process = pb.start()
                 val log = process.inputStream.bufferedReader().readText()
                 val exitCode = process.waitFor()
-                if (exitCode == 0) {
+                if (exitCode == 0 && hookTmp.length() > 0 &&
+                    runCatching { android.system.Os.rename(hookTmp.absolutePath, hookSo.absolutePath) }.isSuccess
+                ) {
                     buildMarker.writeText(buildSignature)
                     Log.i(TAG, "Native compilation of libsocket_hook.so successful!")
                 } else {
+                    hookTmp.delete()
                     Log.e(TAG, "Native compilation failed (code $exitCode): $log")
                 }
             } catch (e: Exception) {
