@@ -236,6 +236,81 @@ class LinuxRuntime(private val context: Context) {
             """.trimIndent() + "\n",
         )
         appsLauncher.setExecutable(true, false)
+
+        // Claude Code's native build needs glibc, so it lives in Debian. bash -lc
+        // does not read .bashrc, hence the explicit ~/.local/bin.
+        val claudeLauncher = File(binDir, "claude-debian")
+        claudeLauncher.writeText(
+            """
+            #!${File(binDir, "bash").absolutePath}
+            export DISPLAY="${'$'}{DISPLAY:-:0}"
+            export TMPDIR="${tmpDir.absolutePath}"
+            mkdir -p "${tmpDir.absolutePath}/proot"
+            exec "${File(binDir, "proot-distro").absolutePath}" login debian \
+                --bind "${tmpDir.absolutePath}:/tmp" \
+                --env PROOT_TMP_DIR="${tmpDir.absolutePath}/proot" \
+                --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
+                --env PROOT_LOADER_32="${File(prefixDir, "libexec/proot/loader32").absolutePath}" -- \
+                env DISPLAY="${'$'}DISPLAY" TERM="${'$'}{TERM:-xterm-256color}" \
+                bash -lc 'cd ~/projekty/Claude 2>/dev/null || cd ~; PATH="${'$'}HOME/.local/bin:${'$'}PATH"; exec claude "${'$'}@"' claude "${'$'}@"
+            """.trimIndent() + "\n",
+        )
+        claudeLauncher.setExecutable(true, false)
+
+        // The proot-distro rootfs ships without basic tools, in UTC and without a
+        // locale. Idempotent, so it is safe to rerun by hand on older installs.
+        val timeZone = java.util.TimeZone.getDefault().id
+        val locale = java.util.Locale.getDefault()
+        val localeName = "${locale.language}_${locale.country}.UTF-8"
+        val setupScript = File(binDir, "debian-setup")
+        setupScript.writeText(
+            """
+            #!${File(binDir, "bash").absolutePath}
+            export TMPDIR="${tmpDir.absolutePath}"
+            mkdir -p "${tmpDir.absolutePath}/proot"
+            exec "${File(binDir, "proot-distro").absolutePath}" login debian \
+                --bind "${tmpDir.absolutePath}:/tmp" \
+                --env PROOT_TMP_DIR="${tmpDir.absolutePath}/proot" \
+                --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
+                --env PROOT_LOADER_32="${File(prefixDir, "libexec/proot/loader32").absolutePath}" -- \
+                bash -s <<'DROIDDESK_DEBIAN_SETUP'
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates
+
+            if [ -f "/usr/share/zoneinfo/$timeZone" ]; then
+                ln -sf "/usr/share/zoneinfo/$timeZone" /etc/localtime
+                echo "$timeZone" > /etc/timezone
+            fi
+
+            if grep -q "^# *$localeName UTF-8" /etc/locale.gen; then
+                sed -i "s/^# *$localeName UTF-8/$localeName UTF-8/" /etc/locale.gen
+                locale-gen
+            fi
+            echo "LANG=C.UTF-8" > /etc/default/locale
+
+            mkdir -p /etc/droiddesk
+            cat > /etc/droiddesk/bashrc <<'DROIDDESK_BASHRC'
+            export LANG=C.UTF-8
+            export TZ="$timeZone"
+            export EDITOR=vim
+            export PATH="${'$'}HOME/.local/bin:${'$'}HOME/bin:${'$'}PATH"
+            HISTSIZE=50000
+            HISTFILESIZE=100000
+            HISTCONTROL=ignoreboth:erasedups
+            shopt -s histappend
+            PROMPT_COMMAND="history -a${'$'}{PROMPT_COMMAND:+; ${'$'}PROMPT_COMMAND}"
+            [ -f /usr/share/bash-completion/bash_completion ] && . /usr/share/bash-completion/bash_completion
+            [ -f /usr/share/doc/fzf/examples/key-bindings.bash ] && . /usr/share/doc/fzf/examples/key-bindings.bash
+            DROIDDESK_BASHRC
+            grep -q /etc/droiddesk/bashrc ~/.bashrc 2>/dev/null ||
+                echo '[ -f /etc/droiddesk/bashrc ] && . /etc/droiddesk/bashrc' >> ~/.bashrc
+            echo "DroidDesk Debian setup done"
+            DROIDDESK_DEBIAN_SETUP
+            """.trimIndent() + "\n",
+        )
+        setupScript.setExecutable(true, false)
     }
 
     private fun clearProotDownloadCache() {
@@ -1335,8 +1410,15 @@ class LinuxRuntime(private val context: Context) {
             }
         }
 
-        onProgress?.invoke(0.9, "Creating Debian shell shortcut...")
+        onProgress?.invoke(0.85, "Creating Debian shell shortcut...")
         writeDebianLauncher()
+
+        // Basic tools, time zone and locale. Debian itself is usable without them,
+        // so a failure here (e.g. no network) does not fail the installation.
+        onProgress?.invoke(0.9, "Installing basic Debian tools...")
+        if (executeCommand("debian-setup").startsWith("Error:")) {
+            Log.w(TAG, "Debian setup failed; run debian-setup manually later")
+        }
 
         // The downloaded archive is not needed after extraction.
         clearProotDownloadCache()
