@@ -46,6 +46,9 @@ class BotScsiDevice(
         @JvmStatic
         external fun nativeClearHalt(fd: Int, endpoint: Int): Int
 
+        @JvmStatic
+        external fun nativeReset(fd: Int): Int
+
         const val CBW_SIGNATURE = 0x43425355
         const val CSW_SIGNATURE = 0x53425355
         const val TIMEOUT_MS = 10_000
@@ -184,11 +187,28 @@ class BotScsiDevice(
             } catch (error: TransportError) {
                 // rawCommand already did reset recovery for a broken CSW or phase error.
                 if (++transportErrors > TRANSPORT_RETRIES) {
-                    throw IOException("${error.message} (block $lba, $length bytes, ${if (dirIn) "read" else "write"}, after $TRANSPORT_RETRIES retries)", error)
+                    throw IOException("${error.message} (block $lba, $length bytes, ${if (dirIn) "read" else "write"}, after $TRANSPORT_RETRIES retries incl. port reset)", error)
                 }
-                Thread.sleep(200)
+                // Behind the DeX dock's hub the reader sometimes stops answering on
+                // bulk OUT altogether; neither clearing halts nor the Bulk-Only reset
+                // brings it back. From the second failure on, reset the port, as
+                // Linux usb-storage does.
+                if (transportErrors >= 2) portReset() else Thread.sleep(200)
             }
         }
+    }
+
+    /**
+     * USBDEVFS_RESET, then claim the interface again (the reset unbinds it) and wait
+     * until the unit is ready. The device keeps its address and its medium.
+     */
+    private fun portReset() {
+        if (!nativeAvailable) return Thread.sleep(200)
+        val result = nativeReset(connection.fileDescriptor)
+        android.util.Log.w("BotScsiDevice", "Port reset of the USB device: $result")
+        Thread.sleep(500)
+        if (!connection.claimInterface(iface, true)) throw IOException("could not claim the interface after a port reset")
+        startup { command(ByteArray(6), null, 0, 0, dirIn = false) }
     }
 
     /** A USB-level failure (bad CSW, phase error, incomplete data) that a retry may fix. */
@@ -231,13 +251,15 @@ class BotScsiDevice(
             putInt(CBW_SIGNATURE); putInt(currentTag); putInt(length)
             put(if (dirIn) 0x80.toByte() else 0); put(lun.toByte()); put(cdb.size.toByte()); put(cdb)
         }.array()
+        val sentAt = android.os.SystemClock.elapsedRealtime()
         val sent = connection.bulkTransfer(epOut, cbw, 31, TIMEOUT_MS)
         if (sent != 31) {
+            val took = android.os.SystemClock.elapsedRealtime() - sentAt
             // The OUT pipe stalled or timed out: clear both halts (host and device
             // side) before the class reset, so the next CBW starts clean.
             clearHalt(epOut)
             resetRecovery()
-            throw TransportError("could not send the SCSI command (bulk OUT returned $sent)")
+            throw TransportError("could not send the SCSI command (bulk OUT returned $sent after $took ms)")
         }
         var done = 0
         if (length > 0 && data != null) {
