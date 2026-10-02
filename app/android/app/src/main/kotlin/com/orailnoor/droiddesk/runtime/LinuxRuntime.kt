@@ -128,10 +128,10 @@ class LinuxRuntime(private val context: Context) {
     /** Qualcomm exposes the Adreno render device through KGSL on Android. */
     private fun hasAdrenoGpu(): Boolean = File("/dev/kgsl-3d0").exists()
 
-    private fun normalizedDesktop(desktopEnv: String): String = when (desktopEnv.lowercase()) {
-        "lxqt", "mate", "kde", "xfce4" -> desktopEnv.lowercase()
-        else -> "xfce4"
-    }
+    // The fork supports XFCE only: the dock, Android menu, USB disky and tweaks are
+    // built for it. A choice saved by an older build (lxqt/mate/kde) also gets XFCE.
+    @Suppress("UNUSED_PARAMETER")
+    private fun normalizedDesktop(desktopEnv: String): String = "xfce4"
 
     // ── Status ──
 

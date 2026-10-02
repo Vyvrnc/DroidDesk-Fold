@@ -3,7 +3,7 @@ import 'package:provider/provider.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:droiddesk/theme/droid_theme.dart';
 import 'package:droiddesk/state/app_state.dart';
-import 'package:droiddesk/screens/setup/de_picker.dart';
+import 'package:droiddesk/screens/setup/setup_progress.dart';
 
 /// Welcome screen — first thing the user sees.
 /// Premium, animated landing with the DroidDesk brand.
@@ -160,7 +160,9 @@ class WelcomeScreen extends StatelessWidget {
                             PageRouteBuilder(
                               pageBuilder:
                                   (context, animation, secondaryAnimation) =>
-                                      const DEPickerScreen(),
+                                      // The fork supports XFCE only (dock, Android menu,
+                                      // USB disky and tweaks are built for it).
+                                      const SetupProgressScreen(),
                               transitionsBuilder:
                                   (
                                     context,
