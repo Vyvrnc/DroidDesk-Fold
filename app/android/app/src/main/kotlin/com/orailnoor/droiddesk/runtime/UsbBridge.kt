@@ -232,11 +232,18 @@ object UsbBridge {
                 flags,
             )
             usb.requestPermission(device, intent)
-            latch.await(PERMISSION_TIMEOUT_S, TimeUnit.SECONDS)
+            // On the Fold 7 the result broadcast did not always arrive although
+            // the grant was stored, so the request timed out after OK. Check the
+            // permission itself while waiting as well.
+            val deadline = android.os.SystemClock.elapsedRealtime() + PERMISSION_TIMEOUT_S * 1000
+            while (!latch.await(500, TimeUnit.MILLISECONDS)) {
+                if (usb.hasPermission(device)) return true
+                if (android.os.SystemClock.elapsedRealtime() > deadline) break
+            }
         } finally {
             runCatching { context.unregisterReceiver(receiver) }
         }
-        return granted && usb.hasPermission(device)
+        return usb.hasPermission(device)
     }
 
     /** First interface that speaks USB mass storage Bulk-Only Transport with SCSI. */

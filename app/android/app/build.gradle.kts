@@ -71,9 +71,6 @@ flutter {
 }
 
 dependencies {
-    // USB mass storage (SCSI over Bulk-Only Transport) for droiddesk-usb, the
-    // same layer EtchDroid uses.
-    implementation("me.jahnen.libaums:core:0.10.0")
     // .xz images for droiddesk-usb flash.
     implementation("org.tukaani:xz:1.12")
 }

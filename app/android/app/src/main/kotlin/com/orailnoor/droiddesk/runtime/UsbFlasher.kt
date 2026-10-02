@@ -5,24 +5,18 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.util.Log
-import me.jahnen.libaums.core.driver.BlockDeviceDriver
-import me.jahnen.libaums.core.driver.BlockDeviceDriverFactory
-import me.jahnen.libaums.core.driver.scsi.commands.sense.MediaNotInserted
-import me.jahnen.libaums.core.usb.UsbCommunication
-import me.jahnen.libaums.core.usb.UsbCommunicationFactory
 import org.tukaani.xz.XZInputStream
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.InputStream
 import java.io.OutputStream
-import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.util.zip.GZIPInputStream
 
 /**
- * Stable flashing path of droiddesk-usb: SCSI over Bulk-Only Transport through
- * libaums, the way EtchDroid (GPL-3.0) does it. Raw images only — the image is
+ * Stable flashing path of droiddesk-usb: SCSI over Bulk-Only Transport
+ * (BotScsiDevice), the approach of EtchDroid/libaums. Raw images only — the image is
  * copied block for block, nothing is interpreted (a Windows ISO needs to be
  * turned into a disk image first).
  */
@@ -62,21 +56,20 @@ class UsbFlasher(
             },
         ) { block ->
             val digest = MessageDigest.getInstance("SHA-256")
-            val buffer = ByteBuffer.allocate(CHUNK)
+            val buffer = ByteArray(CHUNK)
             var written = 0L
             var lba = 0L
             openImage(image).use { input ->
                 while (true) {
                     checkCancelled()
-                    val read = fill(input, buffer.array())
+                    val read = fill(input, buffer)
                     if (read <= 0) break
                     if (written + read > total) return@withBlockDevice fail("the image changed while flashing")
-                    digest.update(buffer.array(), 0, read)
+                    digest.update(buffer, 0, read)
                     // The device takes whole blocks; pad the last one with zeros.
                     val padded = (read + block.blockSize - 1) / block.blockSize * block.blockSize
-                    java.util.Arrays.fill(buffer.array(), read, padded, 0)
-                    buffer.clear().limit(padded)
-                    block.write(lba, buffer)
+                    java.util.Arrays.fill(buffer, read, padded, 0)
+                    block.write(lba, buffer, 0, padded)
                     lba += padded / block.blockSize
                     written += read
                     progress(written, total)
@@ -94,9 +87,8 @@ class UsbFlasher(
                 checkCancelled()
                 val want = minOf(CHUNK.toLong(), written - verified).toInt()
                 val padded = (want + block.blockSize - 1) / block.blockSize * block.blockSize
-                buffer.clear().limit(padded)
-                block.read(lba, buffer)
-                check.update(buffer.array(), 0, want)
+                block.read(lba, buffer, 0, padded)
+                check.update(buffer, 0, want)
                 lba += padded / block.blockSize
                 verified += want
                 progress(verified, written)
@@ -108,19 +100,18 @@ class UsbFlasher(
     }
 
     fun readTo(target: File) = withBlockDevice { block ->
-        val total = capacityOf(block)
+        val total = block.capacity
         val digest = MessageDigest.getInstance("SHA-256")
-        val buffer = ByteBuffer.allocate(CHUNK - CHUNK % block.blockSize)
+        val buffer = ByteArray(CHUNK - CHUNK % block.blockSize)
         var done = 0L
         var lba = 0L
         target.outputStream().buffered(CHUNK).use { out ->
             while (done < total) {
                 checkCancelled()
-                val want = minOf(buffer.capacity().toLong(), total - done).toInt()
-                buffer.clear().limit(want)
-                block.read(lba, buffer)
-                out.write(buffer.array(), 0, want)
-                digest.update(buffer.array(), 0, want)
+                val want = minOf(buffer.size.toLong(), total - done).toInt()
+                block.read(lba, buffer, 0, want)
+                out.write(buffer, 0, want)
+                digest.update(buffer, 0, want)
                 lba += want / block.blockSize
                 done += want
                 progress(done, total)
@@ -129,20 +120,13 @@ class UsbFlasher(
         line("done ${hex(digest.digest())}")
     }
 
-    /**
-     * libaums 0.10.0 reports READ CAPACITY(10)'s *last* LBA as a signed Int in
-     * `blocks`: the count is one more, read unsigned (up to 2 TiB at 512 B).
-     */
-    private fun capacityOf(block: BlockDeviceDriver): Long =
-        ((block.blocks and 0xFFFFFFFFL) + 1) * block.blockSize
-
     private fun checkCancelled() {
         if (isCancelled()) throw java.io.IOException("cancelled: DroidDesk is shutting down")
     }
 
     private fun withBlockDevice(
         precheck: (capacity: Long) -> String? = { null },
-        action: (BlockDeviceDriver) -> Unit,
+        action: (BotScsiDevice) -> Unit,
     ) {
         val iface = massStorageInterface() ?: return fail("not a USB mass storage device (BOT/SCSI)")
         val endpoints = (0 until iface.endpointCount).map(iface::getEndpoint)
@@ -150,19 +134,25 @@ class UsbFlasher(
         val epIn = endpoints.firstOrNull { it.direction == UsbConstants.USB_DIR_IN }
         val epOut = endpoints.firstOrNull { it.direction == UsbConstants.USB_DIR_OUT }
         if (epIn == null || epOut == null) return fail("no bulk endpoints")
-        var communication: UsbCommunication? = null
+        val connection = usb.openDevice(device) ?: return fail("Android could not open the device")
         try {
-            communication = UsbCommunicationFactory.createUsbCommunication(usb, device, iface, epOut, epIn)
+            // force = true detaches the kernel's usb-storage driver.
+            if (!connection.claimInterface(iface, true)) return fail("could not claim the interface")
+            // GET MAX LUN; devices with one LUN may stall it, which means 0.
             val maxLun = ByteArray(1)
-            communication.controlTransfer(161, 254, 0, iface.id, maxLun, 1)
+            val lunCount = if (connection.controlTransfer(0xA1, 0xFE, 0, iface.id, maxLun, 1, 5_000) == 1) {
+                (maxLun[0].toInt() and 0x0F) + 1
+            } else {
+                1
+            }
             // Card readers expose one LUN per slot. Never guess between two
             // inserted cards: the user has to name the slot.
-            val media = (0..maxLun[0].toInt()).mapNotNull { slot ->
-                BlockDeviceDriverFactory.createBlockDevice(communication, lun = slot.toByte()).let {
+            val media = (0 until lunCount).mapNotNull { slot ->
+                BotScsiDevice(connection, iface, epIn, epOut, slot).let {
                     try {
                         it.init()
                         slot to it
-                    } catch (_: MediaNotInserted) {
+                    } catch (_: BotScsiDevice.MediumNotPresent) {
                         null
                     }
                 }
@@ -173,11 +163,11 @@ class UsbFlasher(
                     ?: return fail("no medium in slot $lun (populated: ${media.joinToString { "${it.first}" }})")
                 media.size > 1 -> return fail(
                     "several cards inserted, choose one with --lun: " +
-                        media.joinToString { "${it.first} (${capacityOf(it.second)} bytes)" },
+                        media.joinToString { "${it.first} (${it.second.capacity} bytes)" },
                 )
                 else -> media.single()
             }
-            val capacity = capacityOf(block)
+            val capacity = block.capacity
             precheck(capacity)?.let { return fail(it) }
             line("device $capacity ${block.blockSize} $slot ${media.size}")
             if (!confirm()) return fail("cancelled")
@@ -187,7 +177,8 @@ class UsbFlasher(
             // A closed socket means the client cancelled; nothing to report then.
             runCatching { fail(error.message ?: error.javaClass.simpleName) }
         } finally {
-            runCatching { communication?.close() }
+            runCatching { connection.releaseInterface(iface) }
+            connection.close()
         }
     }
 

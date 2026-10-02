@@ -25,7 +25,7 @@
 >
 > **Desktop and Android integration**
 > - `droiddesk-open [--android] FILE|URL` opens with the Linux app from `mimeapps.list` (Firefox, Mousepad, …) and falls back to an Android app only when there is none; `--android` always uses Android. Also behind `termux-open`, Debian's `xdg-open` and Thunar's "Otevřít v Androidu"
-> - `droiddesk-usb`: flash drives and card readers without root — `flash IMAGE[.xz|.gz]` (compressed images are fully checked before anything is written, then verified by reading back), `read FILE`, `--lun N` for multi-slot card readers, and an experimental `exec DEVICE -- CMD` that hands a libusb program the usbfs descriptor. Flashing uses [libaums](https://github.com/magnusja/libaums), the layer [EtchDroid](https://github.com/EtchDroid/EtchDroid) uses
+> - `droiddesk-usb`: flash drives and card readers without root — `flash IMAGE[.xz|.gz]` (compressed images are fully checked before anything is written, then verified by reading back), `read FILE`, `--lun N` for multi-slot card readers, and an experimental `exec DEVICE -- CMD` that hands a libusb program the usbfs descriptor. The SCSI/Bulk-Only layer follows [EtchDroid](https://github.com/EtchDroid/EtchDroid) and [libaums](https://github.com/magnusja/libaums)
 > - Battery level in the dock, Android apps removed from the dock stay removed, windows tile at screen edges (Super+arrows), no xfwm4 compositor
 >
 > APKs are on the [Releases](../../releases) page and can be tracked with [Obtainium](https://github.com/ImranR98/Obtainium).
