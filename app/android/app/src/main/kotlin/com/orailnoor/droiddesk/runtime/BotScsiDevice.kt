@@ -45,6 +45,10 @@ class BotScsiDevice(
         const val TIMEOUT_MS = 10_000
         const val FLUSH_TIMEOUT_MS = 120_000
         const val CHUNK = 64 * 1024
+        /** Bytes per READ/WRITE command; smaller commands recover faster. */
+        const val MAX_COMMAND_BYTES = 256 * 1024
+        /** Transport-level retries (after reset recovery) per command. */
+        const val TRANSPORT_RETRIES = 3
         const val SENSE_LENGTH = 18
         const val STARTUP_DEADLINE_MS = 10_000L
     }
@@ -134,8 +138,19 @@ class BotScsiDevice(
 
     private fun transfer(lba: Long, buffer: ByteArray, offset: Int, length: Int, dirIn: Boolean) {
         require(length % blockSize == 0) { "length must be whole blocks" }
+        if (lba < 0 || lba + length / blockSize > blockCount) throw IOException("access beyond the end of the device")
+        val step = MAX_COMMAND_BYTES - MAX_COMMAND_BYTES % blockSize
+        var done = 0
+        while (done < length) {
+            val part = minOf(step, length - done)
+            transferOnce(lba + done / blockSize, buffer, offset + done, part, dirIn)
+            done += part
+        }
+    }
+
+    /** One READ/WRITE command; both are idempotent, so a transport error is retried after reset. */
+    private fun transferOnce(lba: Long, buffer: ByteArray, offset: Int, length: Int, dirIn: Boolean) {
         val blocks = length / blockSize
-        if (lba < 0 || lba + blocks > blockCount) throw IOException("access beyond the end of the device")
         val cdb = if (lba + blocks <= 0xFFFFFFFFL && blocks <= 0xFFFF) {
             ByteBuffer.allocate(10).order(ByteOrder.BIG_ENDIAN).apply {
                 put(if (dirIn) 0x28 else 0x2A); put(0); putInt(lba.toInt()); put(0); putShort(blocks.toShort()); put(0)
@@ -146,12 +161,13 @@ class BotScsiDevice(
             }.array()
         }
         var attempts = 0
+        var transportErrors = 0
         while (true) {
             try {
                 val result = rawCommand(cdb, buffer, offset, length, dirIn)
                 checkStatus(result)
                 if (result.transferred != length || result.residue != 0L) {
-                    throw IOException("incomplete transfer at block $lba: ${result.transferred} of $length bytes, residue ${result.residue}")
+                    throw TransportError("incomplete transfer: ${result.transferred} of $length bytes, residue ${result.residue}")
                 }
                 return
             } catch (error: SenseError) {
@@ -159,9 +175,18 @@ class BotScsiDevice(
                 if (error.mediumChanged || error.mediumAbsent) throw IOException("the card was removed or changed", error)
                 if (!error.becomingReady || ++attempts >= 5) throw error
                 Thread.sleep(100)
+            } catch (error: TransportError) {
+                // rawCommand already did reset recovery for a broken CSW or phase error.
+                if (++transportErrors > TRANSPORT_RETRIES) {
+                    throw IOException("${error.message} (block $lba, $length bytes, ${if (dirIn) "read" else "write"}, after $TRANSPORT_RETRIES retries)", error)
+                }
+                Thread.sleep(200)
             }
         }
     }
+
+    /** A USB-level failure (bad CSW, phase error, incomplete data) that a retry may fix. */
+    private class TransportError(message: String) : IOException(message)
 
     /** A command whose data length may be shorter than requested (INQUIRY, capacity). */
     private fun dataCommand(cdb: ByteArray, data: ByteArray, length: Int, dirIn: Boolean, minimum: Int): Int {
@@ -179,7 +204,7 @@ class BotScsiDevice(
         when (result.status) {
             0 -> return
             1 -> throw requestSense()
-            else -> throw IOException("phase error (CSW status ${result.status})")
+            else -> throw TransportError("phase error (CSW status ${result.status}, residue ${result.residue})")
         }
     }
 
@@ -202,7 +227,7 @@ class BotScsiDevice(
         }.array()
         if (connection.bulkTransfer(epOut, cbw, 31, TIMEOUT_MS) != 31) {
             resetRecovery()
-            throw IOException("could not send the SCSI command")
+            throw TransportError("could not send the SCSI command")
         }
         var done = 0
         if (length > 0 && data != null) {
@@ -216,20 +241,29 @@ class BotScsiDevice(
                     break
                 }
                 done += n
-                // A short packet ends the data phase (the CSW carries the residue).
-                if (n < want) break
+                // Only a short packet (not a multiple of the packet size, or a
+                // zero-length one) ends the data phase. A request that simply
+                // returned fewer bytes is continued; stopping there read the rest
+                // of the data as the CSW ("invalid command status").
+                if (n == 0 || n % ep.maxPacketSize != 0) break
             }
         }
-        val csw = ByteArray(13)
-        var got = connection.bulkTransfer(epIn, csw, 13, timeout)
+        // Room for a whole packet: anything longer than 13 bytes here is a
+        // protocol error, not a buffer overflow.
+        val csw = ByteArray(maxOf(13, epIn.maxPacketSize))
+        var got = connection.bulkTransfer(epIn, csw, csw.size, timeout)
         if (got < 0) {
             clearHalt(epIn)
-            got = connection.bulkTransfer(epIn, csw, 13, timeout)
+            got = connection.bulkTransfer(epIn, csw, csw.size, timeout)
         }
         val c = ByteBuffer.wrap(csw).order(ByteOrder.LITTLE_ENDIAN)
-        if (got != 13 || c.int != CSW_SIGNATURE || c.int != currentTag) {
+        val signature = c.int
+        val cswTag = c.int
+        if (got != 13 || signature != CSW_SIGNATURE || cswTag != currentTag) {
             resetRecovery()
-            throw IOException("invalid command status from the device")
+            throw TransportError(
+                "invalid command status (%d bytes, signature %08x, tag %d/%d)".format(got, signature, cswTag, currentTag),
+            )
         }
         val residue = c.int.toLong() and 0xFFFFFFFFL
         val status = csw[12].toInt() and 0xFF
