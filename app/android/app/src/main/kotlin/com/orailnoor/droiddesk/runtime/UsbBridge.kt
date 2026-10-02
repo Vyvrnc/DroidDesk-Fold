@@ -36,7 +36,10 @@ import kotlin.concurrent.thread
  *                     "progress <done> <total>" lines and end with
  *                     "done <sha256>" or "err <reason>"; closing the socket
  *                     cancels.
- *   eject <name>      -> hands a device held since its last read/flash back to Android
+ *   attach <name>     -> asks for permission and holds the device for Linux ("ok"/"err …")
+ *   eject <name>      -> hands a held device back to Android
+ *   watch             -> stays open and streams "attached\t<list line>", "detached\t<name>",
+ *                        "held\t<name>" and "released\t<name>"
  *   open <name>       -> (raw, experimental) asks for permission if needed, claims the mass storage
  *                        interface and answers "ok <interface> <ep in> <ep out>"
  *                        with the fd attached, or "err <reason>". The device stays
@@ -58,6 +61,7 @@ object UsbBridge {
                 val socket = LocalServerSocket(SOCKET_NAME)
                 server = socket
                 thread(name = "usb-bridge", isDaemon = true) { serve(context.applicationContext, socket) }
+                watchUsbEvents(context.applicationContext)
                 Log.i(TAG, "USB bridge started")
             } catch (error: Exception) {
                 Log.e(TAG, "Could not start the USB bridge", error)
@@ -77,7 +81,57 @@ object UsbBridge {
         }
         clients.forEach { runCatching { it.shutdownInput(); it.close() } }
         held.keys.toList().forEach(::eject)
+        appContext?.let { context -> usbEvents?.let { runCatching { context.unregisterReceiver(it) } } }
+        usbEvents = null
     }
+
+    // ── Events for the "USB disky" panel icon (request "watch") ──
+
+    private val watchers = java.util.concurrent.CopyOnWriteArrayList<java.io.OutputStream>()
+    @Volatile private var usbEvents: BroadcastReceiver? = null
+    @Volatile private var appContext: Context? = null
+
+    private fun watchUsbEvents(context: Context) {
+        appContext = context
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                @Suppress("DEPRECATION")
+                val device = intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE) ?: return
+                when (intent.action) {
+                    UsbManager.ACTION_USB_DEVICE_ATTACHED -> emit("attached\t" + describe(device))
+                    UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                        if (held.containsKey(device.deviceName)) eject(device.deviceName)
+                        emit("detached\t${device.deviceName}")
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+        }
+        // System broadcasts still reach a not-exported receiver.
+        ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        usbEvents = receiver
+    }
+
+    private fun emit(line: String) {
+        val bytes = "$line\n".toByteArray()
+        watchers.forEach { out ->
+            runCatching { synchronized(out) { out.write(bytes); out.flush() } }.onFailure { watchers.remove(out) }
+        }
+    }
+
+    /** The tab-separated device line of "list" (name, vid, pid, storage, maker, product, held). */
+    private fun describe(device: UsbDevice): String = listOf(
+        device.deviceName,
+        "%04x".format(device.vendorId),
+        "%04x".format(device.productId),
+        if (massStorageInterface(device) != null) "1" else "0",
+        clean(runCatching { device.manufacturerName }.getOrNull()),
+        clean(runCatching { device.productName }.getOrNull()),
+        if (held.containsKey(device.deviceName)) "1" else "0",
+    ).joinToString("\t")
 
     /**
      * A mass storage device DroidDesk keeps claimed between operations. Handing
@@ -117,6 +171,7 @@ object UsbBridge {
         return HeldDevice(device, connection, iface, epIn, epOut).also {
             held[device.deviceName] = it
             Log.i(TAG, "Holding ${device.deviceName} for Linux until eject")
+            emit("held\t${device.deviceName}")
         }
     }
 
@@ -128,6 +183,7 @@ object UsbBridge {
             device.connection.close()
         }
         Log.i(TAG, "Released $name to Android")
+        emit("released\t$name")
         return true
     }
 
@@ -167,17 +223,8 @@ object UsbBridge {
                 request == "list" -> {
                     // Forget held devices that were unplugged.
                     held.keys.filter { it !in usb.deviceList }.forEach(::eject)
-                    val lines = usb.deviceList.values.sortedBy { it.deviceName }.joinToString("") { device ->
-                        listOf(
-                            device.deviceName,
-                            "%04x".format(device.vendorId),
-                            "%04x".format(device.productId),
-                            if (massStorageInterface(device) != null) "1" else "0",
-                            clean(runCatching { device.manufacturerName }.getOrNull()),
-                            clean(runCatching { device.productName }.getOrNull()),
-                            if (held.containsKey(device.deviceName)) "1" else "0",
-                        ).joinToString("\t") + "\n"
-                    }
+                    val lines = usb.deviceList.values.sortedBy { it.deviceName }
+                        .joinToString("") { describe(it) + "\n" }
                     output.write((lines + "\n").toByteArray())
                 }
                 request.startsWith("flash ") || request.startsWith("read ") -> {
@@ -207,6 +254,34 @@ object UsbBridge {
                             else -> output.write("err $holding\n".toByteArray())
                         }
                     }
+                }
+                request == "watch" -> {
+                    // Stays open; events are written by emit() until the client goes away.
+                    watchers.add(output)
+                    try {
+                        while (client.inputStream.read() >= 0) {
+                        }
+                    } finally {
+                        watchers.remove(output)
+                    }
+                }
+                request.startsWith("attach ") -> {
+                    // Hold without an operation ("Připojit do Linuxu" in the panel icon).
+                    val name = request.removePrefix("attach ").trim()
+                    val device = usb.deviceList[name]
+                    val result = when {
+                        device == null -> "err no such device $name"
+                        !usb.hasPermission(device) && !run {
+                            output.write("permission\n".toByteArray())
+                            output.flush()
+                            requestPermission(context, usb, device)
+                        } -> "err permission denied"
+                        else -> when (val holding = hold(usb, device)) {
+                            is HeldDevice -> "ok"
+                            else -> "err $holding"
+                        }
+                    }
+                    output.write("$result\n".toByteArray())
                 }
                 request.startsWith("eject ") -> {
                     val name = request.removePrefix("eject ").trim()

@@ -657,6 +657,40 @@ class LinuxRuntime(private val context: Context) {
                     )
                     usbCommand.setExecutable(true, false)
                 }
+                // "USB disky": icon in the dock's systray and a window (GTK 3 through pygobject).
+                val trayClient = File(binDir, "droiddesk-usb-tray.py")
+                context.assets.open("droiddesk/droiddesk-usb-tray.py").use { input ->
+                    trayClient.outputStream().use(input::copyTo)
+                }
+                val trayCommand = File(binDir, "droiddesk-usb-tray")
+                trayCommand.writeText(
+                    "#!${File(binDir, "bash").absolutePath}\n" +
+                        "exec \"${File(binDir, "python3").absolutePath}\" \"${trayClient.absolutePath}\" \"${'$'}@\"\n",
+                )
+                trayCommand.setExecutable(true, false)
+                File(homeDir, ".local/share/applications").mkdirs()
+                File(homeDir, ".local/share/applications/droiddesk-usb.desktop").writeText(
+                    """
+                    [Desktop Entry]
+                    Type=Application
+                    Name=USB disky
+                    Comment=Flash drives and card readers: attach, eject, write and save images
+                    Exec=${trayCommand.absolutePath} --window
+                    Icon=drive-removable-media
+                    Categories=System;Utility;
+                    Terminal=false
+                    """.trimIndent() + "\n",
+                )
+                File(homeDir, ".config/autostart").mkdirs()
+                File(homeDir, ".config/autostart/droiddesk-usb-tray.desktop").writeText(
+                    """
+                    [Desktop Entry]
+                    Type=Application
+                    Name=USB disky (ikona v panelu)
+                    Exec=${trayCommand.absolutePath}
+                    NoDisplay=true
+                    """.trimIndent() + "\n",
+                )
             }.onFailure { Log.w(TAG, "Failed to install droiddesk-usb: ${it.message}") }
 
             // Opens a file or URL in an Android app through AndroidAppBridge.
@@ -762,6 +796,26 @@ class LinuxRuntime(private val context: Context) {
                     for id in ${'$'}(xfconf-query -c xfce4-panel -p /panels/panel-2/plugin-ids | grep -E '^[0-9]+${'$'}'); do
                         [ "${'$'}id" = 26 ] && continue
                         [ "${'$'}id" = 3 ] && args+=(-t int -s 26)
+                        args+=(-t int -s "${'$'}id")
+                    done
+                    xfconf-query -c xfce4-panel -p /panels/panel-2/plugin-ids -a "${'$'}{args[@]}"
+                    xfce4-panel -r
+                fi
+
+                # Systray for the "USB disky" icon (droiddesk-usb-tray), before the
+                # battery or the clock. Only once pygobject is there to draw the icon.
+                if "${File(binDir, "python3").absolutePath}" -c 'import gi' 2>/dev/null &&
+                    ! xfconf-query -c xfce4-panel -p /plugins/plugin-27 >/dev/null 2>&1; then
+                    xfconf-query -c xfce4-panel -p /plugins/plugin-27 -n -t string -s systray
+                    xfconf-query -c xfce4-panel -p /plugins/plugin-27/square-icons -n -t bool -s true
+                    args=()
+                    placed=0
+                    for id in ${'$'}(xfconf-query -c xfce4-panel -p /panels/panel-2/plugin-ids | grep -E '^[0-9]+${'$'}'); do
+                        [ "${'$'}id" = 27 ] && continue
+                        if [ ${'$'}placed = 0 ] && { [ "${'$'}id" = 26 ] || [ "${'$'}id" = 3 ]; }; then
+                            args+=(-t int -s 27)
+                            placed=1
+                        fi
                         args+=(-t int -s "${'$'}id")
                     done
                     xfconf-query -c xfce4-panel -p /panels/panel-2/plugin-ids -a "${'$'}{args[@]}"
@@ -2021,6 +2075,9 @@ class LinuxRuntime(private val context: Context) {
         if (!installPackageGroup("pkg install -y $desktopPackages")) {
             Log.e(TAG, "$selectedDesktop package install failed")
             return false
+        }
+        if (selectedDesktop == "xfce" && !installPackageGroup("pkg install -y pygobject")) {
+            Log.w(TAG, "pygobject unavailable; the USB disky panel icon stays off")
         }
         onProgress?.invoke(0.70, "Installing Mesa graphics packages...")
 

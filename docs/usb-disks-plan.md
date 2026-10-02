@@ -9,7 +9,9 @@ Linux until eject (UsbBridge.HeldDevice); BotScsiDevice (BOT/SCSI) does block I/
 Constraint: no root means no `/dev/sdX`, no kernel filesystems and no FUSE. Everything that touches the
 disk goes through the app (UsbBridge) or through user space programs that we point at it.
 
-## Phase 1 — panel icon (yad), attach/eject, images  → fold.16
+## Phase 1 — panel icon, attach/eject, images  → fold.16 (done)
+Built with Python + GTK 3 (pygobject, `droiddesk-usb-tray.py`) instead of yad: Termux's yad 15
+depends on webkit2gtk-4.1 (100+ MB) for one icon. Plugin 27 = systray in the dock.
 - `droiddesk-usb attach [DEVICE]`: permission + hold without an operation (bridge `attach <name>`).
 - Bridge `watch`: streams "attached/detached/held/released" events (USB_DEVICE_ATTACHED/DETACHED
   broadcasts + hold changes), so the icon needs no polling.

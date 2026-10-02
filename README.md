@@ -25,6 +25,7 @@
 >
 > **Desktop and Android integration**
 > - `droiddesk-open [--android] FILE|URL` opens with the Linux app from `mimeapps.list` (Firefox, Mousepad, …) and falls back to an Android app only when there is none; `--android` always uses Android. Also behind `termux-open`, Debian's `xdg-open` and Thunar's "Otevřít v Androidu"
+> - **USB disky**: an icon in the dock (systray) and a menu entry — lists flash drives and card readers, attaches them to Linux / ejects them, writes and saves images with a progress window, and offers "Připojit do Linuxu" when a drive is plugged in. Needs `pygobject` (installed with XFCE from fold.16; older installs are offered the install on first use).
 > - `droiddesk-usb`: flash drives and card readers without root — `flash IMAGE[.xz|.gz]` (compressed images are fully checked before anything is written, then verified by reading back), `read FILE`, `--lun N` for multi-slot card readers, and an experimental `exec DEVICE -- CMD` that hands a libusb program the usbfs descriptor. The SCSI/Bulk-Only layer follows [EtchDroid](https://github.com/EtchDroid/EtchDroid) and [libaums](https://github.com/magnusja/libaums)
 > - Battery level in the dock, Android apps removed from the dock stay removed, windows tile at screen edges (Super+arrows), no xfwm4 compositor
 >
@@ -236,7 +237,10 @@ Commands of this fork's DroidDesk app (in its terminal):
 | `droiddesk-usb list` | USB devices attached to the phone |
 | `droiddesk-usb flash IMAGE[.xz\|.gz] [DEVICE] [--lun N]` | Write a disk image to a flash drive or card and verify it |
 | `droiddesk-usb read FILE [DEVICE] [--lun N]` | Copy a whole flash drive or card into a file |
+| `droiddesk-usb attach [DEVICE]` | Take a flash drive or card into Linux now (asks for the USB permission) |
 | `droiddesk-usb eject [DEVICE]` | Give a flash drive or card back to Android after `read`/`flash` (they keep it in Linux until then) |
+| `droiddesk-usb watch` | Print attach/detach/hold events as they happen |
+| `droiddesk-usb-tray --window` | The "USB disky" window (also in the menu and as an icon in the dock) |
 | `droiddesk-usb exec DEVICE -- CMD…` | Experimental: give a libusb program the USB device (`DROIDDESK_USB_FD`) |
 
 ## Notes

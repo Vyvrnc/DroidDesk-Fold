@@ -361,7 +361,15 @@ object AndroidAppBridge {
         } else {
             emptyList()
         }
-        val pluginIds = listOf(20, 21, 22, 23) + dock.map { it.first } + listOf(24, 2) + battery + listOf(3, 25)
+        // Plugin 27 is the systray for the "USB disky" icon, added once pygobject is installed.
+        val tray = if (File(context.filesDir, "usr/lib").listFiles().orEmpty()
+                .any { File(it, "site-packages/gi").isDirectory }
+        ) {
+            listOf(27)
+        } else {
+            emptyList()
+        }
+        val pluginIds = listOf(20, 21, 22, 23) + dock.map { it.first } + listOf(24, 2) + tray + battery + listOf(3, 25)
         return buildString {
             for (id in 30..37) {
                 append("xfconf-query -c xfce4-panel -p /plugins/plugin-$id -r >/dev/null 2>&1 || true; ")
