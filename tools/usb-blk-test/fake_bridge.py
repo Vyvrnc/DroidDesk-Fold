@@ -41,6 +41,7 @@ def handle(conn):
             conn.sendall(b"err busy\n")
             return
         stats["sessions"] += 1
+        counts = {"R": [0, 0], "W": [0, 0], "F": [0, 0]}
         try:
             with open(IMAGE, "r+b") as img:
                 img.seek(0, 2)
@@ -60,6 +61,8 @@ def handle(conn):
                         conn.sendall(b"\x01" + struct.pack(">H", len(msg)) + msg)
                         return
                     stats[op] = stats.get(op, 0) + 1
+                    counts[op][0] += 1
+                    counts[op][1] += n if op != "F" else 0
                     if op == "W":
                         data = read_exact(conn, n)
                     if op in "RW" and (lba + count) * BS > cap:
@@ -77,6 +80,7 @@ def handle(conn):
                         img.flush()
                         conn.sendall(b"\x00")
         finally:
+            print("session " + " ".join(f"{k}={v[0]}/{v[1] >> 10}KiB" for k, v in counts.items()), flush=True)
             lock.release()
 
 

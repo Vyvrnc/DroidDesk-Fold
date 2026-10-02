@@ -36,7 +36,11 @@
 #define SOCKET_NAME "droiddesk.usb"
 #define MAX_FDS 32
 #define MAX_REQUEST (1 << 20) /* the bridge's limit per request */
-#define CACHE_BYTES (128 * 1024)
+/* Read cache: SLOTS windows, least recently used goes first, so FAT/inode tables stay
+ * cached while file data streams through; sequential misses read READ_AHEAD windows. */
+#define WINDOW (64 * 1024)
+#define SLOTS 32
+#define READ_AHEAD 8
 #define MAX_BLOCK 4096
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -45,9 +49,21 @@ static int refs;
 static uint32_t bs;
 static uint64_t base; /* bytes from the start of the device */
 static uint64_t size; /* visible bytes, a multiple of bs */
-static unsigned char cache[CACHE_BYTES];
-static uint64_t cache_off = UINT64_MAX;
-static size_t cache_len;
+static struct {
+    uint64_t off; /* UINT64_MAX: empty */
+    size_t len;
+    uint64_t used;
+    unsigned char data[WINDOW];
+} slots[SLOTS];
+static uint64_t tick;
+static uint64_t last_miss = UINT64_MAX; /* window number of the last cache miss */
+static unsigned char loadbuf[WINDOW * READ_AHEAD];
+/* Write-back of consecutive writes: one request instead of one per cluster. Written
+ * before any read of that range, any write elsewhere, fsync and close. */
+static unsigned char pending[MAX_REQUEST];
+static uint64_t pending_off;
+static size_t pending_len;
+static int pending_failed;
 static unsigned char scratch[MAX_BLOCK];
 static struct {
     int fd;
@@ -100,7 +116,8 @@ static int tracked(int fd) {
     return hit;
 }
 
-static void complain(const char *what) { fprintf(stderr, "droiddesk-blk: %s\n", what); }
+/* "error:" lets droiddesk-usb tell a failed I/O from tool output. */
+static void complain(const char *what) { fprintf(stderr, "droiddesk-blk: error: %s\n", what); }
 
 /* DROIDDESK_BLK_DEBUG=1: every call on the device to stderr. */
 static int debug = -1;
@@ -109,7 +126,7 @@ static void trace(const char *format, ...) {
     if (!debug) return;
     va_list ap;
     va_start(ap, format);
-    fprintf(stderr, "droiddesk-blk: ");
+    fprintf(stderr, "droiddesk-blk[debug]: ");
     vfprintf(stderr, format, ap);
     fputc('\n', stderr);
     va_end(ap);
@@ -168,6 +185,10 @@ static int connect_bridge(void) {
     }
     int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (s < 0) return -1;
+    /* Whole 1 MiB requests in few system calls (each one is costly under proot). */
+    int buffer = 2 * MAX_REQUEST;
+    setsockopt(s, SOL_SOCKET, SO_RCVBUF, &buffer, sizeof buffer);
+    setsockopt(s, SOL_SOCKET, SO_SNDBUF, &buffer, sizeof buffer);
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof addr);
     addr.sun_family = AF_UNIX;
@@ -188,7 +209,7 @@ static int connect_bridge(void) {
     for (;;) {
         if (recv_line(line, sizeof line) < 0) goto fail;
         if (strcmp(line, "permission") == 0) {
-            complain("confirm the USB permission on the phone's screen");
+            fprintf(stderr, "droiddesk-blk: confirm the USB permission on the phone's screen\n");
             continue;
         }
         break;
@@ -196,7 +217,7 @@ static int connect_bridge(void) {
     unsigned long long capacity = 0;
     unsigned int block = 0;
     if (sscanf(line, "device %llu %u", &capacity, &block) != 2 || block == 0 || block > MAX_BLOCK ||
-        CACHE_BYTES % block != 0) {
+        WINDOW % block != 0) {
         complain(strncmp(line, "err ", 4) == 0 ? line + 4 : line);
         goto fail;
     }
@@ -209,7 +230,10 @@ static int connect_bridge(void) {
     size = env_u64("DROIDDESK_BLK_SIZE", capacity - base);
     if (size > capacity - base) size = capacity - base;
     size -= size % bs;
-    cache_off = UINT64_MAX;
+    for (int i = 0; i < SLOTS; i++) slots[i].off = UINT64_MAX;
+    last_miss = UINT64_MAX;
+    pending_len = 0;
+    pending_failed = 0;
     return 0;
 fail:
     load_close();
@@ -264,10 +288,66 @@ broken:
 }
 
 static void cache_update(uint64_t off, const unsigned char *data, size_t len) {
-    if (cache_off == UINT64_MAX) return;
-    uint64_t start = off > cache_off ? off : cache_off;
-    uint64_t end = off + len < cache_off + cache_len ? off + len : cache_off + cache_len;
-    if (start < end) memcpy(cache + (start - cache_off), data + (start - off), (size_t)(end - start));
+    for (int i = 0; i < SLOTS; i++) {
+        if (slots[i].off == UINT64_MAX) continue;
+        uint64_t start = off > slots[i].off ? off : slots[i].off;
+        uint64_t end = off + len < slots[i].off + slots[i].len ? off + len : slots[i].off + slots[i].len;
+        if (start < end) memcpy(slots[i].data + (start - slots[i].off), data + (start - off), (size_t)(end - start));
+    }
+}
+
+static int flush_pending(void) {
+    if (pending_len == 0) return 0;
+    size_t n = pending_len;
+    pending_len = 0;
+    if (request('W', (base + pending_off) / bs, (uint32_t)(n / bs), pending) < 0) {
+        pending_failed = 1;
+        return -1;
+    }
+    return 0;
+}
+
+static int find_slot(uint64_t off) {
+    for (int i = 0; i < SLOTS; i++)
+        if (slots[i].off == off) return i;
+    return -1;
+}
+
+static int victim(void) {
+    int best = 0;
+    for (int i = 0; i < SLOTS; i++) {
+        if (slots[i].off == UINT64_MAX) return i;
+        if (slots[i].used < slots[best].used) best = i;
+    }
+    return best;
+}
+
+/* The slot holding window number w, read from the device (with read-ahead) if needed. */
+static int load(uint64_t w) {
+    uint64_t off = w * WINDOW;
+    int n = last_miss != UINT64_MAX && w == last_miss + 1 ? READ_AHEAD : 1;
+    for (int k = 1; k < n; k++) {
+        if (off + (uint64_t)k * WINDOW >= size || find_slot(off + (uint64_t)k * WINDOW) >= 0) {
+            n = k;
+            break;
+        }
+    }
+    size_t bytes = (size_t)n * WINDOW;
+    if (off + bytes > size) bytes = (size_t)(size - off);
+    if (pending_len && pending_off < off + bytes && off < pending_off + pending_len && flush_pending() < 0)
+        return -1;
+    if (request('R', (base + off) / bs, (uint32_t)(bytes / bs), loadbuf) < 0) return -1;
+    int wanted = -1;
+    for (int k = 0; (size_t)k * WINDOW < bytes; k++) {
+        int i = victim();
+        slots[i].off = off + (uint64_t)k * WINDOW;
+        slots[i].len = bytes - (size_t)k * WINDOW < WINDOW ? bytes - (size_t)k * WINDOW : WINDOW;
+        slots[i].used = ++tick;
+        memcpy(slots[i].data, loadbuf + (size_t)k * WINDOW, slots[i].len);
+        if (k == 0) wanted = i;
+    }
+    last_miss = w + (uint64_t)n - 1;
+    return wanted;
 }
 
 static ssize_t do_pread(void *buf, size_t len, uint64_t off) {
@@ -277,28 +357,43 @@ static ssize_t do_pread(void *buf, size_t len, uint64_t off) {
     size_t done = 0;
     while (done < len) {
         uint64_t at = off + done;
-        if (cache_off == UINT64_MAX || at < cache_off || at >= cache_off + cache_len) {
-            uint64_t start = at / bs * bs;
-            size_t n = CACHE_BYTES;
-            if (start + n > size) n = (size_t)(size - start);
-            if (request('R', (base + start) / bs, (uint32_t)(n / bs), cache) < 0) {
-                cache_off = UINT64_MAX;
-                return done ? (ssize_t)done : -1;
-            }
-            cache_off = start;
-            cache_len = n;
-        }
-        size_t avail = (size_t)(cache_off + cache_len - at);
+        uint64_t w = at / WINDOW;
+        int i = find_slot(w * WINDOW);
+        if (i < 0 && (i = load(w)) < 0) return done ? (ssize_t)done : -1;
+        slots[i].used = ++tick;
+        size_t avail = (size_t)(slots[i].off + slots[i].len - at);
         size_t want = len - done < avail ? len - done : avail;
-        memcpy((unsigned char *)buf + done, cache + (at - cache_off), want);
+        memcpy((unsigned char *)buf + done, slots[i].data + (at - slots[i].off), want);
         done += want;
     }
     return (ssize_t)done;
 }
 
+/* Whole blocks at a block aligned offset, into the write-back buffer. */
+static int write_blocks(uint64_t at, const unsigned char *data, size_t n) {
+    while (n) {
+        if (pending_len && (at != pending_off + pending_len || pending_len == sizeof pending) &&
+            flush_pending() < 0)
+            return -1;
+        if (pending_len == 0) pending_off = at;
+        size_t part = sizeof pending - pending_len < n ? sizeof pending - pending_len : n;
+        memcpy(pending + pending_len, data, part);
+        pending_len += part;
+        cache_update(at, data, part);
+        at += part;
+        data += part;
+        n -= part;
+    }
+    return 0;
+}
+
 static ssize_t do_pwrite(const void *buf, size_t len, uint64_t off) {
     trace("write %zu @ %llu", len, (unsigned long long)off);
     if (len == 0) return 0;
+    if (pending_failed) {
+        errno = EIO;
+        return -1;
+    }
     if (off >= size) {
         errno = ENOSPC;
         return -1;
@@ -311,35 +406,48 @@ static ssize_t do_pwrite(const void *buf, size_t len, uint64_t off) {
         size_t inside = (size_t)(at % bs);
         if (inside == 0 && len - done >= bs) {
             size_t n = (len - done) / bs * bs;
-            if (n > MAX_REQUEST) n = MAX_REQUEST;
-            if (request('W', (base + at) / bs, (uint32_t)(n / bs), (void *)(src + done)) < 0)
-                return done ? (ssize_t)done : -1;
-            cache_update(at, src + done, n);
+            if (write_blocks(at, src + done, n) < 0) return done ? (ssize_t)done : -1;
             done += n;
         } else {
             /* Part of a block: read, modify, write it back. */
             uint64_t start = at - inside;
-            if (do_pread(scratch, bs, start) != (ssize_t)bs) return done ? (ssize_t)done : -1;
             size_t n = bs - inside < len - done ? bs - inside : len - done;
-            memcpy(scratch + inside, src + done, n);
-            if (request('W', (base + start) / bs, 1, scratch) < 0) return done ? (ssize_t)done : -1;
-            cache_update(start, scratch, bs);
+            if (pending_len && start >= pending_off && start + bs <= pending_off + pending_len) {
+                memcpy(pending + (start - pending_off) + inside, src + done, n);
+                cache_update(at, src + done, n);
+            } else {
+                if (do_pread(scratch, bs, start) != (ssize_t)bs) return done ? (ssize_t)done : -1;
+                memcpy(scratch + inside, src + done, n);
+                if (write_blocks(start, scratch, bs) < 0) return done ? (ssize_t)done : -1;
+            }
             done += n;
         }
     }
     return (ssize_t)done;
 }
 
-static int do_flush(void) { return conn >= 0 ? request('F', 0, 0, NULL) : 0; }
+/* Pending writes, then SYNCHRONIZE CACHE; a write that failed earlier is reported here. */
+static int do_flush(void) {
+    if (conn < 0) return 0;
+    int result = flush_pending();
+    if (request('F', 0, 0, NULL) < 0) result = -1;
+    if (pending_failed) {
+        pending_failed = 0;
+        errno = EIO;
+        result = -1;
+    }
+    return result;
+}
 
 /* Ends the session; called with the lock held. Q has no reply. */
 static void disconnect(void) {
+    flush_pending();
     unsigned char quit[13] = {'Q'};
     send_all(quit, sizeof quit);
     load_close();
     real_close(conn);
     conn = -1;
-    cache_off = UINT64_MAX;
+    for (int i = 0; i < SLOTS; i++) slots[i].off = UINT64_MAX;
 }
 
 static int vopen(int flags) {

@@ -604,8 +604,16 @@ class Tray:
         dialog.destroy()
         if answer != Gtk.ResponseType.OK:
             return
+        # Show what would be lost: filesystem, label and the top folder.
+        now = f"Teď je na disku: {row[self.FS]}" + (f" „{row[self.FS_LABEL]}“" if row[self.FS_LABEL] else "")
+        code, lines, _ = client_lines("ls", row[self.NAME], "--raw", "usb:/")
+        if code == 0:
+            names = [line.split("\t", 2)[2] for line in lines if line.count("\t") >= 2]
+            names = [n for n in names if n != "lost+found"]
+            now += (f"\nV kořeni {len(names)} položek: " + ", ".join(names[:8]) + (" …" if len(names) > 8 else "")
+                    if names else "\nDisk je prázdný.")
         if confirm(self.window, f"Naformátovat {row[self.LABEL]}?",
-                   f"VŠECHNA data na zařízení {row[self.LABEL]} ({row[self.NAME]}) budou smazána.\n"
+                   f"{now}\n\nVŠECHNA data na zařízení {row[self.LABEL]} ({row[self.NAME]}) budou smazána.\n"
                    "Vznikne jeden oddíl (MBR) se systémem souborů "
                    f"{usb.FS_NAMES.get(kind, kind)}.", "Naformátovat"):
             args = ["format", row[self.NAME], kind, "--yes", "--yad"] + (["--label", name] if name else [])

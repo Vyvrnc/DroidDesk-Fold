@@ -51,5 +51,22 @@ for fs in fat32 ext4 exfat; do
         ext4) e2fsck -fn /tmp/p.img; check $? "e2fsck after files" ;;
     esac
 done
-echo "=== bridge"; cat /tmp/bridge.log
+echo "=== bridge"; grep -ac session /tmp/bridge.log
 [ $fail = 0 ] && echo ALL_OK || echo SOME_FAILED
+
+# Throughput in bridge requests: 20 MB up and down on FAT32 with 4 KiB clusters (2 GB stick).
+if [ -n "${PERF:-}" ]; then
+    : > /tmp/bridge.log
+    $CLI format fat32 --label PERF --yes >/dev/null
+    head -c 20000000 /dev/urandom > /tmp/perf.bin
+    : > /tmp/bridge.log
+    $CLI cp /tmp/perf.bin usb:/ >/dev/null; echo "perf up:"; grep -a session /tmp/bridge.log | tail -3
+    : > /tmp/bridge.log
+    $CLI cp usb:/perf.bin /tmp/perf.back >/dev/null; echo "perf down:"; grep -a session /tmp/bridge.log | tail -3
+    cmp /tmp/perf.bin /tmp/perf.back && echo "perf identical"
+    : > /tmp/bridge.log
+    $CLI format ext4 --yes >/dev/null; $CLI cp /tmp/perf.bin usb:/ >/dev/null; echo "perf ext4 up:"; grep -a session /tmp/bridge.log | tail -2
+    : > /tmp/bridge.log
+    $CLI cp usb:/perf.bin /tmp/perf.back2 >/dev/null; echo "perf ext4 down:"; grep -a session /tmp/bridge.log | tail -2
+    cmp /tmp/perf.bin /tmp/perf.back2 && echo "perf ext4 identical"
+fi

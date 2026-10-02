@@ -445,6 +445,10 @@ def run_tool(args, env, show=True, check=True, stdin=None):
         for line in (result.stdout + result.stderr).splitlines():
             if line.strip():
                 say(line.strip())
+    # A deferred write can fail after the tool already reported success.
+    shim_errors = [line for line in result.stderr.splitlines() if line.startswith("droiddesk-blk: error:")]
+    if check and shim_errors:
+        sys.exit(f"droiddesk-usb: {shim_errors[-1].removeprefix('droiddesk-blk: error: ')}")
     if check and result.returncode != 0:
         tail = (result.stderr.strip() or result.stdout.strip()).splitlines()
         sys.exit(f"droiddesk-usb: {args[0].rsplit('/', 1)[-1]} selhal: {tail[-1] if tail else result.returncode}")
@@ -458,12 +462,40 @@ def open_blk(dev, lun):
         sys.exit(f"droiddesk-usb: {error}")
 
 
+def contents(dev, lun):
+    """What is on the disk now, for the warning before formatting."""
+    with open_blk(dev, lun) as blk:
+        info = disk_info(blk)
+    lines = []
+    for part in info["parts"]:
+        line = describe_part(part)
+        if part["fs"].startswith(("fat", "ext")):
+            try:
+                files = (FatFiles if part["fs"].startswith("fat") else ExtFiles)(dev, lun, part)
+                try:
+                    names = [n + ("/" if d else "") for d, _, n in files.ls("/", missing_ok=True)
+                             if n != "lost+found"]
+                finally:
+                    files.close()
+                if names:
+                    line += f"; v kořeni {len(names)} položek: " + ", ".join(names[:6]) + (" …" if len(names) > 6 else "")
+                else:
+                    line += "; prázdný"
+            except SystemExit:
+                pass
+        lines.append(line)
+    return lines
+
+
 def format_disk(dev, lun, kind, label, assume_yes):
     kind = {"fat": "fat32", "vfat": "fat32", "fat32": "fat32", "exfat": "exfat", "ext4": "ext4"}.get(kind.lower())
     if not kind:
         sys.exit("droiddesk-usb: formát umí fat32, exfat nebo ext4")
     tool = {"fat32": "mkfs.fat", "exfat": "mkfs.exfat", "ext4": "mkfs.ext4"}[kind]
     ensure_tools(tool)
+    if not assume_yes:
+        for line in contents(dev, lun):
+            say(f"Na disku: {line}")
     with open_blk(dev, lun) as blk:
         bs, blocks = blk.bs, blk.blocks
         mib = (1 << 20) // bs
