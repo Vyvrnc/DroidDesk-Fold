@@ -150,10 +150,11 @@ class BotScsiDevice(
         try {
             command(ByteArray(10).apply { this[0] = 0x35 }, null, 0, 0, dirIn = false, timeout = FLUSH_TIMEOUT_MS)
         } catch (error: SenseError) {
-            // Cheap controllers reject SYNCHRONIZE CACHE as an invalid opcode (5/20)
-            // or an invalid CDB field (5/24, seen on abcd:1234 sticks); like Linux sd,
-            // take that as "no write cache" and let the read-back verify decide.
-            if (error.key != 0x5 || (error.asc != 0x20 && error.asc != 0x24)) throw error
+            // Cheap controllers reject SYNCHRONIZE CACHE with all sorts of ILLEGAL
+            // REQUEST codes (5/20 opcode, 5/24 CDB field on abcd:1234, 5/26 parameter
+            // list on an Alcor 058f:6387). Like Linux sd, take any of them as "no
+            // write cache"; the read-back verify still checks the data.
+            if (error.key != 0x5) throw error
         }
     }
 

@@ -96,7 +96,16 @@ def transfer(command, path, dev, assume_yes, lun):
     with sock.makefile("r", encoding="utf-8") as lines:
         for line in lines:
             kind, _, rest = line.rstrip("\n").partition(" ")
-            if kind == "device":
+            if kind == "permission":
+                text = "Potvrď povolení USB na displeji telefonu (dialog Androidu; v DeX se může ukázat jen na telefonu)."
+                print(text)
+                # Also as a desktop notification, in case the terminal is not in view.
+                try:
+                    subprocess.run(["notify-send", "-i", "drive-removable-media", "DroidDesk USB", text],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            elif kind == "device":
                 fields = rest.split()
                 size = int(fields[0])
                 slot = f", slot {fields[2]} z {fields[3]}" if len(fields) > 3 and fields[3] != "1" else ""

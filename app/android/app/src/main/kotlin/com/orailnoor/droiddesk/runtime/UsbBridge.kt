@@ -188,7 +188,14 @@ object UsbBridge {
                     val path = parts.getOrNull(3)?.trim().orEmpty()
                     if (device == null || path.isEmpty() || (lun == null && parts.getOrNull(2) != "-")) {
                         output.write("err usage: flash|read <device> <lun|-> <path>\n".toByteArray())
-                    } else if (!usb.hasPermission(device) && !requestPermission(context, usb, device)) {
+                    } else if (!usb.hasPermission(device) && !run {
+                            // The dialog appears on the phone, which may not be the screen in
+                            // use (DeX); the client tells the user where to look.
+                            output.write("permission\n".toByteArray())
+                            output.flush()
+                            requestPermission(context, usb, device)
+                        }
+                    ) {
                         output.write("err permission denied\n".toByteArray())
                     } else {
                         when (val holding = hold(usb, device)) {
