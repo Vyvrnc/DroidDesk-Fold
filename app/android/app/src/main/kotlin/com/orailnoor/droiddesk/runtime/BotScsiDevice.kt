@@ -31,8 +31,10 @@ class BotScsiDevice(
         val mediumAbsent get() = asc == 0x3A
         /** The card was changed or reset: anything in flight belongs to another medium. */
         val mediumChanged get() = key == 0x6 && (asc == 0x28 || asc == 0x29 || asc == 0x2A)
+        /** "Becoming ready" (04/01): the only NOT READY worth waiting for. */
+        val becomingReady get() = key == 0x2 && asc == 0x04 && ascq == 0x01
         /** Worth retrying while the unit is starting up. */
-        val transient get() = !mediumAbsent && (key == 0x6 || (key == 0x2 && asc == 0x04))
+        val transient get() = !mediumAbsent && (key == 0x6 || becomingReady)
     }
 
     private class Result(val status: Int, val transferred: Int, val residue: Long)
@@ -124,8 +126,9 @@ class BotScsiDevice(
         try {
             command(ByteArray(10).apply { this[0] = 0x35 }, null, 0, 0, dirIn = false, timeout = FLUSH_TIMEOUT_MS)
         } catch (error: SenseError) {
-            // ILLEGAL REQUEST = no write cache to flush; anything else is a real failure.
-            if (error.key != 0x5) throw error
+            // Only "invalid command operation code" means there is no cache to
+            // flush; any other rejection is a real failure.
+            if (error.key != 0x5 || error.asc != 0x20) throw error
         }
     }
 
@@ -154,7 +157,7 @@ class BotScsiDevice(
             } catch (error: SenseError) {
                 // Never continue on another card; only a plain "becoming ready" is retried.
                 if (error.mediumChanged || error.mediumAbsent) throw IOException("the card was removed or changed", error)
-                if (!(error.key == 0x2 && error.asc == 0x04) || ++attempts >= 5) throw error
+                if (!error.becomingReady || ++attempts >= 5) throw error
                 Thread.sleep(100)
             }
         }

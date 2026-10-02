@@ -146,7 +146,8 @@ class UsbFlasher(
             if (!connection.claimInterface(iface, true)) return fail("could not claim the interface")
             // GET MAX LUN; devices with one LUN may stall it, which means 0. Android
             // cannot tell a stall from a transient error, so ask twice before
-            // assuming one LUN (that would bypass the several-cards check).
+            // assuming one LUN. Multi-slot readers must answer it (BOT 3.2), so a
+            // silent single-LUN fallback only affects devices that never do.
             val maxLun = ByteArray(1)
             val lunCount = if (
                 connection.controlTransfer(0xA1, 0xFE, 0, iface.id, maxLun, 1, 5_000) == 1 ||
