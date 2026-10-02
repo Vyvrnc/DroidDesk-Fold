@@ -81,18 +81,22 @@ class X11ServerService : Service() {
                 latch = CountDownLatch(1)
                 startLatch = latch
                 serverHandler.post {
-                    startSucceeded = try {
+                    // The result must be stored before waiters are released: with
+                    // `startSucceeded = try { … } finally { countDown() }` the finally
+                    // ran before the assignment, so the desktop read false and showed
+                    // "could not start the native server" although X was up.
+                    val result = try {
                         configureEnvironment()
                         Log.i(TAG, "Starting native X server in pid=${android.os.Process.myPid()}")
                         CmdEntryPoint.start(arrayOf(":0", "-nolock"))
                     } catch (error: Throwable) {
                         Log.e(TAG, "Native X server failed to start", error)
                         false
-                    } finally {
-                        started = true
-                        latch.countDown()
                     }
-                    Log.i(TAG, "Native X server start result=$startSucceeded")
+                    startSucceeded = result
+                    started = true
+                    latch.countDown()
+                    Log.i(TAG, "Native X server start result=$result")
                 }
             }
         }
