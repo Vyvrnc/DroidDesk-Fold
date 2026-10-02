@@ -19,7 +19,7 @@ libglvnd-dev x11proto-dev gcc g++ spirv-tools libelf-dev libarchive-dev libxml2-
 
 ## Meson
 --prefix=/opt/mesa-kgsl --libdir=lib/aarch64-linux-gnu -Dbuildtype=release -Dvulkan-drivers=freedreno
--Dfreedreno-kmds=msm,kgsl -Dgallium-drivers=zink -Dplatforms=x11 -Dglx=dri -Degl=enabled -Dgbm=enabled
+-Dfreedreno-kmds=msm,kgsl -Dgallium-drivers=zink,softpipe -Dplatforms=x11 -Dglx=dri -Degl=enabled -Dgbm=enabled
 -Dgles1=disabled -Dgles2=enabled -Dglvnd=enabled -Dllvm=disabled -Dxmlconfig=disabled -Dvalgrind=disabled
 -Dlibunwind=disabled -Dlmsensors=disabled -Dvideo-codecs= -Dbuild-tests=false
 On the phone: ninja -j3 ~35 min, 45 MB installed.
@@ -54,7 +54,19 @@ app toggle "HW acceleration" switches droiddesk-gui.sh to these variables only i
 /dev/kgsl-3d0 is rw; fallback llvmpipe.
 
 ## Released asset
-Release `mesa-kgsl-26.2.3`, asset `mesa-kgsl-26.2.3-arm64.tar.xz`,
+Revision 1 (superseded): release `mesa-kgsl-26.2.3`, asset `mesa-kgsl-26.2.3-arm64.tar.xz`,
 sha256 993db4dc3502632ff4e9b78a00c05238bf90b83dc95b4be7fa5ce56cd8e5b05e (6.7 MB, ~45 MB unpacked).
 Built natively on the Fold 7 with the options above (subproject-extras excluded); `build.sh` is the
 reproducible path for the next version. `MESA_KGSL_SHA256` in LinuxRuntime.kt must match the asset.
+
+## Revision 2 (`mesa-kgsl-26.2.3-2`): no flicker
+Revision 1 presented through kopper. Termux:X11 offers DRI3 only for AHardwareBuffer/raw-fd buffers, so
+kopper fell back to software copies and GL windows flickered (FreeCAD, OrcaSlicer). Termux's own stack
+does not flicker because its `mesa-zink` 22.0.5 uses zink's drisw/xlib path. Revision 2 adds `softpipe`
+to `-Dgallium-drivers` (it provides the drisw/swrast winsys) and gpu-env.sh sets
+`LIBGL_KOPPER_DISABLE=true`: smooth on the Fold 7, renderer still "zink … Adreno (TM) 830 (MESA_TURNIP)".
+Without softpipe, kopper-off segfaults in `__glXQueryDrawable`.
+
+Known issue: `glxgears` (clients calling `glXQueryDrawable`, e.g. swap-control queries) segfaults
+(`#0 0x0` in `__glXQueryDrawable`, libGLX_mesa, drisw path). FreeCAD and OrcaSlicer are fine. Candidate
+upstream report / null check.

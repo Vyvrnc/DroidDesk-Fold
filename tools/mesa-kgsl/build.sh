@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Builds Mesa with Turnip over KGSL + Zink for the Debian (trixie, arm64) container
-# and packs it as mesa-kgsl-<version>-arm64.tar.xz (unpacks to /opt/mesa-kgsl).
+# and packs it as mesa-kgsl-<version>-<revision>-arm64.tar.xz (unpacks to /opt/mesa-kgsl).
 # Runs in an emulated arm64 Docker container; enable emulation once with
 #   docker run --privileged --rm tonistiigi/binfmt --install arm64
 # Run from the repo root. Takes a few hours under emulation. See NOTES.md.
 set -euo pipefail
 
 MESA_VERSION=26.2.3
+# Bump when the build changes for the same Mesa version (asset name and tag).
+ASSET_REVISION=2
 MESA_SHA256=1628058a8d2c0615975de5a15ab7bbb9638c50000b5bed9456ff423ea034a81f
 TERMUX_PACKAGES_COMMIT=dab70fe87265d1e0f56375e47e27d17a1bf607b4
 OUT_DIR="${OUT_DIR:-$HOME/DroidDesk-build}"
@@ -38,12 +40,12 @@ for p in 0014-replace-turnip-wait_timestamp_safe-assert.patch \
 done
 
 meson setup build --prefix=/opt/mesa-kgsl --libdir=lib/aarch64-linux-gnu -Dbuildtype=release \
-    -Dvulkan-drivers=freedreno -Dfreedreno-kmds=msm,kgsl -Dgallium-drivers=zink -Dplatforms=x11 \
+    -Dvulkan-drivers=freedreno -Dfreedreno-kmds=msm,kgsl -Dgallium-drivers=zink,softpipe -Dplatforms=x11 \
     -Dglx=dri -Degl=enabled -Dgbm=enabled -Dgles1=disabled -Dgles2=enabled -Dglvnd=enabled \
     -Dllvm=disabled -Dxmlconfig=disabled -Dvalgrind=disabled -Dlibunwind=disabled -Dlmsensors=disabled \
     -Dvideo-codecs= -Dbuild-tests=false
 ninja -C build
 DESTDIR=/tmp/stage ninja -C build install
-tar -C /tmp/stage -cJf /out/mesa-kgsl-$MESA_VERSION-arm64.tar.xz opt/mesa-kgsl
-sha256sum /out/mesa-kgsl-$MESA_VERSION-arm64.tar.xz
+tar -C /tmp/stage -cJf /out/mesa-kgsl-$MESA_VERSION-$ASSET_REVISION-arm64.tar.xz opt/mesa-kgsl
+sha256sum /out/mesa-kgsl-$MESA_VERSION-$ASSET_REVISION-arm64.tar.xz
 "

@@ -25,8 +25,10 @@ class LinuxRuntime(private val context: Context) {
         private const val ELF_PATCH_MARKER = ".elf_runpaths_patched"
         private const val DE_MARKER = ".de_installed"
         // Release asset built by tools/mesa-kgsl/build.sh (tag mesa-kgsl-<version>).
-        private const val MESA_KGSL_VERSION = "26.2.3"
-        private const val MESA_KGSL_SHA256 = "993db4dc3502632ff4e9b78a00c05238bf90b83dc95b4be7fa5ce56cd8e5b05e"
+        // <Mesa version>-<build revision>; -2 adds softpipe so zink can present
+        // without kopper (the kopper path flickers without DRI3).
+        private const val MESA_KGSL_VERSION = "26.2.3-2"
+        private const val MESA_KGSL_SHA256 = "PENDING_ASSET"
 
         /**
          * Host path of the Debian rootfs. proot-distro 5.4+ uses
@@ -435,10 +437,21 @@ class LinuxRuntime(private val context: Context) {
             # separate build (Zink over Turnip/KGSL, tools/mesa-kgsl) goes to
             # /opt/mesa-kgsl and gpu-run uses it per app. A failed download keeps
             # llvmpipe.
-            if [ -e /dev/kgsl-3d0 ] && [ ! -d /opt/mesa-kgsl ]; then
+            # A different build (or one without a version mark) is replaced; the old
+            # tree stays until the new one is unpacked.
+            if [ -e /dev/kgsl-3d0 ] &&
+                [ "${'$'}(cat /opt/mesa-kgsl/.droiddesk-version 2>/dev/null)" != "$MESA_KGSL_VERSION" ]; then
                 if curl -fsSLo /tmp/mesa-kgsl.tar.xz "$mesaKgslUrl" &&
                     echo "$mesaKgslSha256  /tmp/mesa-kgsl.tar.xz" | sha256sum -c -; then
-                    tar -C / -xJf /tmp/mesa-kgsl.tar.xz
+                    rm -rf /opt/mesa-kgsl.old
+                    [ -d /opt/mesa-kgsl ] && mv /opt/mesa-kgsl /opt/mesa-kgsl.old
+                    if tar -C / -xJf /tmp/mesa-kgsl.tar.xz; then
+                        echo "$MESA_KGSL_VERSION" > /opt/mesa-kgsl/.droiddesk-version
+                        rm -rf /opt/mesa-kgsl.old
+                    else
+                        rm -rf /opt/mesa-kgsl
+                        [ -d /opt/mesa-kgsl.old ] && mv /opt/mesa-kgsl.old /opt/mesa-kgsl
+                    fi
                 else
                     echo "Hardware OpenGL not installed (download failed), software rendering stays"
                 fi
@@ -463,8 +476,13 @@ class LinuxRuntime(private val context: Context) {
                 export GALLIUM_DRIVER=zink
                 export VK_ICD_FILENAMES="${'$'}droiddesk_mesa/share/vulkan/icd.d/freedreno_icd.aarch64.json"
                 export VK_DRIVER_FILES="${'$'}VK_ICD_FILENAMES"
+                # Without DRI3 (Termux:X11 only takes AHardwareBuffers) kopper
+                # presents through slow copies that flicker; zink's drisw path (needs
+                # softpipe in the build) is smooth, like Termux's own mesa-zink.
+                export LIBGL_KOPPER_DISABLE=true
                 # Zink's threaded context flushes into a kopper swapchain that is not
                 # acquired without DRI3 and crashes (OrcaSlicer "New Project").
+                # Possibly obsolete without kopper; drop once verified.
                 export GALLIUM_THREAD=0
             fi
             unset droiddesk_mesa droiddesk_lib

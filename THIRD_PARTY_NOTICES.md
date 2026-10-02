@@ -26,7 +26,7 @@ The USB flashing approach follows [EtchDroid](https://github.com/EtchDroid/EtchD
 
 | Component | Location | License/status | Upstream |
 |---|---|---|---|
-| Mesa 26.2.3 (Turnip with KGSL, Zink) for the Debian container | GitHub release asset `mesa-kgsl-26.2.3-arm64.tar.xz`, downloaded and SHA-256 checked by `debian-setup` into `/opt/mesa-kgsl` | Mesa is mainly MIT, with other permissive licenses for some components; see the Mesa source tree. Patches 0014, 0017 and 0018 come from termux-packages (`packages/mesa`). Source URL, checksum, patches and build options are in [tools/mesa-kgsl](tools/mesa-kgsl/NOTES.md); `tools/mesa-kgsl/build.sh` rebuilds it. | <https://mesa3d.org/> |
+| Mesa 26.2.3 (Turnip with KGSL, Zink, softpipe) for the Debian container | GitHub release asset `mesa-kgsl-26.2.3-2-arm64.tar.xz` (revision 1: `mesa-kgsl-26.2.3-arm64.tar.xz`), downloaded and SHA-256 checked by `debian-setup` into `/opt/mesa-kgsl` | Mesa is mainly MIT, with other permissive licenses for some components; see the Mesa source tree. Patches 0014, 0017 and 0018 come from termux-packages (`packages/mesa`). Source URL, checksum, patches and build options are in [tools/mesa-kgsl](tools/mesa-kgsl/NOTES.md); `tools/mesa-kgsl/build.sh` rebuilds it. | <https://mesa3d.org/> |
 
 The complete GPL-3.0 text is in [LICENSE](LICENSE) and
 [LICENSES/GPL-3.0.txt](LICENSES/GPL-3.0.txt). The GPL-2.0 text is in

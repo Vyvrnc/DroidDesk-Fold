@@ -18,7 +18,7 @@ Welcome to the DroidDesk troubleshooting guide. This document explains how to fi
 
 **No sound from Debian programs.** Debian talks to PulseAudio over TCP on 127.0.0.1. Update to 1.0.1-fold.5+ and restart the desktop; `pactl info` (package `pulseaudio-utils`) in Debian should show a sink.
 
-**3D apps are slow or crash in Debian.** `droiddesk-gpu status` shows whether hardware OpenGL is on. If an app crashes with it, try `droiddesk-gpu off` (software rendering) and report the app.
+**3D apps are slow or crash in Debian.** `droiddesk-gpu status` shows whether hardware OpenGL is on. If an app crashes with it, try `droiddesk-gpu off` (software rendering) and report the app. `glxgears` itself crashes with hardware OpenGL since 1.0.1-fold.7 (zink without kopper); use another test app. GL windows flickering on older builds: run `debian-setup` to get Mesa revision 26.2.3-2.
 
 **Links open in an Android browser instead of Firefox.** Since 1.0.1-fold.6 `droiddesk-open` and `xdg-open` use the Linux default app from `mimeapps.list` first. Set it with `xdg-mime default firefox.desktop x-scheme-handler/https` if needed.
 
