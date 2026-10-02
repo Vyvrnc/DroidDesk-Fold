@@ -34,6 +34,10 @@ Implementation (2026-10-02):
 - `droiddesk-usb info|format|ls|cp|rm|mkdir`; tray: columns Kapacita / Systém souborů / Jmenovka,
   buttons Naformátovat… and Soubory….
 - Local test harness: fake bridge over an image file + glibc build of the shim in Docker.
+- fold.19: exFAT files (libexfat batch tool) and NTFS (mkntfs from Termux root-repo for format,
+  libntfs-3g batch tool for files; volumes Windows left in use — hibernation, fast startup,
+  unclean log, chkdsk flag — are read-only). Shim: LRU cache + write-back, flush at exit,
+  fork/exec/dup safe, no self-deadlock on its own stderr output; per-disk flock in the client.
 
 Original plan:
 - `libdroiddesk-blk.so` (glibc, Debian; LD_PRELOAD shim): intercepts open/pread/pwrite/lseek/

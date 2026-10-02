@@ -171,8 +171,11 @@ class UsbFlasher(
                     }
                 }
             } catch (error: Exception) {
+                // End the session: after a card change or a transport error the device's
+                // capacity and the client's cache may be stale. A new session starts clean.
                 Log.w(TAG, "blk ${op.toChar()} $lba+$count failed", error)
                 replyError(replies, error.message ?: error.javaClass.simpleName)
+                break
             }
             replies.flush()
         }

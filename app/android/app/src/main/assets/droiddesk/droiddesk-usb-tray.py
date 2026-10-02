@@ -169,7 +169,7 @@ def ask_text(parent, title, prompt, value=""):
 
 
 class FilesWindow:
-    """Files on the disk (FAT, exFAT, ext2/3/4): browse, upload, download, new folder, delete."""
+    """Files on the disk (FAT, exFAT, NTFS, ext2/3/4): browse, upload, download, new folder, delete."""
 
     def __init__(self, parent, name, title):
         self.name = name
@@ -601,6 +601,7 @@ class Tray:
         kinds = Gtk.ComboBoxText()
         for key, text in (("fat32", "FAT32 — Windows, macOS, Linux, TV, auto (soubory do 4 GB)"),
                           ("exfat", "exFAT — velké soubory nad 4 GB, Windows, macOS, Linux"),
+                          ("ntfs", "NTFS — Windows (macOS jen čte)"),
                           ("ext4", "ext4 — jen Linux")):
             kinds.append(key, text)
         kinds.set_active_id("fat32")

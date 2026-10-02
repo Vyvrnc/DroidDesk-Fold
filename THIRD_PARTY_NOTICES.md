@@ -17,6 +17,9 @@ whenever a dependency, binary, bootstrap, wallpaper, or other asset changes.
 | Termux bootstrap | `app/assets/bootstrap-aarch64.zip` | Contains multiple packages under their individual licenses. Package license files are retained inside `share/doc/`. Exact package versions, source archives, patches, build recipe, and custom-prefix rebuild remain pending. | <https://github.com/termux/termux-packages> |
 | Ubuntu-style wallpaper | `app/assets/droiddesk/ubuntu-touch-wallpaper.jpg` | Redistribution license and original author have not been verified. Replace it with an original or clearly licensed asset before the next public release. | Previously obtained from WallpaperCave |
 | XZ for Java (`.xz` images for `droiddesk-usb flash`) | Gradle dependency `org.tukaani:xz:1.12` | 0BSD | <https://tukaani.org/xz/java.html> |
+| libexfat (exFAT files for `droiddesk-usb`) | `app/android/app/src/main/cpp/exfat/libexfat/`, built into `libdroiddesk_exfat.so` | GPL-2.0-or-later, unmodified copy; revision in `cpp/exfat/UPSTREAM`, license `cpp/exfat/COPYING` | <https://github.com/relan/exfat> |
+| libntfs-3g (NTFS files for `droiddesk-usb`) | `app/android/app/src/main/cpp/ntfs/libntfs-3g/`, `cpp/ntfs/include/`, built into `libdroiddesk_ntfs.so` | GPL-2.0-or-later (library parts LGPL-2.0-or-later), unmodified copy; revision and omitted parts in `cpp/ntfs/UPSTREAM`, licenses `cpp/ntfs/COPYING`, `cpp/ntfs/COPYING.LIB` | <https://github.com/tuxera/ntfs-3g> |
+| DroidDesk block shim, exFAT and NTFS tools | `libdroiddesk_blk.so`, `libdroiddesk_exfat.so`, `libdroiddesk_ntfs.so` (`cpp/blk_shim.c`, `cpp/exfat/exfat_tool.c`, `cpp/ntfs/ntfs_tool.c`, `cpp/ntfs/config.h`) | DroidDesk GPL-3.0, built from this repository by the APK build | This repository |
 
 The USB flashing approach follows [EtchDroid](https://github.com/EtchDroid/EtchDroid)
 (GPL-3.0) and [libaums](https://github.com/magnusja/libaums) (Apache-2.0); since 1.0.1-fold.8 DroidDesk

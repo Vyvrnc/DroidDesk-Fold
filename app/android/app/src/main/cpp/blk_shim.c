@@ -44,6 +44,11 @@
 #define MAX_BLOCK 4096
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+/* Set while this thread holds the lock: the shim's own output (complain, trace -> write on
+ * stderr) must pass straight through instead of taking the lock again. */
+static __thread int inside;
+#define LOCK() (pthread_mutex_lock(&lock), inside = 1)
+#define UNLOCK() (inside = 0, pthread_mutex_unlock(&lock))
 static int conn = -1;
 static int refs;
 static uint32_t bs;
@@ -98,6 +103,7 @@ REAL(int, fallocate64, int, int, off64_t, off64_t)
 REAL(int, posix_fadvise64, int, off64_t, off64_t, int)
 REAL(int, flock, int, int)
 REAL(char *, realpath, const char *, char *)
+REAL(int, fcntl, int, int, ...)
 
 static int is_vpath(const char *path) { return path && strcmp(path, VPATH) == 0; }
 
@@ -107,12 +113,13 @@ static int slot_of(int fd) {
     return -1;
 }
 
-/* Lock-free peek for the pass-through fast path; only a hit takes the lock. */
+/* Atomic peek for the pass-through fast path; only a possible hit takes the lock. The
+ * operations themselves look the descriptor up again under the lock. */
 static int tracked(int fd) {
-    if (fd < 0 || nfds == 0) return 0;
-    pthread_mutex_lock(&lock);
+    if (fd < 0 || inside || __atomic_load_n(&nfds, __ATOMIC_ACQUIRE) == 0) return 0;
+    LOCK();
     int hit = slot_of(fd) >= 0;
-    pthread_mutex_unlock(&lock);
+    UNLOCK();
     return hit;
 }
 
@@ -296,12 +303,19 @@ static void cache_update(uint64_t off, const unsigned char *data, size_t len) {
     }
 }
 
+static void cache_drop(void) {
+    for (int i = 0; i < SLOTS; i++) slots[i].off = UINT64_MAX;
+}
+
+/* After a failed write the cache holds bytes the disk does not: the session stays failed
+ * (every later read, write and fsync reports EIO) until it is closed. */
 static int flush_pending(void) {
     if (pending_len == 0) return 0;
     size_t n = pending_len;
     pending_len = 0;
     if (request('W', (base + pending_off) / bs, (uint32_t)(n / bs), pending) < 0) {
         pending_failed = 1;
+        cache_drop();
         return -1;
     }
     return 0;
@@ -352,6 +366,10 @@ static int load(uint64_t w) {
 
 static ssize_t do_pread(void *buf, size_t len, uint64_t off) {
     trace("read %zu @ %llu", len, (unsigned long long)off);
+    if (pending_failed) {
+        errno = EIO;
+        return -1;
+    }
     if (off >= size) return 0;
     if (len > size - off) len = (size_t)(size - off);
     size_t done = 0;
@@ -432,7 +450,6 @@ static int do_flush(void) {
     int result = flush_pending();
     if (request('F', 0, 0, NULL) < 0) result = -1;
     if (pending_failed) {
-        pending_failed = 0;
         errno = EIO;
         result = -1;
     }
@@ -447,32 +464,65 @@ static void disconnect(void) {
     load_close();
     real_close(conn);
     conn = -1;
-    for (int i = 0; i < SLOTS; i++) slots[i].off = UINT64_MAX;
+    cache_drop();
+}
+
+/* A tool that returns from main() without closing the disk still gets its writes out. */
+__attribute__((destructor)) static void at_exit_flush(void) {
+    LOCK();
+    if (conn >= 0) {
+        if (do_flush() < 0) complain("writes at exit failed");
+        disconnect();
+    }
+    UNLOCK();
+}
+
+/* fork: the child must not use (or end) the parent's session; its copies of the device
+ * descriptors are closed, so stray writes cannot reach the protocol. */
+static void after_fork_child(void) {
+    pthread_mutex_init(&lock, NULL);
+    inside = 0;
+    load_close();
+    for (int i = 0; i < nfds; i++) real_close(fds[i].fd);
+    if (conn >= 0) real_close(conn);
+    __atomic_store_n(&nfds, 0, __ATOMIC_RELEASE);
+    refs = 0;
+    conn = -1;
+    pending_len = 0;
+    cache_drop();
+}
+
+__attribute__((constructor)) static void setup(void) {
+    pthread_atfork(NULL, NULL, after_fork_child);
 }
 
 static int vopen(int flags) {
-    pthread_mutex_lock(&lock);
+    LOCK();
     if (nfds >= MAX_FDS) {
-        pthread_mutex_unlock(&lock);
+        UNLOCK();
         errno = EMFILE;
         return -1;
     }
     if (conn < 0 && connect_bridge() < 0) {
         int saved = errno;
-        pthread_mutex_unlock(&lock);
+        UNLOCK();
         errno = saved;
         return -1;
     }
-    /* A real descriptor of its own (the session socket), so the kernel never reuses the number. */
-    int fd = fcntl(conn, (flags & O_CLOEXEC) ? F_DUPFD_CLOEXEC : F_DUPFD, 3);
+    /* A real descriptor of its own (the session socket), so the kernel never reuses the
+     * number. Always close-on-exec: after exec nobody would know it is the protocol. */
+    (void)flags;
+    /* The real fcntl: the override would take the lock this function holds. */
+    load_fcntl();
+    int fd = real_fcntl(conn, F_DUPFD_CLOEXEC, 3);
     if (fd >= 0) {
         fds[nfds].fd = fd;
         fds[nfds].pos = 0;
-        nfds++;
+        __atomic_store_n(&nfds, nfds + 1, __ATOMIC_RELEASE);
         refs++;
     }
     trace("open flags 0x%x -> fd %d, size %llu", flags, fd, (unsigned long long)size);
-    pthread_mutex_unlock(&lock);
+    UNLOCK();
     return fd;
 }
 
@@ -491,13 +541,13 @@ static void fill_stat(struct stat *st) {
 
 /* stat() on the path before any open: the bridge has to tell the size. */
 static int vstat(struct stat *st) {
-    pthread_mutex_lock(&lock);
+    LOCK();
     int ok = conn >= 0 || connect_bridge() == 0;
     if (ok) fill_stat(st);
     /* A session opened only for stat() is closed again right away. */
     if (ok && refs == 0) disconnect();
     trace("stat -> %s, size %llu", ok ? "ok" : "failed", (unsigned long long)size);
-    pthread_mutex_unlock(&lock);
+    UNLOCK();
     return ok ? 0 : -1;
 }
 
@@ -562,11 +612,12 @@ int __openat64_2(int dirfd, const char *path, int flags) { return openat(dirfd, 
 int close(int fd) {
     load_close();
     if (!tracked(fd)) return real_close(fd);
-    pthread_mutex_lock(&lock);
+    LOCK();
     int i = slot_of(fd);
     int result = 0;
     if (i >= 0) {
-        fds[i] = fds[--nfds];
+        fds[i] = fds[nfds - 1];
+        __atomic_store_n(&nfds, nfds - 1, __ATOMIC_RELEASE);
         real_close(fd);
         if (--refs == 0 && conn >= 0) {
             if (do_flush() < 0) result = -1;
@@ -574,27 +625,37 @@ int close(int fd) {
         }
         trace("close %d (open: %d)", fd, refs);
     }
-    pthread_mutex_unlock(&lock);
+    UNLOCK();
     return result;
 }
 
 /* ── data ── */
 
 static ssize_t vread(int fd, void *buf, size_t len) {
-    pthread_mutex_lock(&lock);
+    LOCK();
     int i = slot_of(fd);
+    if (i < 0) {
+        UNLOCK();
+        errno = EBADF;
+        return -1;
+    }
     ssize_t n = do_pread(buf, len, fds[i].pos);
     if (n > 0) fds[i].pos += (uint64_t)n;
-    pthread_mutex_unlock(&lock);
+    UNLOCK();
     return n;
 }
 
 static ssize_t vwrite(int fd, const void *buf, size_t len) {
-    pthread_mutex_lock(&lock);
+    LOCK();
     int i = slot_of(fd);
+    if (i < 0) {
+        UNLOCK();
+        errno = EBADF;
+        return -1;
+    }
     ssize_t n = do_pwrite(buf, len, fds[i].pos);
     if (n > 0) fds[i].pos += (uint64_t)n;
-    pthread_mutex_unlock(&lock);
+    UNLOCK();
     return n;
 }
 
@@ -603,9 +664,9 @@ static ssize_t vpread(void *buf, size_t len, off64_t off) {
         errno = EINVAL;
         return -1;
     }
-    pthread_mutex_lock(&lock);
+    LOCK();
     ssize_t n = do_pread(buf, len, (uint64_t)off);
-    pthread_mutex_unlock(&lock);
+    UNLOCK();
     return n;
 }
 
@@ -614,9 +675,9 @@ static ssize_t vpwrite(const void *buf, size_t len, off64_t off) {
         errno = EINVAL;
         return -1;
     }
-    pthread_mutex_lock(&lock);
+    LOCK();
     ssize_t n = do_pwrite(buf, len, (uint64_t)off);
-    pthread_mutex_unlock(&lock);
+    UNLOCK();
     return n;
 }
 
@@ -681,8 +742,13 @@ ssize_t __pwrite64_chk(int fd, const void *buf, size_t len, off64_t off, size_t 
 off64_t lseek64(int fd, off64_t off, int whence) {
     load_lseek64();
     if (!tracked(fd)) return real_lseek64(fd, off, whence);
-    pthread_mutex_lock(&lock);
+    LOCK();
     int i = slot_of(fd);
+    if (i < 0) {
+        UNLOCK();
+        errno = EBADF;
+        return -1;
+    }
     int64_t from = whence == SEEK_SET ? 0 : whence == SEEK_CUR ? (int64_t)fds[i].pos
                  : whence == SEEK_END ? (int64_t)size : -1;
     off64_t result = -1;
@@ -692,7 +758,7 @@ off64_t lseek64(int fd, off64_t off, int whence) {
         fds[i].pos = (uint64_t)(from + off);
         result = (off64_t)fds[i].pos;
     }
-    pthread_mutex_unlock(&lock);
+    UNLOCK();
     return result;
 }
 
@@ -701,9 +767,9 @@ off_t lseek(int fd, off_t off, int whence) { return (off_t)lseek64(fd, (off64_t)
 int fsync(int fd) {
     load_fsync();
     if (!tracked(fd)) return real_fsync(fd);
-    pthread_mutex_lock(&lock);
+    LOCK();
     int result = do_flush();
-    pthread_mutex_unlock(&lock);
+    UNLOCK();
     return result;
 }
 
@@ -718,9 +784,9 @@ int fdatasync(int fd) {
 int fstat(int fd, struct stat *st) {
     load_fstat();
     if (!tracked(fd)) return real_fstat(fd, st);
-    pthread_mutex_lock(&lock);
+    LOCK();
     fill_stat(st);
-    pthread_mutex_unlock(&lock);
+    UNLOCK();
     return 0;
 }
 
@@ -830,6 +896,51 @@ int flock(int fd, int operation) {
     load_flock();
     if (!tracked(fd)) return real_flock(fd, operation);
     return 0;
+}
+
+/* Duplicates of the device descriptor are refused: a copy would bypass the shim and put raw
+ * bytes into the protocol (no tool used by droiddesk-usb needs them). */
+int dup(int fd) {
+    static int (*real)(int);
+    if (!real) real = dlsym(RTLD_NEXT, "dup");
+    if (tracked(fd)) {
+        errno = EINVAL;
+        return -1;
+    }
+    return real(fd);
+}
+
+int dup2(int fd, int target) {
+    static int (*real)(int, int);
+    if (!real) real = dlsym(RTLD_NEXT, "dup2");
+    if (tracked(fd) || tracked(target)) {
+        errno = EINVAL;
+        return -1;
+    }
+    return real(fd, target);
+}
+
+int dup3(int fd, int target, int flags) {
+    static int (*real)(int, int, int);
+    if (!real) real = dlsym(RTLD_NEXT, "dup3");
+    if (tracked(fd) || tracked(target)) {
+        errno = EINVAL;
+        return -1;
+    }
+    return real(fd, target, flags);
+}
+
+int fcntl(int fd, int cmd, ...) {
+    load_fcntl();
+    va_list ap;
+    va_start(ap, cmd);
+    void *arg = va_arg(ap, void *);
+    va_end(ap);
+    if ((cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC) && tracked(fd)) {
+        errno = EINVAL;
+        return -1;
+    }
+    return real_fcntl(fd, cmd, arg);
 }
 
 /* A regular file: block device ioctls (size, sector size, discard) are not there. */

@@ -2,18 +2,21 @@
 # Runs inside debian:trixie: droiddesk-usb format/files against an image through the shim.
 set -u
 export DEBIAN_FRONTEND=noninteractive
-if ! command -v mkfs.exfat >/dev/null; then
-    apt-get update -qq >/dev/null && apt-get install -y -qq gcc libc6-dev python3 procps mtools dosfstools exfatprogs e2fsprogs fdisk >/dev/null || exit 1
+if ! command -v mkntfs >/dev/null; then
+    apt-get update -qq >/dev/null && apt-get install -y -qq gcc libc6-dev python3 procps mtools dosfstools exfatprogs e2fsprogs ntfs-3g fdisk >/dev/null || exit 1
 fi
 cd /t
 gcc -shared -fPIC -O2 -Wall -o /tmp/libdroiddesk_blk.so /src/cpp/blk_shim.c -ldl 2>&1 | grep -v "^$" | head -30
 P=/tmp/prefix
 rm -rf "$P"; mkdir -p "$P/bin" "$P/lib"
 cp /tmp/libdroiddesk_blk.so "$P/lib/"
-for t in mkfs.fat mkfs.exfat mkfs.ext4 debugfs mdir mcopy mdel mdeltree mmd mrd; do ln -s "$(command -v $t)" "$P/bin/$t"; done
+for t in mkfs.fat mkfs.exfat mkfs.ext4 mkntfs debugfs mdir mcopy mdel mdeltree mmd mrd; do ln -s "$(command -v $t)" "$P/bin/$t"; done
 ln -s "$(command -v python3)" "$P/bin/python3"
 E=/src/cpp/exfat
 gcc -shared -fPIC -O2 -w -I$E/libexfat -DPACKAGE='"droiddesk-exfat"' -DVERSION='"1.4.0"' -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE     -o "$P/lib/libdroiddesk_exfat.so" $E/exfat_tool.c $E/libexfat/*.c || echo "FAIL: exfat build"
+N=/src/cpp/ntfs
+gcc -shared -fPIC -O2 -w -I$N -I$N/include/ntfs-3g -DHAVE_CONFIG_H \
+    -o "$P/lib/libdroiddesk_ntfs.so" $N/ntfs_tool.c $N/libntfs-3g/*.c || echo "FAIL: ntfs build"
 export DROIDDESK_PREFIX=$P TMPDIR=/tmp
 CLI="python3 /src/assets/droiddesk/droiddesk-usb.py"
 BS=${BS:-512}
@@ -24,7 +27,7 @@ fail=0
 check() { if [ $1 -ne 0 ]; then echo "FAIL: $2"; fail=1; else echo "ok: $2"; fi; }
 mkdir -p /tmp/up/sub; echo hello > /tmp/up/a.txt; head -c 3000000 /dev/urandom > /tmp/up/sub/big.bin; echo "čeština" > "/tmp/up/Příliš žluťoučký.txt"
 
-for fs in fat32 ext4 exfat; do
+for fs in fat32 ext4 exfat ntfs; do
     echo "=== $fs"
     $CLI format $fs --label TEST$fs --yes; check $? "format $fs"
     $CLI info
@@ -33,6 +36,7 @@ for fs in fat32 ext4 exfat; do
         fat32) fsck.fat -n /tmp/disk.img@@1048576 >/dev/null 2>&1; dd if=/tmp/disk.img of=/tmp/p.img bs=1M skip=1 status=none; fsck.fat -n /tmp/p.img; check $? "fsck.fat after format" ;;
         ext4) dd if=/tmp/disk.img of=/tmp/p.img bs=1M skip=1 status=none; e2fsck -fn /tmp/p.img >/dev/null; check $? "e2fsck after format" ;;
         exfat) dd if=/tmp/disk.img of=/tmp/p.img bs=1M skip=1 status=none; fsck.exfat -n /tmp/p.img >/dev/null; check $? "fsck.exfat after format" ;;
+        ntfs) dd if=/tmp/disk.img of=/tmp/p.img bs=1M skip=1 status=none; ntfsfix -n /tmp/p.img >/dev/null; check $? "ntfsfix after format" ;;
     esac
     $CLI mkdir usb:/docs/deep; check $? "mkdir $fs"
     $CLI cp /tmp/up/a.txt /tmp/up/sub "/tmp/up/Příliš žluťoučký.txt" usb:/docs; check $? "cp up $fs"
@@ -53,8 +57,14 @@ for fs in fat32 ext4 exfat; do
         fat32) fsck.fat -n /tmp/p.img; check $? "fsck.fat after files" ;;
         ext4) e2fsck -fn /tmp/p.img; check $? "e2fsck after files" ;;
         exfat) fsck.exfat -n /tmp/p.img; check $? "fsck.exfat after files" ;;
+        ntfs) ntfsfix -n /tmp/p.img >/dev/null; check $? "ntfsfix after files"
+              ntfsls -R /tmp/p.img | grep -c . ;;
     esac
 done
+echo "=== shim edge cases"
+gcc -o /tmp/fx /t/fx.c && DROIDDESK_BLK_DEVICE=/dev/bus/usb/001/002 DROIDDESK_BLK_OFFSET=1048576 \
+    LD_PRELOAD=$P/lib/libdroiddesk_blk.so /tmp/fx
+[ "$(dd if=/tmp/disk.img bs=1 skip=1049088 count=1 status=none)" = Z ]; check $? "write at exit without close reaches the disk"
 echo "=== bridge"; grep -ac session /tmp/bridge.log
 [ $fail = 0 ] && echo ALL_OK || echo SOME_FAILED
 

@@ -231,7 +231,12 @@ static void remove_path(const char *path, int dir) {
     }
     rc = dir ? exfat_rmdir(&ef, node) : exfat_unlink(&ef, node);
     exfat_put_node(&ef, node);
-    if (rc == 0) rc = exfat_cleanup_node(&ef, node);
+    /* An unlinked node frees its clusters only in cleanup, also when the parent's flush
+     * failed: otherwise they stay allocated without a directory entry. */
+    if (node->is_unlinked) {
+        int cleaned = exfat_cleanup_node(&ef, node);
+        if (rc == 0) rc = cleaned;
+    }
     if (rc != 0) fail(dir ? "rmdir" : "rm", path, rc);
 }
 
@@ -250,7 +255,17 @@ int droiddesk_exfat_main(int argc, char **argv) {
         char *command = strtok(line, "\t");
         char *first = strtok(NULL, "\t");
         char *second = strtok(NULL, "\t");
+        char *extra = strtok(NULL, "\t");
         if (!command || !first) continue;
+        /* put and get take two paths, everything else one: a tab inside a name must not
+         * shift the fields onto another file. */
+        int two = strcmp(command, "put") == 0 || strcmp(command, "get") == 0;
+        if (extra || (two != (second != NULL))) {
+            failures++;
+            printf("E\t%s\twrong number of fields\n", command);
+            fflush(stdout);
+            continue;
+        }
         if (strcmp(command, "ls") == 0) list(first, "", 0);
         else if (strcmp(command, "tree") == 0) list(first, "", 1);
         else if (strcmp(command, "stat") == 0) stat_path(first);

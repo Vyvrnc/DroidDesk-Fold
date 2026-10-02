@@ -38,3 +38,5 @@ target_compile_definitions(droiddesk_exfat PRIVATE PACKAGE="droiddesk-exfat" VER
     _FILE_OFFSET_BITS=64 _GNU_SOURCE)
 target_compile_options(droiddesk_exfat PRIVATE -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -w)
 target_link_libraries(droiddesk_exfat ${log-lib})
+
+add_subdirectory(ntfs)

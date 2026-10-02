@@ -9,3 +9,6 @@ from an image file, in Debian arm64:
     docker run ... debian:trixie bash /t/gui.sh   # USB disky window under Xvfb, screenshot /t/gui.png
 
 `BS=4096 SIZE=2G` for other block sizes and disk sizes.
+
+    docker run ... debian:trixie bash /t/ntfs_test.sh     # NTFS tool in depth (dirty/hibernated volumes)
+    docker run ... debian:trixie bash /t/concurrency.sh   # parallel commands, killed client, debug mode, dup/fork

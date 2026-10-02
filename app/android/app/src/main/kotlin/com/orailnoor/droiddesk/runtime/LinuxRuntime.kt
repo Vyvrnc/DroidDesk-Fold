@@ -674,7 +674,7 @@ class LinuxRuntime(private val context: Context) {
                 // Format and files: libdroiddesk_blk.so (LD_PRELOAD shim) and libdroiddesk_exfat.so
                 // (exFAT files) from the APK into $PREFIX/lib, as a new inode whenever they
                 // changed (running tools may still have the old one mapped).
-                for (name in listOf("libdroiddesk_blk.so", "libdroiddesk_exfat.so")) {
+                for (name in listOf("libdroiddesk_blk.so", "libdroiddesk_exfat.so", "libdroiddesk_ntfs.so")) {
                     val source = File(context.applicationInfo.nativeLibraryDir, name)
                     val target = File(prefixDir, "lib/$name")
                     if (source.isFile && !(target.isFile && target.readBytes().contentEquals(source.readBytes()))) {

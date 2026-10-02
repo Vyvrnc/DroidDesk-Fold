@@ -25,7 +25,7 @@
 >
 > **Desktop and Android integration**
 > - `droiddesk-open [--android] FILE|URL` opens with the Linux app from `mimeapps.list` (Firefox, Mousepad, …) and falls back to an Android app only when there is none; `--android` always uses Android. Also behind `termux-open`, Debian's `xdg-open` and Thunar's "Otevřít v Androidu"
-> - **USB disky**: an icon in the dock (systray) and a menu entry — lists flash drives and card readers, attaches them to Linux / ejects them, writes and saves images with a progress window, and offers "Připojit do Linuxu" when a drive is plugged in. Columns show capacity, filesystem and label; **Naformátovat…** (FAT32, exFAT, ext4) and **Soubory…** (browse, upload, download, new folder, delete on FAT and ext2/3/4; exFAT can be formatted, its files not yet). Without root this works through `libdroiddesk_blk.so`, an `LD_PRELOAD` shim that lets dosfstools, exfatprogs, e2fsprogs (debugfs) and mtools use the disk held by the app. Needs `pygobject` (installed with XFCE from fold.16; older installs are offered the install on first use).
+> - **USB disky**: an icon in the dock (systray) and a menu entry — lists flash drives and card readers, attaches them to Linux / ejects them, writes and saves images with a progress window, and offers "Připojit do Linuxu" when a drive is plugged in. Columns show capacity, filesystem and label; **Naformátovat…** (FAT32, exFAT, NTFS, ext4) and **Soubory…** (browse, upload, download, new folder, delete on FAT, exFAT, NTFS and ext2/3/4). Without root this works through `libdroiddesk_blk.so`, an `LD_PRELOAD` shim that lets dosfstools, exfatprogs, ntfs-3g (mkntfs), e2fsprogs (debugfs) and mtools use the disk held by the app; exFAT and NTFS files go through small batch tools on libexfat and libntfs-3g built into the APK. NTFS left "in use" by Windows (hibernation, fast startup) is only read, never written. Needs `pygobject` (installed with XFCE from fold.16; older installs are offered the install on first use).
 > - `droiddesk-usb`: flash drives and card readers without root — `flash IMAGE[.xz|.gz]` (compressed images are fully checked before anything is written, then verified by reading back), `read FILE`, `--lun N` for multi-slot card readers, and an experimental `exec DEVICE -- CMD` that hands a libusb program the usbfs descriptor. The SCSI/Bulk-Only layer follows [EtchDroid](https://github.com/EtchDroid/EtchDroid) and [libaums](https://github.com/magnusja/libaums)
 > - Battery level in the dock, Android apps removed from the dock stay removed, windows tile at screen edges (Super+arrows), no xfwm4 compositor
 >
@@ -241,8 +241,8 @@ Commands of this fork's DroidDesk app (in its terminal):
 | `droiddesk-usb eject [DEVICE]` | Give a flash drive or card back to Android after `read`/`flash` (they keep it in Linux until then) |
 | `droiddesk-usb watch` | Print attach/detach/hold events as they happen |
 | `droiddesk-usb info [DEVICE]` | Capacity, partitions, filesystems and labels of a held disk |
-| `droiddesk-usb format [DEVICE] fat32\|exfat\|ext4 [--label NAME]` | New MBR with one partition and a filesystem (asks first) |
-| `droiddesk-usb ls [usb:/PATH]` | Files on the disk (FAT, ext2/3/4) |
+| `droiddesk-usb format [DEVICE] fat32\|exfat\|ntfs\|ext4 [--label NAME]` | New MBR with one partition and a filesystem (asks first) |
+| `droiddesk-usb ls [usb:/PATH]` | Files on the disk (FAT, exFAT, NTFS, ext2/3/4) |
 | `droiddesk-usb cp FILE… usb:/FOLDER` / `cp usb:/PATH… TARGET` | Copy to / from the disk, folders recursively |
 | `droiddesk-usb rm [-r] usb:/PATH…`, `mkdir usb:/PATH…` | Delete, create folders on the disk |
 | `droiddesk-usb-tray --window` | The "USB disky" window (also in the menu and as an icon in the dock) |

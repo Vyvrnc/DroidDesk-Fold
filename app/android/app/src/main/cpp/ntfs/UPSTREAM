@@ -1,0 +1,5 @@
+tuxera/ntfs-3g tag 2026.9.28, commit 7f0f841fc52cf719106c5c93bafe465004e36816 (2026-09-28 12:59:59 +0300)
+https://github.com/tuxera/ntfs-3g (GPL-2.0-or-later; COPYING, COPYING.LIB)
+Unmodified copies of libntfs-3g/*.c (without win32_io.c, Windows only) and include/ntfs-3g/*.h.
+Not taken: the FUSE driver (src/, libfuse-lite/), ntfsprogs/, the autotools build.
+config.h, ntfs_tool.c and CMakeLists.txt are DroidDesk's (config.h: see its header comment).
