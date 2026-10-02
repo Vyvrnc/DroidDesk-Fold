@@ -21,8 +21,9 @@ try:
 
     gi.require_version("Gtk", "3.0")
     from gi.repository import GLib, Gtk
-except (ImportError, ValueError):
-    # Installs from before fold.16 lack pygobject. From the menu: install it in a
+except (ImportError, ValueError, AttributeError):
+    # Installs from before fold.16 lack pygobject. at-spi2 leaves gi/overrides/ behind,
+    # so "import gi" can succeed as an empty namespace package (AttributeError). From the menu: install it in a
     # terminal the user can see, then open the window; at autostart: stay quiet.
     if "--window" in sys.argv:
         me = os.path.realpath(sys.argv[0])

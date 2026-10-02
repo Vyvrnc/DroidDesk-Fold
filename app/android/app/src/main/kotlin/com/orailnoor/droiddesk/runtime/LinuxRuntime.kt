@@ -804,7 +804,7 @@ class LinuxRuntime(private val context: Context) {
 
                 # Systray for the "USB disky" icon (droiddesk-usb-tray), before the
                 # battery or the clock. Only once pygobject is there to draw the icon.
-                if "${File(binDir, "python3").absolutePath}" -c 'import gi' 2>/dev/null &&
+                if "${File(binDir, "python3").absolutePath}" -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null &&
                     ! xfconf-query -c xfce4-panel -p /plugins/plugin-27 >/dev/null 2>&1; then
                     xfconf-query -c xfce4-panel -p /plugins/plugin-27 -n -t string -s systray
                     xfconf-query -c xfce4-panel -p /plugins/plugin-27/square-icons -n -t bool -s true
