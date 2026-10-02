@@ -665,6 +665,8 @@ class LinuxRuntime(private val context: Context) {
                 val trayCommand = File(binDir, "droiddesk-usb-tray")
                 trayCommand.writeText(
                     "#!${File(binDir, "bash").absolutePath}\n" +
+                        // Also when started outside the session environment (older sessions).
+                        "export GI_TYPELIB_PATH=\"${prefixDir.absolutePath}/lib/girepository-1.0\"\n" +
                         "exec \"${File(binDir, "python3").absolutePath}\" \"${trayClient.absolutePath}\" \"${'$'}@\"\n",
                 )
                 trayCommand.setExecutable(true, false)
@@ -1722,6 +1724,9 @@ class LinuxRuntime(private val context: Context) {
         env["GIO_LAUNCH_DESKTOP"] = "${prefixDir.absolutePath}/libexec/gio-launch-desktop"
         env["GDK_PIXBUF_MODULEDIR"] = "${prefixDir.absolutePath}/lib/gdk-pixbuf-2.0/2.10.0/loaders"
         env["GDK_PIXBUF_MODULE_FILE"] = "${prefixDir.absolutePath}/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+        // libgirepository looks for typelibs only at its compile-time com.termux path
+        // (pygobject and every other GObject introspection program).
+        env["GI_TYPELIB_PATH"] = "${prefixDir.absolutePath}/lib/girepository-1.0"
 
         // Mesa is always available. Adreno devices use Turnip + Zink for hardware
         // rendering; other GPUs use Mesa's software renderer instead of being

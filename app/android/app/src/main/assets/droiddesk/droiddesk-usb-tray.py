@@ -21,15 +21,23 @@ try:
 
     gi.require_version("Gtk", "3.0")
     from gi.repository import GLib, Gtk
-except (ImportError, ValueError, AttributeError):
+except (ImportError, ValueError, AttributeError) as error:
     # Installs from before fold.16 lack pygobject. at-spi2 leaves gi/overrides/ behind,
-    # so "import gi" can succeed as an empty namespace package (AttributeError). From the menu: install it in a
-    # terminal the user can see, then open the window; at autostart: stay quiet.
-    if "--window" in sys.argv:
-        me = os.path.realpath(sys.argv[0])
+    # so "import gi" can succeed as an empty namespace package (AttributeError).
+    # From the menu: install it in a terminal the user can see, then open the window
+    # once more; at autostart: stay quiet.
+    gi_module = sys.modules.get("gi")
+    have_pygobject = gi_module is not None and hasattr(gi_module, "require_version")
+    if "--window" in sys.argv and (have_pygobject or os.environ.get("DROIDDESK_USB_TRAY_INSTALLED")):
+        # pygobject is there but GTK does not load (typelibs, display): say so, no loop.
+        subprocess.run(["notify-send", "-i", "dialog-error", "USB disky", f"GTK se nenačetlo: {error}"],
+                       check=False)
+    elif "--window" in sys.argv:
+        wrapper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "droiddesk-usb-tray")
         subprocess.Popen(["xfce4-terminal", "--title=USB disky", "-x", "bash", "-c",
                           "echo 'USB disky potřebují balíček pygobject, instaluji…'; "
-                          f"pkg install -y pygobject && (setsid {sys.executable} '{me}' --window &); "
+                          "pkg install -y pygobject && "
+                          f"(DROIDDESK_USB_TRAY_INSTALLED=1 setsid '{wrapper}' --window &); "
                           "echo; read -rp 'Enter zavře okno. '"])
     sys.exit(0)
 
