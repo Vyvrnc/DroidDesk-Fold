@@ -169,7 +169,7 @@ def ask_text(parent, title, prompt, value=""):
 
 
 class FilesWindow:
-    """Files on the disk (FAT, ext2/3/4): browse, upload, download, new folder, delete."""
+    """Files on the disk (FAT, exFAT, ext2/3/4): browse, upload, download, new folder, delete."""
 
     def __init__(self, parent, name, title):
         self.name = name
@@ -404,6 +404,10 @@ class Tray:
         win.set_icon_name(ICON)
         win.set_default_size(780, 340)
         win.connect("delete-event", lambda *_: win.hide() or True)
+        # A format or copy from the terminal changes what the columns show: read the disks
+        # again when the window comes back to the front (at most every 5 s).
+        self.last_focus = 0.0
+        win.connect("focus-in-event", lambda *_: self.focused())
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
         self.store = Gtk.ListStore(str, str, str, str, str, str, str, bool)
         view = Gtk.TreeView(model=self.store)
@@ -441,6 +445,12 @@ class Tray:
     def reload(self):
         self.summaries.clear()
         self.refresh()
+
+    def focused(self):
+        if not self.busy and time.monotonic() - self.last_focus > 5:
+            self.last_focus = time.monotonic()
+            self.reload()
+        return False
 
     def refresh(self):
         held = 0
@@ -590,7 +600,7 @@ class Tray:
         area.pack_start(Gtk.Label(label=f"{row[self.LABEL]} ({row[self.CAPACITY]})", xalign=0), False, False, 0)
         kinds = Gtk.ComboBoxText()
         for key, text in (("fat32", "FAT32 — Windows, macOS, Linux, TV, auto (soubory do 4 GB)"),
-                          ("exfat", "exFAT — velké soubory, Windows a macOS (soubory zde zatím nejdou)"),
+                          ("exfat", "exFAT — velké soubory nad 4 GB, Windows, macOS, Linux"),
                           ("ext4", "ext4 — jen Linux")):
             kinds.append(key, text)
         kinds.set_active_id("fat32")

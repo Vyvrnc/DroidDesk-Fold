@@ -671,14 +671,17 @@ class LinuxRuntime(private val context: Context) {
                     )
                     usbCommand.setExecutable(true, false)
                 }
-                // Format and files: libdroiddesk_blk.so from the APK into $PREFIX/lib, as a new
-                // inode whenever it changed (running tools may still have the old one mapped).
-                val shimSource = File(context.applicationInfo.nativeLibraryDir, "libdroiddesk_blk.so")
-                val shim = File(prefixDir, "lib/libdroiddesk_blk.so")
-                if (shimSource.isFile && !(shim.isFile && shim.readBytes().contentEquals(shimSource.readBytes()))) {
-                    val shimTmp = File(prefixDir, "lib/.libdroiddesk_blk.so.new")
-                    shimSource.copyTo(shimTmp, overwrite = true)
-                    if (!shimTmp.renameTo(shim)) error("rename to ${shim.path} failed")
+                // Format and files: libdroiddesk_blk.so (LD_PRELOAD shim) and libdroiddesk_exfat.so
+                // (exFAT files) from the APK into $PREFIX/lib, as a new inode whenever they
+                // changed (running tools may still have the old one mapped).
+                for (name in listOf("libdroiddesk_blk.so", "libdroiddesk_exfat.so")) {
+                    val source = File(context.applicationInfo.nativeLibraryDir, name)
+                    val target = File(prefixDir, "lib/$name")
+                    if (source.isFile && !(target.isFile && target.readBytes().contentEquals(source.readBytes()))) {
+                        val tmp = File(prefixDir, "lib/.$name.new")
+                        source.copyTo(tmp, overwrite = true)
+                        if (!tmp.renameTo(target)) error("rename to ${target.path} failed")
+                    }
                 }
                 // "USB disky": icon in the dock's systray and a window (GTK 3 through pygobject).
                 val trayClient = File(binDir, "droiddesk-usb-tray.py")

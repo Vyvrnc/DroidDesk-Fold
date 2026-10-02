@@ -13,7 +13,7 @@ after asking the user. This client talks to UsbBridge in the app.
   droiddesk-usb info [DEVICE]                           capacity, partitions, filesystems, labels
   droiddesk-usb format [DEVICE] fat32|exfat|ext4 [--label NAME] [--yes]
                                                         new MBR with one partition + filesystem
-  droiddesk-usb ls [DEVICE] [usb:/PATH]                 files on the disk (FAT, ext2/3/4)
+  droiddesk-usb ls [DEVICE] [usb:/PATH]                 files on the disk (FAT, exFAT, ext2/3/4)
   droiddesk-usb cp FILE... usb:/FOLDER                  copy to the disk (folders recursively)
   droiddesk-usb cp usb:/PATH... TARGET                  copy from the disk
   droiddesk-usb rm [-r] usb:/PATH...  |  mkdir usb:/PATH...
@@ -27,8 +27,11 @@ exactly one mass storage device is attached. After a read or flash the device
 stays with Linux (no unmount/remount between operations) until "eject". --lun picks the slot of a
 multi-slot card reader when more than one card is inserted.
 """
+import ctypes
+import fcntl
 import os
 import re
+import signal
 import socket
 import struct
 import subprocess
@@ -74,7 +77,37 @@ def describe(dev):
     return f"{dev['name']}  {dev['vid']}:{dev['pid']}  {label}"
 
 
+DEVICE_LOCKS = {}
+
+
+def lock_device(dev):
+    """One droiddesk-usb operation per disk at a time (until this process ends).
+
+    Each tool run is its own bridge session; two commands on one disk interleaved
+    sessions, and a reader stuck in that state needed eject + attach.
+    """
+    if dev["name"] in DEVICE_LOCKS:
+        return
+    prefix = os.environ.get("DROIDDESK_PREFIX") or os.path.dirname(os.path.dirname(os.path.realpath(sys.executable)))
+    folder = os.path.join(prefix, "tmp")
+    os.makedirs(folder, exist_ok=True)
+    handle = open(os.path.join(folder, "droiddesk-usb" + dev["name"].replace("/", "_") + ".lock"), "w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        text = "Čekám, až doběhne jiná operace s tímto diskem…"
+        print(f"# {text}" if YAD else text, file=sys.stdout if YAD else sys.stderr, flush=True)
+        fcntl.flock(handle, fcntl.LOCK_EX)
+    DEVICE_LOCKS[dev["name"]] = handle
+
+
 def pick(wanted):
+    dev = _pick(wanted)
+    lock_device(dev)
+    return dev
+
+
+def _pick(wanted):
     found = devices()
     if wanted:
         for dev in found:
@@ -207,6 +240,12 @@ def raw_exec(dev, command):
 # DROIDDESK_PREFIX: tests outside Termux.
 PREFIX = os.environ.get("DROIDDESK_PREFIX") or os.path.dirname(os.path.dirname(os.path.realpath(sys.executable)))
 SHIM = os.path.join(PREFIX, "lib", "libdroiddesk_blk.so")
+# exFAT files: libexfat + batch tool, a shared library (the APK carries no executables).
+EXFAT_LIB = os.path.join(PREFIX, "lib", "libdroiddesk_exfat.so")
+EXFAT_RUNNER = ("import ctypes, sys\n"
+                "tool = ctypes.CDLL(sys.argv[1])\n"
+                "args = [a.encode() for a in ['droiddesk-exfat'] + sys.argv[2:]]\n"
+                "sys.exit(tool.droiddesk_exfat_main(len(args), (ctypes.c_char_p * len(args))(*args)))\n")
 VPATH = "/dev/droiddesk-blk"
 MAX_REQUEST = 1 << 20
 # Owner of new files and of the root folder on ext4: the usual first user of a PC.
@@ -437,10 +476,41 @@ def tool_env(dev, lun, part):
     return env
 
 
+CHILDREN = []
+
+
+def _die_with_parent():
+    # The tool must not outlive droiddesk-usb: an orphan keeps the disk's bridge session.
+    try:
+        ctypes.CDLL(None).prctl(1, signal.SIGKILL)  # PR_SET_PDEATHSIG
+    except (OSError, AttributeError):
+        pass
+
+
+def _stop_children(signum, frame):
+    for child in CHILDREN:
+        try:
+            child.terminate()
+            child.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            child.kill()
+        except OSError:
+            pass
+    sys.exit(128 + signum)
+
+
 def run_tool(args, env, show=True, check=True, stdin=None):
     """Runs a Termux tool on the disk; output lines go to the user (or yad)."""
     args = [os.path.join(PREFIX, "bin", args[0])] + list(args[1:])
-    result = subprocess.run(args, env=env, input=stdin, capture_output=True, text=True, errors="replace")
+    child = subprocess.Popen(args, env=env, stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace",
+                             preexec_fn=_die_with_parent)
+    CHILDREN.append(child)
+    try:
+        stdout, stderr = child.communicate(stdin)
+    finally:
+        CHILDREN.remove(child)
+    result = subprocess.CompletedProcess(args, child.returncode, stdout, stderr)
     if show:
         for line in (result.stdout + result.stderr).splitlines():
             if line.strip():
@@ -469,9 +539,10 @@ def contents(dev, lun):
     lines = []
     for part in info["parts"]:
         line = describe_part(part)
-        if part["fs"].startswith(("fat", "ext")):
+        if part["fs"].startswith(("fat", "ext", "exfat")):
             try:
-                files = (FatFiles if part["fs"].startswith("fat") else ExtFiles)(dev, lun, part)
+                files = (ExFatFiles if part["fs"] == "exfat" else
+                         FatFiles if part["fs"].startswith("fat") else ExtFiles)(dev, lun, part)
                 try:
                     names = [n + ("/" if d else "") for d, _, n in files.ls("/", missing_ok=True)
                              if n != "lost+found"]
@@ -567,15 +638,11 @@ def pick_part(dev, lun, number):
         if not part:
             sys.exit(f"droiddesk-usb: oddíl {number} neexistuje")
     else:
-        usable = [p for p in parts if p["fs"].startswith(("fat", "ext"))]
+        usable = [p for p in parts if p["fs"].startswith(("fat", "ext", "exfat"))]
         if not usable:
-            if any(p["fs"] == "exfat" for p in parts):
-                sys.exit("droiddesk-usb: soubory na exFAT zatím neumím (jen formát); FAT32 a ext4 ano")
-            sys.exit("droiddesk-usb: na zařízení není FAT ani ext2/3/4 (droiddesk-usb info)")
+            sys.exit("droiddesk-usb: na zařízení není FAT, exFAT ani ext2/3/4 (droiddesk-usb info)")
         part = usable[0]
-    if part["fs"] == "exfat":
-        sys.exit("droiddesk-usb: soubory na exFAT zatím neumím (jen formát); FAT32 a ext4 ano")
-    if not part["fs"].startswith(("fat", "ext")):
+    if not part["fs"].startswith(("fat", "ext", "exfat")):
         sys.exit(f"droiddesk-usb: {FS_NAMES.get(part['fs'], part['fs'] or 'neznámý systém')} neumím")
     return part
 
@@ -768,8 +835,132 @@ class ExtFiles:
                 sys.exit("droiddesk-usb: " + "; ".join(errors[:3]))
 
 
+class ExFatFiles:
+    """exFAT through droiddesk-exfat (libexfat): one mount per batch of commands."""
+
+    def __init__(self, dev, lun, part):
+        ensure_tools()
+        if not os.path.isfile(EXFAT_LIB):
+            sys.exit(f"droiddesk-usb: chybí {EXFAT_LIB} (spusť znovu Linuxovou relaci DroidDesk)")
+        self.env = tool_env(dev, lun, part)
+
+    def close(self):
+        pass
+
+    def run(self, commands, write=False):
+        """(output lines, error texts) of one batch."""
+        for command in commands:
+            if "\n" in command:
+                sys.exit("droiddesk-usb: názvy s koncem řádku neumím")
+        args = ["python3", "-c", EXFAT_RUNNER, EXFAT_LIB] + ([] if write else ["--ro"]) + [VPATH]
+        result = run_tool(args, self.env, show=False, check=False, stdin="\n".join(commands) + "\n")
+        out = result.stdout.splitlines()
+        errors = [line.split("\t", 2)[-1] for line in out if line.startswith("E\t")]
+        errors += [line.removeprefix("droiddesk-blk: error: ") for line in result.stderr.splitlines()
+                   if line.startswith("droiddesk-blk: error:")]
+        if result.returncode not in (0, 1) or (result.returncode and not errors):
+            tail = [line for line in result.stderr.splitlines() if line.strip()]
+            errors.append(tail[-1] if tail else f"droiddesk-exfat skončil s chybou {result.returncode}")
+        return out, errors
+
+    def ls(self, path, missing_ok=False):
+        out, errors = self.run([f"ls\t{path}"])
+        if errors and not missing_ok:
+            sys.exit(f"droiddesk-usb: {errors[0]}")
+        entries = []
+        for line in out:
+            fields = line.split("\t", 3)
+            if fields[0] == "L" and len(fields) == 4:
+                entries.append((fields[1] == "d", int(fields[2]), fields[3]))
+        return entries
+
+    def kind(self, path):
+        """"d", "f" or None (missing)."""
+        out, _ = self.run([f"stat\t{path}"])
+        return next((line.split("\t")[1] for line in out if line.startswith("S\t")), None)
+
+    def is_dir(self, path):
+        return path == "/" or self.kind(path) == "d"
+
+    def tree(self, path):
+        out, errors = self.run([f"tree\t{path}"])
+        if errors:
+            sys.exit(f"droiddesk-usb: {errors[0]}")
+        return [(f[1] == "d", f[3]) for f in (line.split("\t", 3) for line in out) if f[0] == "T" and len(f) == 4]
+
+    def upload(self, sources, dest):
+        commands = []
+
+        def add(local, target):
+            if os.path.isdir(local):
+                commands.append(f"mkdir\t{target}")
+                for child in sorted(os.listdir(local)):
+                    add(os.path.join(local, child), f"{target}/{child}")
+            elif os.path.isfile(local):
+                commands.append(f"put\t{local}\t{target}")
+
+        for source in sources:
+            local = os.path.abspath(source)
+            add(local, f"{dest.rstrip('/')}/{os.path.basename(local)}")
+        _, errors = self.run(commands, write=True)
+        if errors:
+            sys.exit("droiddesk-usb: " + "; ".join(errors[:3]))
+
+    def download(self, source, dest):
+        kind = self.kind(source)
+        if kind is None:
+            sys.exit(f"droiddesk-usb: {source} na disku není")
+        name = source.rstrip("/").rsplit("/", 1)[-1]
+        if kind == "f":
+            target = os.path.join(dest, name) if os.path.isdir(dest) else dest
+            commands = [f"get\t{source}\t{target}"]
+        else:
+            root = os.path.join(dest, name) if os.path.isdir(dest) else dest
+            os.makedirs(root, exist_ok=True)
+            commands = []
+            for is_dir, below in self.tree(source):
+                local = os.path.join(root, *below.split("/"))
+                if is_dir:
+                    os.makedirs(local, exist_ok=True)
+                else:
+                    commands.append(f"get\t{source.rstrip('/')}/{below}\t{local}")
+        _, errors = self.run(commands)
+        if errors:
+            sys.exit("droiddesk-usb: " + "; ".join(errors[:3]))
+
+    def remove(self, path, recursive):
+        kind = self.kind(path)
+        if kind is None:
+            sys.exit(f"droiddesk-usb: {path} na disku není")
+        commands = []
+        if kind == "d":
+            entries = self.tree(path)
+            if entries and not recursive:
+                sys.exit("droiddesk-usb: složka není prázdná (smazat i s obsahem: rm -r)")
+            commands += [f"rm\t{path}/{below}" for is_dir, below in entries if not is_dir]
+            # Parents come first in the tree: delete folders the other way round.
+            commands += [f"rmdir\t{path}/{below}" for is_dir, below in reversed(entries) if is_dir]
+            commands.append(f"rmdir\t{path}")
+        else:
+            commands.append(f"rm\t{path}")
+        _, errors = self.run(commands, write=True)
+        if errors:
+            sys.exit("droiddesk-usb: " + "; ".join(errors[:3]))
+
+    def mkdir(self, path):
+        at, commands = "", []
+        for part in path.strip("/").split("/"):
+            at += "/" + part
+            commands.append(f"mkdir\t{at}")  # the tool accepts existing folders
+        _, errors = self.run(commands, write=True)
+        if errors:
+            sys.exit("droiddesk-usb: " + "; ".join(errors[:3]))
+
+
 def files_for(dev, lun, number):
     part = pick_part(dev, lun, number)
+    if part["fs"] == "exfat":
+        return ExFatFiles(dev, lun, part)
     return (FatFiles if part["fs"].startswith("fat") else ExtFiles)(dev, lun, part)
 
 
@@ -853,6 +1044,8 @@ def option(argv, name, kind=str):
 
 
 def main(argv):
+    for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(signum, _stop_children)
     # Keep stdout and stderr in order when both go to a terminal.
     sys.stdout.reconfigure(line_buffering=True)
     if argv and argv[0] == "exec":
