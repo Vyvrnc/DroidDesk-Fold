@@ -8,6 +8,7 @@ import android.os.Looper
 import android.graphics.Color
 import android.graphics.BitmapFactory
 import android.graphics.drawable.GradientDrawable
+import android.view.KeyEvent
 import android.view.Window
 import android.view.WindowInsets
 import android.view.WindowInsetsController
@@ -393,7 +394,22 @@ class DesktopActivity : Activity() {
             setPadding((9 * density).toInt(), 0, (9 * density).toInt(), 0)
         }
 
-        controlOverlay = LinearLayout(this).apply {
+        // Extra keys like Termux:X11's: an on-screen keyboard has no arrows, Esc
+        // or Tab, which the terminal needs. Shown on demand; the choice is kept.
+        val preferences = getSharedPreferences("desktop_controls", MODE_PRIVATE)
+        val extraKeys = buildExtraKeysRow(::controlButton, density).apply {
+            visibility = if (preferences.getBoolean("extra_keys", false)) View.VISIBLE else View.GONE
+        }
+        val extraKeysButton = controlButton("Keys").apply {
+            contentDescription = "Show or hide arrow, Esc, Tab and Ctrl keys"
+            setOnClickListener {
+                val show = extraKeys.visibility != View.VISIBLE
+                extraKeys.visibility = if (show) View.VISIBLE else View.GONE
+                preferences.edit().putBoolean("extra_keys", show).apply()
+            }
+        }
+
+        val buttonRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(dragHandle, LinearLayout.LayoutParams(
@@ -408,9 +424,19 @@ class DesktopActivity : Activity() {
             addView(scaleButton, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, (42 * density).toInt(),
             ))
+            addView(extraKeysButton, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, (42 * density).toInt(),
+            ))
             addView(hideButton, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, (42 * density).toInt(),
             ))
+        }
+
+        controlOverlay = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.END
+            addView(buttonRow)
+            addView(extraKeys)
         }
 
         collapsedControl = controlButton("☰").apply {
@@ -445,6 +471,86 @@ class DesktopActivity : Activity() {
             setControlsCollapsed(false)
         })
         controlOverlay?.bringToFront()
+    }
+
+    private var ctrlLatched = false
+
+    /**
+     * Esc, Tab, a latching Ctrl, arrows (repeating while held), Home and End,
+     * sent as Android key codes the X server maps itself. A latched Ctrl stays
+     * pressed for the next key from this row or for typed text, until tapped again
+     * or used once by a key of this row.
+     */
+    private fun buildExtraKeysRow(controlButton: (String) -> Button, density: Float): LinearLayout {
+        val repeatHandler = Handler(Looper.getMainLooper())
+        fun send(keyCode: Int, down: Boolean) {
+            lorieView?.sendKeyEvent(0, keyCode, down)
+        }
+        lateinit var ctrlButton: Button
+        fun releaseCtrlIfLatched() {
+            if (!ctrlLatched) return
+            ctrlLatched = false
+            send(KeyEvent.KEYCODE_CTRL_LEFT, false)
+            ctrlButton.backgroundTintList = ColorStateList.valueOf(Color.argb(220, 28, 38, 52))
+        }
+        fun key(label: String, keyCode: Int, repeat: Boolean) = controlButton(label).apply {
+            setPadding((10 * density).toInt(), 0, (10 * density).toInt(), 0)
+            val repeater = object : Runnable {
+                override fun run() {
+                    send(keyCode, true)
+                    send(keyCode, false)
+                    repeatHandler.postDelayed(this, 50)
+                }
+            }
+            setOnTouchListener { view, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        view.isPressed = true
+                        send(keyCode, true)
+                        if (repeat) repeatHandler.postDelayed(repeater, 400)
+                        true
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        view.isPressed = false
+                        repeatHandler.removeCallbacks(repeater)
+                        send(keyCode, false)
+                        releaseCtrlIfLatched()
+                        lorieView?.requestFocus()
+                        true
+                    }
+                    else -> false
+                }
+            }
+        }
+        ctrlButton = controlButton("Ctrl").apply {
+            setPadding((10 * density).toInt(), 0, (10 * density).toInt(), 0)
+            setOnClickListener {
+                if (ctrlLatched) {
+                    releaseCtrlIfLatched()
+                } else {
+                    ctrlLatched = true
+                    send(KeyEvent.KEYCODE_CTRL_LEFT, true)
+                    backgroundTintList = ColorStateList.valueOf(Color.argb(230, 37, 99, 235))
+                }
+                lorieView?.requestFocus()
+            }
+        }
+        val height = (40 * density).toInt()
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            listOf(
+                key("Esc", KeyEvent.KEYCODE_ESCAPE, repeat = false),
+                key("Tab", KeyEvent.KEYCODE_TAB, repeat = false),
+                ctrlButton,
+                key("←", KeyEvent.KEYCODE_DPAD_LEFT, repeat = true),
+                key("↑", KeyEvent.KEYCODE_DPAD_UP, repeat = true),
+                key("↓", KeyEvent.KEYCODE_DPAD_DOWN, repeat = true),
+                key("→", KeyEvent.KEYCODE_DPAD_RIGHT, repeat = true),
+                key("Home", KeyEvent.KEYCODE_MOVE_HOME, repeat = false),
+                key("End", KeyEvent.KEYCODE_MOVE_END, repeat = false),
+            ).forEach { addView(it, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, height)) }
+        }
     }
 
     private fun dragListener(target: View, onTap: (() -> Unit)? = null): View.OnTouchListener {
