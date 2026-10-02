@@ -479,11 +479,9 @@ class LinuxRuntime(private val context: Context) {
                 # Without DRI3 (Termux:X11 only takes AHardwareBuffers) kopper
                 # presents through slow copies that flicker; zink's drisw path (needs
                 # softpipe in the build) is smooth, like Termux's own mesa-zink.
+                # It also ends the threaded-context crash in zink_kopper_acquire_submit
+                # (OrcaSlicer "New Project"), so GALLIUM_THREAD stays at its default.
                 export LIBGL_KOPPER_DISABLE=true
-                # Zink's threaded context flushes into a kopper swapchain that is not
-                # acquired without DRI3 and crashes (OrcaSlicer "New Project").
-                # Possibly obsolete without kopper; drop once verified.
-                export GALLIUM_THREAD=0
             fi
             unset droiddesk_mesa droiddesk_lib
             DROIDDESK_GPU_ENV
