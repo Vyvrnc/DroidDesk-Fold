@@ -135,14 +135,53 @@ object AndroidAppBridge {
                 Exec=$pythonPath $launcherPath $packageName
                 Icon=$icon
                 Terminal=false
-                Categories=Utility;
+                Categories=X-DroidDesk-Android;
                 StartupNotify=false
                 """.trimIndent() + "\n",
             )
         }
+        installAndroidMenu(homeDir)
         syncUtilityLaunchers(homeDir, pythonPath, launcherPath, sessionPath(homeDir))
         syncDockLaunchers(context, homeDir, activities, appsDir)
         Log.i(TAG, "Synced ${activities.size} Android app launchers into ${appsDir.absolutePath}")
+    }
+
+    /**
+     * All installed Android apps (often 150+) used to land in Accessories as
+     * Utility. They get their own category and an "Android" submenu instead; the
+     * user menu file merges the system one, so nothing else changes. A menu file
+     * the user wrote themselves (without our marker) is left alone.
+     */
+    private fun installAndroidMenu(homeDir: File) {
+        val marker = "<!-- DroidDesk: Android apps submenu -->"
+        val menuFile = File(homeDir, ".config/menus/xfce-applications.menu")
+        if (menuFile.exists() && !menuFile.readText().contains(marker)) return
+        menuFile.parentFile?.mkdirs()
+        menuFile.writeText(
+            """
+            <!DOCTYPE Menu PUBLIC "-//freedesktop//DTD Menu 1.0//EN"
+              "http://www.freedesktop.org/standards/menu-spec/1.0/menu.dtd">
+            $marker
+            <Menu>
+              <Name>Xfce</Name>
+              <MergeFile type="parent"/>
+              <Menu>
+                <Name>Android</Name>
+                <Directory>droiddesk-android.directory</Directory>
+                <Include><Category>X-DroidDesk-Android</Category></Include>
+              </Menu>
+            </Menu>
+            """.trimIndent() + "\n",
+        )
+        File(homeDir, ".local/share/desktop-directories").mkdirs()
+        File(homeDir, ".local/share/desktop-directories/droiddesk-android.directory").writeText(
+            """
+            [Desktop Entry]
+            Type=Directory
+            Name=Android
+            Icon=phone
+            """.trimIndent() + "\n",
+        )
     }
 
     private fun syncUtilityLaunchers(
