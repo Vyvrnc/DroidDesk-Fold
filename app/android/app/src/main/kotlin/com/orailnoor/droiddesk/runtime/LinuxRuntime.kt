@@ -28,7 +28,7 @@ class LinuxRuntime(private val context: Context) {
         // <Mesa version>-<build revision>; -2 adds softpipe so zink can present
         // without kopper (the kopper path flickers without DRI3).
         private const val MESA_KGSL_VERSION = "26.2.3-2"
-        private const val MESA_KGSL_SHA256 = "PENDING_ASSET"
+        private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
 
         /**
          * Host path of the Debian rootfs. proot-distro 5.4+ uses

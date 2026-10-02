@@ -70,3 +70,7 @@ Without softpipe, kopper-off segfaults in `__glXQueryDrawable`.
 Known issue: `glxgears` (clients calling `glXQueryDrawable`, e.g. swap-control queries) segfaults
 (`#0 0x0` in `__glXQueryDrawable`, libGLX_mesa, drisw path). FreeCAD and OrcaSlicer are fine. Candidate
 upstream report / null check.
+
+Released: tag `mesa-kgsl-26.2.3-2`, asset `mesa-kgsl-26.2.3-2-arm64.tar.xz`,
+sha256 1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2 (6.7 MB). Built natively on the
+Fold 7 with `--prefix=/opt/mesa-kgsl` and `-Dgallium-drivers=zink,softpipe`; contains `.droiddesk-version`.
