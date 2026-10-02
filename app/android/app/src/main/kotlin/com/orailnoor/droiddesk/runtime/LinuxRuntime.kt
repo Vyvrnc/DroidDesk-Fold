@@ -2076,7 +2076,7 @@ class LinuxRuntime(private val context: Context) {
             Log.e(TAG, "$selectedDesktop package install failed")
             return false
         }
-        if (selectedDesktop == "xfce" && !installPackageGroup("pkg install -y pygobject")) {
+        if (selectedDesktop == "xfce4" && !installPackageGroup("pkg install -y pygobject")) {
             Log.w(TAG, "pygobject unavailable; the USB disky panel icon stays off")
         }
         onProgress?.invoke(0.70, "Installing Mesa graphics packages...")
