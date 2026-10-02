@@ -56,7 +56,8 @@ class UsbFlasher(
             },
         ) { block ->
             val digest = MessageDigest.getInstance("SHA-256")
-            val buffer = ByteArray(CHUNK)
+            // Whole blocks, so the zero padding of the last chunk always fits.
+            val buffer = ByteArray(CHUNK - CHUNK % block.blockSize)
             var written = 0L
             var lba = 0L
             openImage(image).use { input ->
@@ -75,20 +76,25 @@ class UsbFlasher(
                     progress(written, total)
                 }
             }
+            if (written != total) return@withBlockDevice fail("the image changed while flashing")
             val expected = hex(digest.digest())
             if (sourceDigest != null && sourceDigest != expected) {
                 return@withBlockDevice fail("the image changed while flashing")
             }
+            // Out of the device's write cache first, so the read-back checks the medium.
+            block.flush()
             line("verify")
             val check = MessageDigest.getInstance("SHA-256")
+            val readBack = ByteArray(buffer.size)
             var verified = 0L
             lba = 0L
             while (verified < written) {
                 checkCancelled()
-                val want = minOf(CHUNK.toLong(), written - verified).toInt()
+                val want = minOf(readBack.size.toLong(), written - verified).toInt()
                 val padded = (want + block.blockSize - 1) / block.blockSize * block.blockSize
-                block.read(lba, buffer, 0, padded)
-                check.update(buffer, 0, want)
+                java.util.Arrays.fill(readBack, 0)
+                block.read(lba, readBack, 0, padded)
+                check.update(readBack, 0, want)
                 lba += padded / block.blockSize
                 verified += want
                 progress(verified, written)
@@ -138,10 +144,17 @@ class UsbFlasher(
         try {
             // force = true detaches the kernel's usb-storage driver.
             if (!connection.claimInterface(iface, true)) return fail("could not claim the interface")
-            // GET MAX LUN; devices with one LUN may stall it, which means 0.
+            // GET MAX LUN; devices with one LUN may stall it, which means 0. Android
+            // cannot tell a stall from a transient error, so ask twice before
+            // assuming one LUN (that would bypass the several-cards check).
             val maxLun = ByteArray(1)
-            val lunCount = if (connection.controlTransfer(0xA1, 0xFE, 0, iface.id, maxLun, 1, 5_000) == 1) {
-                (maxLun[0].toInt() and 0x0F) + 1
+            val lunCount = if (
+                connection.controlTransfer(0xA1, 0xFE, 0, iface.id, maxLun, 1, 5_000) == 1 ||
+                connection.controlTransfer(0xA1, 0xFE, 0, iface.id, maxLun, 1, 5_000) == 1
+            ) {
+                val value = maxLun[0].toInt() and 0xFF
+                if (value > 15) return fail("the device reported an invalid number of slots ($value)")
+                value + 1
             } else {
                 1
             }

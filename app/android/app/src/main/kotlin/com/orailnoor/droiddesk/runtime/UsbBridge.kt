@@ -213,6 +213,10 @@ object UsbBridge {
         var granted = false
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
+                // All requests share the action; only this device's answer counts.
+                @Suppress("DEPRECATION")
+                val answered = intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)
+                if (answered != null && answered.deviceName != device.deviceName) return
                 granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
                 latch.countDown()
             }
