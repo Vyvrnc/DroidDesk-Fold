@@ -19,3 +19,6 @@ target_link_libraries(
     ${log-lib}
     ${android-lib}
 )
+
+# droiddesk-usb: USBDEVFS ioctls Android's UsbDeviceConnection does not offer.
+add_library(droiddesk_usb SHARED usb_jni.c)

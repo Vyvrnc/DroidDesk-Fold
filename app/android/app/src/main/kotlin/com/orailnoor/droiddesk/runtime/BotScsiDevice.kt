@@ -40,6 +40,12 @@ class BotScsiDevice(
     private class Result(val status: Int, val transferred: Int, val residue: Long)
 
     private companion object {
+        /** USBDEVFS_CLEAR_HALT (usb_jni.c); null when the library is missing. */
+        val nativeAvailable: Boolean = runCatching { System.loadLibrary("droiddesk_usb") }.isSuccess
+
+        @JvmStatic
+        external fun nativeClearHalt(fd: Int, endpoint: Int): Int
+
         const val CBW_SIGNATURE = 0x43425355
         const val CSW_SIGNATURE = 0x53425355
         const val TIMEOUT_MS = 10_000
@@ -225,9 +231,13 @@ class BotScsiDevice(
             putInt(CBW_SIGNATURE); putInt(currentTag); putInt(length)
             put(if (dirIn) 0x80.toByte() else 0); put(lun.toByte()); put(cdb.size.toByte()); put(cdb)
         }.array()
-        if (connection.bulkTransfer(epOut, cbw, 31, TIMEOUT_MS) != 31) {
+        val sent = connection.bulkTransfer(epOut, cbw, 31, TIMEOUT_MS)
+        if (sent != 31) {
+            // The OUT pipe stalled or timed out: clear both halts (host and device
+            // side) before the class reset, so the next CBW starts clean.
+            clearHalt(epOut)
             resetRecovery()
-            throw TransportError("could not send the SCSI command")
+            throw TransportError("could not send the SCSI command (bulk OUT returned $sent)")
         }
         var done = 0
         if (length > 0 && data != null) {
@@ -286,9 +296,15 @@ class BotScsiDevice(
         return SenseError(sense[2].toInt() and 0x0F, sense[12].toInt() and 0xFF, sense[13].toInt() and 0xFF)
     }
 
+    /**
+     * Clears an endpoint halt on both sides. A bare CLEAR_FEATURE(ENDPOINT_HALT)
+     * resets only the device's data toggle; the host keeps its own, the two
+     * disagree, and every later transfer on that pipe fails (seen on the Fold 7 as
+     * "could not send the SCSI command" that no retry fixed). USBDEVFS_CLEAR_HALT
+     * does both, like the kernel's usb_clear_halt.
+     */
     private fun clearHalt(ep: UsbEndpoint) {
-        // CLEAR_FEATURE(ENDPOINT_HALT). Android has no API for the host-side
-        // toggle reset (USBDEVFS_CLEAR_HALT); BOT devices cope with this in practice.
+        if (nativeAvailable && nativeClearHalt(connection.fileDescriptor, ep.address) == 0) return
         connection.controlTransfer(0x02, 0x01, 0, ep.address, null, 0, TIMEOUT_MS)
     }
 
