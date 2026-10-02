@@ -77,7 +77,18 @@ class BotScsiDevice(
     /** Inquiry, waits for the unit to become ready, reads the capacity. */
     fun init() {
         val inquiry = ByteArray(36)
-        val got = dataCommand(byteArrayOf(0x12, 0, 0, 0, 36, 0), inquiry, 36, dirIn = true, minimum = 36)
+        // A freshly attached stick may not answer the very first command (CSW read
+        // -1); rawCommand already reset it, so give it a few tries.
+        var got = 0
+        for (attempt in 1..3) {
+            try {
+                got = dataCommand(byteArrayOf(0x12, 0, 0, 0, 36, 0), inquiry, 36, dirIn = true, minimum = 36)
+                break
+            } catch (error: TransportError) {
+                if (attempt == 3) throw error
+                Thread.sleep(300)
+            }
+        }
         if (got >= 32) {
             vendor = String(inquiry, 8, 8, Charsets.US_ASCII).trim()
             product = String(inquiry, 16, 16, Charsets.US_ASCII).trim()
@@ -139,9 +150,10 @@ class BotScsiDevice(
         try {
             command(ByteArray(10).apply { this[0] = 0x35 }, null, 0, 0, dirIn = false, timeout = FLUSH_TIMEOUT_MS)
         } catch (error: SenseError) {
-            // Only "invalid command operation code" means there is no cache to
-            // flush; any other rejection is a real failure.
-            if (error.key != 0x5 || error.asc != 0x20) throw error
+            // Cheap controllers reject SYNCHRONIZE CACHE as an invalid opcode (5/20)
+            // or an invalid CDB field (5/24, seen on abcd:1234 sticks); like Linux sd,
+            // take that as "no write cache" and let the read-back verify decide.
+            if (error.key != 0x5 || (error.asc != 0x20 && error.asc != 0x24)) throw error
         }
     }
 

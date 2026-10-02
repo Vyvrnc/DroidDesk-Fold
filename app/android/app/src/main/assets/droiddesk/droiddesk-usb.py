@@ -125,6 +125,7 @@ def transfer(command, path, dev, assume_yes, lun):
                 print(f"\nHotovo. SHA-256: {rest}")
                 return 0
             elif kind == "err":
+                sys.stdout.flush()  # the progress line first, then the error
                 print(f"\ndroiddesk-usb: {rest}", file=sys.stderr)
                 return 1
     print("\ndroiddesk-usb: spojení s aplikací se přerušilo", file=sys.stderr)
@@ -147,6 +148,8 @@ def raw_exec(dev, command):
 
 
 def main(argv):
+    # Keep stdout and stderr in order when both go to a terminal.
+    sys.stdout.reconfigure(line_buffering=True)
     if argv and argv[0] == "exec":
         # Everything after "--" belongs to the child command, untouched.
         if "--" not in argv or argv.index("--") < 2:
