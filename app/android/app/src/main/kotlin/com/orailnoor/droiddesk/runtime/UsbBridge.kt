@@ -36,6 +36,9 @@ import kotlin.concurrent.thread
  *                     "progress <done> <total>" lines and end with
  *                     "done <sha256>" or "err <reason>"; closing the socket
  *                     cancels.
+ *   blk <name> <lun|-> -> "device <capacity> <block size> <slot> <slots>", then binary
+ *                     block requests (see UsbFlasher.serveBlocks) for libdroiddesk_blk.so
+ *                     and droiddesk-usb format/files; holds the device lock until the end.
  *   attach <name>     -> asks for permission and holds the device for Linux ("ok"/"err …")
  *   eject <name>      -> hands a held device back to Android
  *   watch             -> stays open and streams "attached\t<list line>", "detached\t<name>",
@@ -227,14 +230,16 @@ object UsbBridge {
                         .joinToString("") { describe(it) + "\n" }
                     output.write((lines + "\n").toByteArray())
                 }
-                request.startsWith("flash ") || request.startsWith("read ") -> {
+                request.startsWith("flash ") || request.startsWith("read ") || request.startsWith("blk ") -> {
                     // flash|read <device> <lun or -> <path>; the path may contain spaces.
+                    // blk <device> <lun or -> has no path.
                     val parts = request.split(' ', limit = 4)
                     val device = parts.getOrNull(1)?.let { usb.deviceList[it] }
                     val lun = parts.getOrNull(2)?.takeIf { it != "-" }?.toIntOrNull()
                     val path = parts.getOrNull(3)?.trim().orEmpty()
-                    if (device == null || path.isEmpty() || (lun == null && parts.getOrNull(2) != "-")) {
-                        output.write("err usage: flash|read <device> <lun|-> <path>\n".toByteArray())
+                    val blk = parts[0] == "blk"
+                    if (device == null || (path.isEmpty() && !blk) || (lun == null && parts.getOrNull(2) != "-")) {
+                        output.write("err usage: flash|read <device> <lun|-> <path>, blk <device> <lun|->\n".toByteArray())
                     } else if (!usb.hasPermission(device) && !run {
                             // The dialog appears on the phone, which may not be the screen in
                             // use (DeX); the client tells the user where to look.
@@ -247,9 +252,15 @@ object UsbBridge {
                     } else {
                         when (val holding = hold(usb, device)) {
                             is HeldDevice -> UsbFlasher(holding, output, lun, isCancelled = { server == null }) {
-                                reader.readLine()?.trim() == "go"
+                                blk || reader.readLine()?.trim() == "go"
                             }.run {
-                                if (parts[0] == "flash") flash(java.io.File(path)) else readTo(java.io.File(path))
+                                when (parts[0]) {
+                                    "flash" -> flash(java.io.File(path))
+                                    "read" -> readTo(java.io.File(path))
+                                    // The client sends nothing after the request line before the
+                                    // device line, so the reader has buffered nothing extra.
+                                    else -> serveBlocks(client.inputStream)
+                                }
                             }
                             else -> output.write("err $holding\n".toByteArray())
                         }

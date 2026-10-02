@@ -122,6 +122,71 @@ class UsbFlasher(
         line("done ${hex(digest.digest())}")
     }
 
+    /**
+     * "blk": random block access for libdroiddesk_blk.so and droiddesk-usb (format, files).
+     * After the device line, binary requests until the client sends Q or goes away:
+     * op(1: R/W/F/Q) lba(8, big endian) count(4, big endian) [count blocks of data for W];
+     * reply status(1: 0 ok) + the blocks for R, or len(2) + UTF-8 message on an error.
+     */
+    fun serveBlocks(input: InputStream) = withBlockDevice { block ->
+        val bs = block.blockSize
+        val requests = java.io.DataInputStream(BufferedInputStream(input, 1 shl 16))
+        val replies = java.io.DataOutputStream(java.io.BufferedOutputStream(output, 1 shl 16))
+        val buffer = ByteArray(maxOf(CHUNK / bs, 1) * bs)
+        while (true) {
+            checkCancelled()
+            val op = try {
+                requests.readUnsignedByte()
+            } catch (_: java.io.EOFException) {
+                break
+            }
+            val lba = requests.readLong()
+            val count = requests.readInt()
+            if (op == 'Q'.code) break
+            val bytes = count.toLong() * bs
+            if (op != 'F'.code && (count <= 0 || bytes > buffer.size)) {
+                // A write's data cannot be skipped reliably: end the session.
+                replyError(replies, "bad request: $count blocks")
+                break
+            }
+            if (op == 'W'.code) requests.readFully(buffer, 0, bytes.toInt())
+            try {
+                when (op) {
+                    'R'.code -> {
+                        block.read(lba, buffer, 0, bytes.toInt())
+                        replies.writeByte(0)
+                        replies.write(buffer, 0, bytes.toInt())
+                    }
+                    'W'.code -> {
+                        block.write(lba, buffer, 0, bytes.toInt())
+                        replies.writeByte(0)
+                    }
+                    'F'.code -> {
+                        block.flush()
+                        replies.writeByte(0)
+                    }
+                    else -> {
+                        replyError(replies, "unknown operation $op")
+                        break
+                    }
+                }
+            } catch (error: Exception) {
+                Log.w(TAG, "blk ${op.toChar()} $lba+$count failed", error)
+                replyError(replies, error.message ?: error.javaClass.simpleName)
+            }
+            replies.flush()
+        }
+        replies.flush()
+    }
+
+    private fun replyError(replies: java.io.DataOutputStream, message: String) {
+        val text = message.toByteArray().let { if (it.size > 1000) it.copyOf(1000) else it }
+        replies.writeByte(1)
+        replies.writeShort(text.size)
+        replies.write(text)
+        replies.flush()
+    }
+
     private fun checkCancelled() {
         if (isCancelled()) throw java.io.IOException("cancelled: DroidDesk is shutting down")
     }

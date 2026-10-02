@@ -22,3 +22,9 @@ target_link_libraries(
 
 # droiddesk-usb: USBDEVFS ioctls Android's UsbDeviceConnection does not offer.
 add_library(droiddesk_usb SHARED usb_jni.c)
+
+# droiddesk-usb format/files: LD_PRELOAD shim that makes /dev/droiddesk-blk the held disk.
+# Not loaded by the app; copied to $PREFIX/lib for the Termux tools.
+add_library(droiddesk_blk SHARED blk_shim.c)
+target_compile_options(droiddesk_blk PRIVATE -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -Wall)
+target_link_libraries(droiddesk_blk dl)

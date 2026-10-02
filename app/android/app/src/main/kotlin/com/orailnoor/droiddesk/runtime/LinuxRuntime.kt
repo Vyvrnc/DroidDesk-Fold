@@ -564,6 +564,20 @@ class LinuxRuntime(private val context: Context) {
                     command=${'$'}1 path=${'$'}(host_path "${'$'}2")
                     shift 2
                     client "${'$'}command" "${'$'}path" "${'$'}@" ;;
+                cp)
+                    # Local sides are Debian paths; usb:/… and options stay as they are.
+                    shift
+                    n=${'$'}#
+                    while [ "${'$'}n" -gt 0 ]; do
+                        a=${'$'}1
+                        shift
+                        n=${'$'}((n - 1))
+                        case "${'$'}a" in
+                            usb:*|-*|/dev/bus/usb/*) set -- "${'$'}@" "${'$'}a" ;;
+                            *) set -- "${'$'}@" "${'$'}(host_path "${'$'}a")" ;;
+                        esac
+                    done
+                    client cp "${'$'}@" ;;
                 exec)
                     device=${'$'}2
                     shift 2
@@ -656,6 +670,15 @@ class LinuxRuntime(private val context: Context) {
                             "exec \"${File(binDir, "python3").absolutePath}\" \"${usbClient.absolutePath}\" \"${'$'}@\"\n",
                     )
                     usbCommand.setExecutable(true, false)
+                }
+                // Format and files: libdroiddesk_blk.so from the APK into $PREFIX/lib, as a new
+                // inode whenever it changed (running tools may still have the old one mapped).
+                val shimSource = File(context.applicationInfo.nativeLibraryDir, "libdroiddesk_blk.so")
+                val shim = File(prefixDir, "lib/libdroiddesk_blk.so")
+                if (shimSource.isFile && !(shim.isFile && shim.readBytes().contentEquals(shimSource.readBytes()))) {
+                    val shimTmp = File(prefixDir, "lib/.libdroiddesk_blk.so.new")
+                    shimSource.copyTo(shimTmp, overwrite = true)
+                    if (!shimTmp.renameTo(shim)) error("rename to ${shim.path} failed")
                 }
                 // "USB disky": icon in the dock's systray and a window (GTK 3 through pygobject).
                 val trayClient = File(binDir, "droiddesk-usb-tray.py")
@@ -2083,6 +2106,10 @@ class LinuxRuntime(private val context: Context) {
         }
         if (selectedDesktop == "xfce4" && !installPackageGroup("pkg install -y pygobject")) {
             Log.w(TAG, "pygobject unavailable; the USB disky panel icon stays off")
+        }
+        // USB disky: format and files (droiddesk-usb installs them on first use otherwise).
+        if (!installPackageGroup("pkg install -y dosfstools exfatprogs e2fsprogs mtools")) {
+            Log.w(TAG, "USB disk tools unavailable; droiddesk-usb format/files will ask for them")
         }
         onProgress?.invoke(0.70, "Installing Mesa graphics packages...")
 

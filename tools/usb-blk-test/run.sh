@@ -1,0 +1,55 @@
+#!/bin/bash
+# Runs inside debian:trixie: droiddesk-usb format/files against an image through the shim.
+set -u
+export DEBIAN_FRONTEND=noninteractive
+if ! command -v mkfs.exfat >/dev/null; then
+    apt-get update -qq >/dev/null && apt-get install -y -qq gcc libc6-dev python3 mtools dosfstools exfatprogs e2fsprogs fdisk >/dev/null || exit 1
+fi
+cd /t
+gcc -shared -fPIC -O2 -Wall -o /tmp/libdroiddesk_blk.so /src/cpp/blk_shim.c -ldl 2>&1 | grep -v "^$" | head -30
+P=/tmp/prefix
+rm -rf "$P"; mkdir -p "$P/bin" "$P/lib"
+cp /tmp/libdroiddesk_blk.so "$P/lib/"
+for t in mkfs.fat mkfs.exfat mkfs.ext4 debugfs mdir mcopy mdel mdeltree mmd mrd; do ln -s "$(command -v $t)" "$P/bin/$t"; done
+export DROIDDESK_PREFIX=$P TMPDIR=/tmp
+CLI="python3 /src/assets/droiddesk/droiddesk-usb.py"
+BS=${BS:-512}
+rm -f /tmp/disk.img; truncate -s ${SIZE:-1G} /tmp/disk.img
+python3 /t/fake_bridge.py /tmp/disk.img $BS > /tmp/bridge.log 2>&1 &
+sleep 1
+fail=0
+check() { if [ $1 -ne 0 ]; then echo "FAIL: $2"; fail=1; else echo "ok: $2"; fi; }
+mkdir -p /tmp/up/sub; echo hello > /tmp/up/a.txt; head -c 3000000 /dev/urandom > /tmp/up/sub/big.bin; echo "čeština" > "/tmp/up/Příliš žluťoučký.txt"
+
+for fs in fat32 ext4 exfat; do
+    echo "=== $fs"
+    $CLI format $fs --label TEST$fs --yes; check $? "format $fs"
+    $CLI info
+    sfdisk -d /tmp/disk.img 2>/dev/null | tail -2
+    case $fs in
+        fat32) fsck.fat -n /tmp/disk.img@@1048576 >/dev/null 2>&1; dd if=/tmp/disk.img of=/tmp/p.img bs=1M skip=1 status=none; fsck.fat -n /tmp/p.img; check $? "fsck.fat after format" ;;
+        ext4) dd if=/tmp/disk.img of=/tmp/p.img bs=1M skip=1 status=none; e2fsck -fn /tmp/p.img >/dev/null; check $? "e2fsck after format" ;;
+        exfat) dd if=/tmp/disk.img of=/tmp/p.img bs=1M skip=1 status=none; fsck.exfat -n /tmp/p.img >/dev/null; check $? "fsck.exfat after format"; continue ;;
+    esac
+    $CLI mkdir usb:/docs/deep; check $? "mkdir $fs"
+    $CLI cp /tmp/up/a.txt /tmp/up/sub "/tmp/up/Příliš žluťoučký.txt" usb:/docs; check $? "cp up $fs"
+    $CLI cp /tmp/up/a.txt usb:/docs; check $? "cp up again (overwrite) $fs"
+    $CLI ls usb:/docs; check $? "ls $fs"
+    $CLI ls --raw usb:/docs/sub
+    rm -rf /tmp/down; mkdir /tmp/down
+    $CLI cp usb:/docs /tmp/down; check $? "cp down dir $fs"
+    $CLI cp usb:/docs/sub/big.bin /tmp/down/big2.bin; check $? "cp down file $fs"
+    cmp /tmp/up/sub/big.bin /tmp/down/big2.bin; check $? "big.bin identical $fs"
+    find /tmp/down -type f | sort
+    diff -r /tmp/up /tmp/down/docs >/dev/null 2>&1 || find /tmp/down
+    $CLI rm usb:/docs/a.txt; check $? "rm file $fs"
+    $CLI rm -r usb:/docs/sub; check $? "rm -r $fs"
+    $CLI ls usb:/docs
+    dd if=/tmp/disk.img of=/tmp/p.img bs=1M skip=1 status=none
+    case $fs in
+        fat32) fsck.fat -n /tmp/p.img; check $? "fsck.fat after files" ;;
+        ext4) e2fsck -fn /tmp/p.img; check $? "e2fsck after files" ;;
+    esac
+done
+echo "=== bridge"; cat /tmp/bridge.log
+[ $fail = 0 ] && echo ALL_OK || echo SOME_FAILED

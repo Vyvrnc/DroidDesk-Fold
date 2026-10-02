@@ -23,7 +23,19 @@ depends on webkit2gtk-4.1 (100+ MB) for one icon. Plugin 27 = systray in the doc
   fed from the client's progress lines (client gets `--progress-fd`/machine-readable mode).
 - Menu entry "USB disky" (Systém).
 
-## Phase 2 — the held device as a file for user space tools → fold.17
+## Phase 2 — the held device as a file for user space tools → fold.18
+Implementation (2026-10-02):
+- Bridge `blk <name> <lun|->`: text line `device <capacity> <bs> <slot> <n>`, then binary requests
+  `op(1) lba(8, BE) count(4, BE) [data]` with op R/W/F/Q; reply `status(1)` (+ data for R, or
+  `len(2) message` on error). One session holds the device lock until the socket closes.
+- `libdroiddesk_blk.so` (NDK, bionic; built in the APK, copied to `$PREFIX/lib`): `/dev/droiddesk-blk`
+  is the disk (or a partition: `DROIDDESK_BLK_OFFSET/SIZE`), reported as a regular file of that size.
+- Tools from Termux: dosfstools, exfatprogs, e2fsprogs (mkfs + debugfs for ext4 files), mtools (FAT).
+- `droiddesk-usb info|format|ls|cp|rm|mkdir`; tray: columns Kapacita / Systém souborů / Jmenovka,
+  buttons Naformátovat… and Soubory….
+- Local test harness: fake bridge over an image file + glibc build of the shim in Docker.
+
+Original plan:
 - `libdroiddesk-blk.so` (glibc, Debian; LD_PRELOAD shim): intercepts open/pread/pwrite/lseek/
   fstat/ioctl(BLKGETSIZE64)/fsync on `/dev/droiddesk-usb/<bus>-<dev>[/lun]` and forwards them to a new
   bridge request `blk <name> <lun>` (random-access sector reads/writes over the socket, block aligned,
