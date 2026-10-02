@@ -1,9 +1,5 @@
 package com.orailnoor.droiddesk.runtime
 
-import android.hardware.usb.UsbConstants
-import android.hardware.usb.UsbDevice
-import android.hardware.usb.UsbInterface
-import android.hardware.usb.UsbManager
 import android.util.Log
 import org.tukaani.xz.XZInputStream
 import java.io.BufferedInputStream
@@ -21,8 +17,8 @@ import java.util.zip.GZIPInputStream
  * turned into a disk image first).
  */
 class UsbFlasher(
-    private val usb: UsbManager,
-    private val device: UsbDevice,
+    /** Claimed and kept by UsbBridge until "eject"; this class never closes it. */
+    private val held: UsbBridge.HeldDevice,
     private val output: OutputStream,
     /** Card reader slot (SCSI LUN); null picks the only populated one. */
     private val lun: Int?,
@@ -134,16 +130,13 @@ class UsbFlasher(
         precheck: (capacity: Long) -> String? = { null },
         action: (BotScsiDevice) -> Unit,
     ) {
-        val iface = massStorageInterface() ?: return fail("not a USB mass storage device (BOT/SCSI)")
-        val endpoints = (0 until iface.endpointCount).map(iface::getEndpoint)
-            .filter { it.type == UsbConstants.USB_ENDPOINT_XFER_BULK }
-        val epIn = endpoints.firstOrNull { it.direction == UsbConstants.USB_DIR_IN }
-        val epOut = endpoints.firstOrNull { it.direction == UsbConstants.USB_DIR_OUT }
-        if (epIn == null || epOut == null) return fail("no bulk endpoints")
-        val connection = usb.openDevice(device) ?: return fail("Android could not open the device")
+        val connection = held.connection
+        val iface = held.iface
+        val epIn = held.epIn
+        val epOut = held.epOut
+        // One operation at a time per device.
+        synchronized(held) {
         try {
-            // force = true detaches the kernel's usb-storage driver.
-            if (!connection.claimInterface(iface, true)) return fail("could not claim the interface")
             // GET MAX LUN; devices with one LUN may stall it, which means 0. Android
             // cannot tell a stall from a transient error, so ask twice before
             // assuming one LUN. Multi-slot readers must answer it (BOT 3.2), so a
@@ -190,17 +183,10 @@ class UsbFlasher(
             Log.w(TAG, "USB transfer failed", error)
             // A closed socket means the client cancelled; nothing to report then.
             runCatching { fail(error.message ?: error.javaClass.simpleName) }
-        } finally {
-            runCatching { connection.releaseInterface(iface) }
-            connection.close()
+        }
         }
     }
 
-    private fun massStorageInterface(): UsbInterface? =
-        (0 until device.interfaceCount).map(device::getInterface).firstOrNull {
-            it.interfaceClass == UsbConstants.USB_CLASS_MASS_STORAGE &&
-                it.interfaceSubclass == 0x06 && it.interfaceProtocol == 0x50
-        }
 
     private fun openImage(image: File): InputStream =
         decoder(image, BufferedInputStream(FileInputStream(image), CHUNK))

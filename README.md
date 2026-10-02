@@ -236,6 +236,7 @@ Commands of this fork's DroidDesk app (in its terminal):
 | `droiddesk-usb list` | USB devices attached to the phone |
 | `droiddesk-usb flash IMAGE[.xz\|.gz] [DEVICE] [--lun N]` | Write a disk image to a flash drive or card and verify it |
 | `droiddesk-usb read FILE [DEVICE] [--lun N]` | Copy a whole flash drive or card into a file |
+| `droiddesk-usb eject [DEVICE]` | Give a flash drive or card back to Android after `read`/`flash` (they keep it in Linux until then) |
 | `droiddesk-usb exec DEVICE -- CMD…` | Experimental: give a libusb program the USB device (`DROIDDESK_USB_FD`) |
 
 ## Notes

@@ -36,6 +36,7 @@ import kotlin.concurrent.thread
  *                     "progress <done> <total>" lines and end with
  *                     "done <sha256>" or "err <reason>"; closing the socket
  *                     cancels.
+ *   eject <name>      -> hands a device held since its last read/flash back to Android
  *   open <name>       -> (raw, experimental) asks for permission if needed, claims the mass storage
  *                        interface and answers "ok <interface> <ep in> <ep out>"
  *                        with the fd attached, or "err <reason>". The device stays
@@ -75,6 +76,59 @@ object UsbBridge {
             runCatching { socket.close() }
         }
         clients.forEach { runCatching { it.shutdownInput(); it.close() } }
+        held.keys.toList().forEach(::eject)
+    }
+
+    /**
+     * A mass storage device DroidDesk keeps claimed between operations. Handing
+     * the reader back to Android after every read or flash made the kernel and
+     * vold rescan it (sgdisk) while the next operation already claimed it again,
+     * and readers behind the DeX dock got stuck. The device stays with Linux until
+     * "eject", the end of the session, or unplugging.
+     */
+    class HeldDevice(
+        val device: UsbDevice,
+        val connection: UsbDeviceConnection,
+        val iface: UsbInterface,
+        val epIn: android.hardware.usb.UsbEndpoint,
+        val epOut: android.hardware.usb.UsbEndpoint,
+    )
+
+    private val held = java.util.concurrent.ConcurrentHashMap<String, HeldDevice>()
+
+    /** The held connection for [device], claiming it first if needed; an error text otherwise. */
+    @Synchronized
+    private fun hold(usb: UsbManager, device: UsbDevice): Any {
+        held[device.deviceName]?.let { existing ->
+            if (existing.device.deviceId == device.deviceId) return existing
+            eject(device.deviceName) // unplugged and replugged under the same name
+        }
+        val iface = massStorageInterface(device) ?: return "not a USB mass storage device (BOT/SCSI)"
+        val endpoints = (0 until iface.endpointCount).map(iface::getEndpoint)
+            .filter { it.type == UsbConstants.USB_ENDPOINT_XFER_BULK }
+        val epIn = endpoints.firstOrNull { it.direction == UsbConstants.USB_DIR_IN } ?: return "no bulk IN endpoint"
+        val epOut = endpoints.firstOrNull { it.direction == UsbConstants.USB_DIR_OUT } ?: return "no bulk OUT endpoint"
+        val connection = usb.openDevice(device) ?: return "Android could not open the device"
+        // force = true detaches the kernel's usb-storage driver; Android unmounts the card.
+        if (!connection.claimInterface(iface, true)) {
+            connection.close()
+            return "could not claim the interface"
+        }
+        return HeldDevice(device, connection, iface, epIn, epOut).also {
+            held[device.deviceName] = it
+            Log.i(TAG, "Holding ${device.deviceName} for Linux until eject")
+        }
+    }
+
+    /** Gives the device back to Android (its usb-storage driver and vold). */
+    fun eject(name: String): Boolean {
+        val device = held.remove(name) ?: return false
+        synchronized(device) {
+            runCatching { device.connection.releaseInterface(device.iface) }
+            device.connection.close()
+        }
+        Log.i(TAG, "Released $name to Android")
+        return true
     }
 
     private fun serve(context: Context, socket: LocalServerSocket) {
@@ -111,6 +165,8 @@ object UsbBridge {
             val usb = context.getSystemService(UsbManager::class.java)
             when {
                 request == "list" -> {
+                    // Forget held devices that were unplugged.
+                    held.keys.filter { it !in usb.deviceList }.forEach(::eject)
                     val lines = usb.deviceList.values.sortedBy { it.deviceName }.joinToString("") { device ->
                         listOf(
                             device.deviceName,
@@ -119,6 +175,7 @@ object UsbBridge {
                             if (massStorageInterface(device) != null) "1" else "0",
                             clean(runCatching { device.manufacturerName }.getOrNull()),
                             clean(runCatching { device.productName }.getOrNull()),
+                            if (held.containsKey(device.deviceName)) "1" else "0",
                         ).joinToString("\t") + "\n"
                     }
                     output.write((lines + "\n").toByteArray())
@@ -134,18 +191,29 @@ object UsbBridge {
                     } else if (!usb.hasPermission(device) && !requestPermission(context, usb, device)) {
                         output.write("err permission denied\n".toByteArray())
                     } else {
-                        UsbFlasher(usb, device, output, lun, isCancelled = { server == null }) {
-                            reader.readLine()?.trim() == "go"
-                        }.run {
-                            if (parts[0] == "flash") flash(java.io.File(path)) else readTo(java.io.File(path))
+                        when (val holding = hold(usb, device)) {
+                            is HeldDevice -> UsbFlasher(holding, output, lun, isCancelled = { server == null }) {
+                                reader.readLine()?.trim() == "go"
+                            }.run {
+                                if (parts[0] == "flash") flash(java.io.File(path)) else readTo(java.io.File(path))
+                            }
+                            else -> output.write("err $holding\n".toByteArray())
                         }
                     }
+                }
+                request.startsWith("eject ") -> {
+                    val name = request.removePrefix("eject ").trim()
+                    output.write((if (eject(name)) "ok\n" else "err $name is not held\n").toByteArray())
                 }
                 request.startsWith("open ") -> {
                     val name = request.removePrefix("open ").trim()
                     val device = usb.deviceList[name]
                     if (device == null) {
                         output.write("err no such device $name\n".toByteArray())
+                        return
+                    }
+                    if (held.containsKey(name)) {
+                        output.write("err $name is held for read/flash; run droiddesk-usb eject first\n".toByteArray())
                         return
                     }
                     openAndHold(context, usb, device, client)

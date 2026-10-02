@@ -7,11 +7,13 @@ after asking the user. This client talks to UsbBridge in the app.
   droiddesk-usb list
   droiddesk-usb flash IMAGE[.xz|.gz] [DEVICE] [--lun N] [--yes]   write + verify (stable)
   droiddesk-usb read FILE [DEVICE] [--lun N]                      copy the whole device
+  droiddesk-usb eject [DEVICE]                          give the device back to Android
   droiddesk-usb exec DEVICE -- COMMAND...               raw usbfs fd for libusb
                                                         tools (experimental)
 
 DEVICE is the name from "list" (/dev/bus/usb/...); it may be left out when
-exactly one mass storage device is attached. --lun picks the slot of a
+exactly one mass storage device is attached. After a read or flash the device
+stays with Linux (no unmount/remount between operations) until "eject". --lun picks the slot of a
 multi-slot card reader when more than one card is inserted.
 """
 import os
@@ -48,9 +50,9 @@ def devices():
             line = line.rstrip("\n")
             if not line:
                 break
-            name, vid, pid, storage, maker, product = (line.split("\t") + [""] * 6)[:6]
+            name, vid, pid, storage, maker, product, held = (line.split("\t") + [""] * 7)[:7]
             found.append({"name": name, "vid": vid, "pid": pid, "storage": storage == "1",
-                          "maker": maker, "product": product})
+                          "maker": maker, "product": product, "held": held == "1"})
     return found
 
 
@@ -170,7 +172,26 @@ def main(argv):
         if not found:
             print("Žádné USB zařízení.")
         for dev in found:
-            print(("[paměť] " if dev["storage"] else "        ") + describe(dev))
+            mark = "[drženo] " if dev["held"] else ("[paměť]  " if dev["storage"] else "         ")
+            print(mark + describe(dev))
+        return 0
+    if command == "eject":
+        wanted = args[1] if len(args) > 1 else None
+        if wanted is None:
+            heldDevs = [d for d in devices() if d["held"]]
+            if not heldDevs:
+                print("Žádné zařízení není drženo.")
+                return 0
+            if len(heldDevs) > 1:
+                sys.exit("droiddesk-usb: drženo víc zařízení, vyber jedno:\n  "
+                         + "\n  ".join(describe(d) for d in heldDevs))
+            wanted = heldDevs[0]["name"]
+        sock = connect()
+        sock.sendall(f"eject {wanted}\n".encode())
+        reply = sock.makefile("r", encoding="utf-8").readline().strip()
+        if reply != "ok":
+            sys.exit(f"droiddesk-usb: {reply.removeprefix('err ')}")
+        print(f"{wanted} vráceno Androidu, lze bezpečně odpojit.")
         return 0
     if command in ("flash", "read") and len(args) >= 2:
         path = os.path.abspath(args[1])
