@@ -12,6 +12,7 @@
 #include <stddef.h>
 #include <stdarg.h>
 #include <errno.h>
+#include <dirent.h>
 #include <android/log.h>
 
 #ifndef NEW_PREFIX
@@ -65,6 +66,7 @@ static int (*real_mknodat)(int, const char *, mode_t, dev_t) = NULL;
 static int (*real_mkfifo)(const char *, mode_t) = NULL;
 static int (*real_mkfifoat)(int, const char *, mode_t) = NULL;
 static void *(*real_dlopen)(const char *, int) = NULL;
+static DIR *(*real_opendir)(const char *) = NULL;
 
 static volatile int hook_initialized = 0;
 static volatile int hook_initializing = 0;
@@ -118,6 +120,7 @@ static void do_init() {
     real_mkfifo = dlsym(RTLD_NEXT, "mkfifo");
     real_mkfifoat = dlsym(RTLD_NEXT, "mkfifoat");
     real_dlopen = dlsym(RTLD_NEXT, "dlopen");
+    real_opendir = dlsym(RTLD_NEXT, "opendir");
     __sync_synchronize();
     hook_initialized = 1;
     __sync_lock_release(&hook_initializing);
@@ -553,6 +556,17 @@ int mkfifoat(int dirfd, const char *pathname, mode_t mode) {
     setup();
     char buf[1024];
     return real_mkfifoat(dirfd, rewrite_at_path(dirfd, pathname, buf, sizeof(buf)), mode);
+}
+
+/*
+ * bionic's opendir() calls open() inside libc, past this hook, so directory
+ * listings of compiled-in com.termux paths failed while open/stat worked:
+ * tumblerd found no thumbnailer plugins (g_dir_open on lib/tumbler-1/plugins).
+ */
+DIR *opendir(const char *name) {
+    setup();
+    char buf[1024];
+    return real_opendir(rewrite_path(name, buf, sizeof(buf)));
 }
 
 void *dlopen(const char *filename, int flag) {
