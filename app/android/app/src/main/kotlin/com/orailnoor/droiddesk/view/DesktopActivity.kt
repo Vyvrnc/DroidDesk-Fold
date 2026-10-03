@@ -166,7 +166,7 @@ class DesktopActivity : Activity() {
     private fun setPointerCapture(enable: Boolean) {
         getSharedPreferences("desktop_controls", MODE_PRIVATE).edit().putBoolean("pointer_capture", enable).apply()
         inputController?.setPointerCapture(enable)
-        captureButton?.text = if (enable) "Myš ✓" else "Myš"
+        captureButton?.text = if (enable) "Myš: zachycená" else "Myš: volná"
         Toast.makeText(
             this,
             if (enable) "Myš zachycena (lišty DeX se neukážou). Uvolnit: Ctrl+Alt+M" else "Myš uvolněna",
@@ -401,11 +401,11 @@ class DesktopActivity : Activity() {
         val keyboardButton = controlButton("Keyboard").apply {
             setOnClickListener { showKeyboard() }
         }
-        inputModeButton = controlButton(inputController?.modeLabel() ?: "Trackpad").apply {
+        inputModeButton = controlButton(inputController?.modeLabel() ?: "Dotyk: touchpad").apply {
             setOnClickListener {
                 inputController?.nextMode()
-                text = inputController?.modeLabel() ?: "Trackpad"
-                Toast.makeText(this@DesktopActivity, "Input mode: $text", Toast.LENGTH_SHORT).show()
+                text = inputController?.modeLabel() ?: "Dotyk: touchpad"
+                Toast.makeText(this@DesktopActivity, "$text (fyzická myš funguje stejně)", Toast.LENGTH_SHORT).show()
             }
         }
         scaleButton = controlButton(scaleLabel()).apply {
@@ -438,12 +438,12 @@ class DesktopActivity : Activity() {
 
         // DeX shows its bars when the mouse touches the top edge; capturing the pointer keeps
         // the mouse inside the desktop. Released with Ctrl+Alt+M (or this button).
-        val captureButton = controlButton(if (preferences.getBoolean("pointer_capture", false)) "Myš ✓" else "Myš").apply {
+        val captureButton = controlButton(if (preferences.getBoolean("pointer_capture", false)) "Myš: zachycená" else "Myš: volná").apply {
             contentDescription = "Capture the mouse (hides the DeX bars at the top edge)"
             setOnClickListener {
                 val enable = !preferences.getBoolean("pointer_capture", false)
                 setPointerCapture(enable)
-                text = if (enable) "Myš ✓" else "Myš"
+                text = if (enable) "Myš: zachycená" else "Myš: volná"
             }
         }
         this.captureButton = captureButton

@@ -51,10 +51,11 @@ class X11InputController(private val lorieView: LorieView) {
         return next
     }
 
+    /** What a finger on the screen does; a physical mouse works the same in every mode. */
     fun modeLabel(): String = when (mode) {
-        TouchInputHandler.InputMode.SIMULATED_TOUCH -> "Touchscreen"
-        TouchInputHandler.InputMode.TOUCH -> "Direct touch"
-        else -> "Trackpad"
+        TouchInputHandler.InputMode.SIMULATED_TOUCH -> "Dotyk: obrazovka"
+        TouchInputHandler.InputMode.TOUCH -> "Dotyk: přímý"
+        else -> "Dotyk: touchpad"
     }
 
     fun dispose() {
