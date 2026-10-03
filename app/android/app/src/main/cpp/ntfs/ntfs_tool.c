@@ -19,6 +19,7 @@
  *   rm PATH           delete a file
  *   rmdir PATH        delete an empty folder
  * Errors: "E\t<command>\t<message>" on stdout; the batch goes on, the exit code is 1.
+ * Progress: "P\t<bytes>" after every chunk that put/get moved.
  * A volume that cannot be mounted gives "E\tmount\t<message>" and exit code 1.
  *
  * Writing is refused (the volume is not even opened read-write) when Windows hibernated or
@@ -245,6 +246,12 @@ static ntfs_inode *find_or_create(const char *path, mode_t type) {
     return ni;
 }
 
+/* "P\t<bytes>" after every chunk of put/get: droiddesk-usb shows the progress of a batch. */
+static void progress(long long bytes) {
+    printf("P\t%lld\n", bytes);
+    fflush(stdout);
+}
+
 static void put(const char *local, const char *path) {
     int fd = open(local, O_RDONLY);
     if (fd < 0) {
@@ -284,6 +291,7 @@ static void put(const char *local, const char *path) {
             done += written;
         }
         offset += n;
+        progress(n);
     }
     close(fd);
     if (na) ntfs_attr_close(na);
@@ -345,6 +353,7 @@ static void get(const char *path, const char *local) {
         }
         if (rc) break;
         offset += n;
+        progress(n);
     }
     struct timespec times[2] = {ntfs2timespec(ni->last_access_time), ntfs2timespec(ni->last_data_change_time)};
     futimens(fd, times);

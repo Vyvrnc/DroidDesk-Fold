@@ -561,15 +561,46 @@ def _stop_children(signum, frame):
     sys.exit(128 + signum)
 
 
-def run_tool(args, env, show=True, check=True, stdin=None):
-    """Runs a Termux tool on the disk; output lines go to the user (or yad)."""
+def run_tool(args, env, show=True, check=True, stdin=None, on_line=None):
+    """Runs a Termux tool on the disk; output lines go to the user (or yad).
+    on_line(stream, line) sees stdout ("out") and stderr ("err") lines as they come."""
     args = [os.path.join(PREFIX, "bin", args[0])] + list(args[1:])
     child = subprocess.Popen(args, env=env, stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace",
                              preexec_fn=_die_with_parent)
     CHILDREN.append(child)
     try:
-        stdout, stderr = child.communicate(stdin)
+        if on_line is None:
+            stdout, stderr = child.communicate(stdin)
+        else:
+            import threading
+            collected = {"err": []}
+
+            def feed():
+                try:
+                    child.stdin.write(stdin)
+                    child.stdin.close()
+                except OSError:
+                    pass
+
+            def drain():
+                for line in child.stderr:
+                    collected["err"].append(line)
+                    on_line("err", line.rstrip("\n"))
+
+            workers = [threading.Thread(target=drain, daemon=True)]
+            if stdin is not None:
+                workers.append(threading.Thread(target=feed, daemon=True))
+            for worker in workers:
+                worker.start()
+            out = []
+            for line in child.stdout:
+                out.append(line)
+                on_line("out", line.rstrip("\n"))
+            child.wait()
+            for worker in workers:
+                worker.join()
+            stdout, stderr = "".join(out), "".join(collected["err"])
     finally:
         CHILDREN.remove(child)
     result = subprocess.CompletedProcess(args, child.returncode, stdout, stderr)
@@ -587,6 +618,61 @@ def run_tool(args, env, show=True, check=True, stdin=None):
         tail = (result.stderr.strip() or result.stdout.strip()).splitlines()
         sys.exit(f"droiddesk-usb: {args[0].rsplit('/', 1)[-1]} selhal: {tail[-1] if tail else result.returncode}")
     return result
+
+
+class Progress:
+    """Bytes of a copy: percentage, speed and time left (also for the window, see activity)."""
+
+    def __init__(self, verb, total):
+        self.verb, self.total, self.done = verb, max(total, 1), 0
+        self.started = time.monotonic()
+        self.shown = 0.0
+
+    def add(self, count):
+        self.set(self.done + count)
+
+    def set(self, done):
+        self.done = min(done, self.total)
+        now = time.monotonic()
+        if now - self.shown < 0.5 and self.done < self.total:
+            return
+        self.shown = now
+        elapsed = max(now - self.started, 0.001)
+        speed = self.done / elapsed
+        text = f"{self.verb}: {human(self.done)} z {human(self.total)} ({human(speed)}/s"
+        if 0 < self.done < self.total and elapsed > 3:
+            left = (self.total - self.done) / max(speed, 1)
+            text += f", zbývá ~{int(left // 60)} min" if left >= 90 else f", zbývá ~{int(left)} s"
+        step(self.done * 100 // self.total, text + ")")
+
+
+def local_size(path):
+    """Bytes of a file or a folder tree (not following links into other places)."""
+    if os.path.isfile(path):
+        return os.path.getsize(path)
+    total = 0
+    for folder, _, names in os.walk(path):
+        for name in names:
+            try:
+                total += os.path.getsize(os.path.join(folder, name))
+            except OSError:
+                pass
+    return total
+
+
+def watch_local(progress, target):
+    """Download progress: the size of the target growing on this side, read twice a second."""
+    import threading
+    stop = threading.Event()
+
+    def loop():
+        while not stop.wait(0.5):
+            try:
+                progress.set(local_size(target) if os.path.exists(target) else 0)
+            except OSError:
+                pass
+    threading.Thread(target=loop, daemon=True).start()
+    return stop
 
 
 def open_blk(dev, lun):
@@ -772,11 +858,32 @@ class FatFiles:
         parent, name = path.rsplit("/", 1)
         return any(d and n.lower() == name.lower() for d, _, n in self.ls(parent or "/", missing_ok=True))
 
-    def upload(self, sources, dest):
-        run_tool(["mcopy", "-s", "-m", "-n", "-D", "o", *sources, f"u:{dest}/"], self.env)
+    def upload(self, sources, dest, progress=None):
+        # mcopy -v names each file on stderr before it copies it: count the previous one done.
+        sizes, state = {}, {"pending": 0}
+        for source in sources:
+            for folder, _, names in os.walk(source) if os.path.isdir(source) else [(os.path.dirname(source), [], [os.path.basename(source)])]:
+                for name in names:
+                    try:
+                        sizes.setdefault(name, []).append(os.path.getsize(os.path.join(folder, name)))
+                    except OSError:
+                        pass
+
+        def line(stream, text):
+            if progress and stream == "err" and text.startswith("Copying "):
+                progress.add(state["pending"])
+                queue = sizes.get(text[len("Copying "):])
+                state["pending"] = queue.pop() if queue else 0
+        run_tool(["mcopy", "-v", "-s", "-m", "-n", "-D", "o", *sources, f"u:{dest}/"], self.env,
+                 show=False, on_line=line)
 
     def download(self, source, dest):
         run_tool(["mcopy", "-s", "-m", "-n", f"u:{source}", dest], self.env)
+
+    def size(self, path):
+        out = run_tool(["mdir", "-/", "-a", f"u:{path}"], self.env, show=False, check=False).stdout
+        totals = re.findall(r"^\s*\d+ files?\s+([\d ]+) bytes", out, re.M)
+        return int(totals[-1].replace(" ", "")) if totals else 0
 
     def remove(self, path, recursive):
         if self.is_dir(path):
@@ -803,10 +910,10 @@ class ExtFiles:
     def close(self):
         pass
 
-    def debugfs(self, commands, write=False):
+    def debugfs(self, commands, write=False, on_line=None):
         """Runs commands in one session; returns (stdout, error lines)."""
         args = ["debugfs"] + (["-w"] if write else []) + ["-f", "-", VPATH]
-        result = run_tool(args, self.env, show=False, check=False, stdin="\n".join(commands) + "\n")
+        result = run_tool(args, self.env, show=False, check=False, stdin="\n".join(commands) + "\n", on_line=on_line)
         errors = [line for line in result.stderr.splitlines()
                   if line.strip() and not line.startswith("debugfs ")]
         if result.returncode != 0 and not errors:
@@ -839,9 +946,10 @@ class ExtFiles:
     def _owned(self, name):
         return [f'sif "{name}" uid {EXT_OWNER}', f'sif "{name}" gid {EXT_OWNER}']
 
-    def upload(self, sources, dest):
+    def upload(self, sources, dest, progress=None):
         commands = [f'cd "{dest}"']
         existing = {n for _, _, n in self.ls(dest)}
+        sizes = {}
 
         def add(local, name, here_existing):
             safe(local, name)
@@ -856,10 +964,18 @@ class ExtFiles:
                 if name in here_existing:
                     commands.append(f'rm "{name}"')
                 commands.extend([f'write "{local}" "{name}"', *self._owned(name)])
+                sizes[local] = os.path.getsize(local)
 
         for source in sources:
             add(os.path.abspath(source), os.path.basename(os.path.abspath(source)), existing)
-        _, errors = self.debugfs(commands, write=True)
+        # debugfs echoes each command as it starts it: a new "write" means the last one is done.
+        state = {"pending": 0}
+
+        def line(stream, text):
+            if progress and stream == "out" and text.startswith('debugfs: write "'):
+                progress.add(state["pending"])
+                state["pending"] = sizes.get(text[len('debugfs: write "'):].split('" "', 1)[0], 0)
+        _, errors = self.debugfs(commands, write=True, on_line=line)
         if errors:
             sys.exit("droiddesk-usb: " + "; ".join(errors[:3]))
 
@@ -875,6 +991,34 @@ class ExtFiles:
             _, errors = self.debugfs([f'dump -p "{source}" "{dest}"'])
         if errors:
             sys.exit("droiddesk-usb: " + "; ".join(errors[:3]))
+
+    def size(self, path):
+        """Bytes below path: one debugfs session per folder level."""
+        parent, name = path.rstrip("/").rsplit("/", 1) if path != "/" else ("", "")
+        if path != "/":
+            entry = next((e for e in self.ls(parent or "/", missing_ok=True) if e[2] == name), None)
+            if entry is None or not entry[0]:
+                return entry[1] if entry else 0
+        total, level = 0, [path]
+        while level:
+            out, _ = self.debugfs([f'ls -p "{p}"' for p in level])
+            next_level, current = [], None
+            for text in out.splitlines():
+                if text.startswith('debugfs: ls -p "'):
+                    current = text[len('debugfs: ls -p "'):-1]
+                    continue
+                fields = text.split("/")
+                if len(fields) < 7 or not fields[1].isdigit() or current is None:
+                    continue
+                entry_name = "/".join(fields[5:-2])
+                if entry_name in (".", ".."):
+                    continue
+                if fields[2].startswith("04"):
+                    next_level.append(f"{current.rstrip('/')}/{entry_name}")
+                elif fields[-2].isdigit():
+                    total += int(fields[-2])
+            level = next_level
+        return total
 
     def remove(self, path, recursive):
         commands = []
@@ -927,13 +1071,18 @@ class BatchFiles:
     def close(self):
         pass
 
-    def run(self, commands, write=False):
-        """(output lines, error texts) of one batch."""
+    def run(self, commands, write=False, progress=None):
+        """(output lines, error texts) of one batch; "P" lines move progress."""
         for command in commands:
             if "\n" in command:
                 sys.exit("droiddesk-usb: názvy s koncem řádku neumím")
         args = ["python3", "-c", BATCH_RUNNER, self.library, self.function] + ([] if write else ["--ro"]) + [VPATH]
-        result = run_tool(args, self.env, show=False, check=False, stdin="\n".join(commands) + "\n")
+
+        def line(stream, text):
+            if stream == "out" and text.startswith("P\t"):
+                progress.add(int(text[2:]))
+        result = run_tool(args, self.env, show=False, check=False, stdin="\n".join(commands) + "\n",
+                          on_line=line if progress else None)
         out = result.stdout.splitlines()
         errors = [line.split("\t", 2)[-1] for line in out if line.startswith("E\t")]
         errors += [line.removeprefix("droiddesk-blk: error: ") for line in result.stderr.splitlines()
@@ -962,13 +1111,25 @@ class BatchFiles:
     def is_dir(self, path):
         return path == "/" or self.kind(path) == "d"
 
-    def tree(self, path):
+    def tree(self, path, sizes=False):
         out, errors = self.run([f"tree\t{path}"])
         if errors:
             sys.exit(f"droiddesk-usb: {errors[0]}")
-        return [(f[1] == "d", f[3]) for f in (line.split("\t", 3) for line in out) if f[0] == "T" and len(f) == 4]
+        entries = [f for f in (line.split("\t", 3) for line in out) if f[0] == "T" and len(f) == 4]
+        if sizes:
+            return [(f[1] == "d", f[3], int(f[2])) for f in entries]
+        return [(f[1] == "d", f[3]) for f in entries]
 
-    def upload(self, sources, dest):
+    def size(self, path):
+        out, _ = self.run([f"stat\t{path}"])
+        stat = next((line.split("\t") for line in out if line.startswith("S\t")), None)
+        if not stat:
+            return 0
+        if stat[1] == "f":
+            return int(stat[2])
+        return sum(size for is_dir, _, size in self.tree(path, sizes=True) if not is_dir)
+
+    def upload(self, sources, dest, progress=None):
         commands = []
 
         def add(local, target):
@@ -983,7 +1144,7 @@ class BatchFiles:
         for source in sources:
             local = os.path.abspath(source)
             add(local, f"{dest.rstrip('/')}/{os.path.basename(local)}")
-        _, errors = self.run(commands, write=True)
+        _, errors = self.run(commands, write=True, progress=progress)
         if errors:
             sys.exit("droiddesk-usb: " + "; ".join(errors[:3]))
 
@@ -1108,13 +1269,23 @@ def files_command(command, args, lun, number, raw):
                         target, sources = parent, [rename_link(sources[0], name)]
                 elif target != "/":
                     files.mkdir(target)
-                step(10, f"Kopíruji na USB do {target}…")
                 if sources:
-                    files.upload(sources, target)
+                    progress = Progress("Kopíruji na USB", sum(local_size(source) for source in sources))
+                    progress.set(0)
+                    files.upload(sources, target, progress)
+                    progress.set(progress.total)  # the last file has no "next one" to mark it done
             elif all(s.startswith("usb:") for s in sources) and not dest.startswith("usb:"):
                 for source in sources:
-                    step(10, f"Kopíruji z USB {usb_path(source)}…")
-                    files.download(usb_path(source), os.path.abspath(dest))
+                    path, local = usb_path(source), os.path.abspath(dest)
+                    target = os.path.join(local, path.rstrip("/").rsplit("/", 1)[-1]) if os.path.isdir(local) else local
+                    progress = Progress(f"Kopíruji z USB {path}", files.size(path))
+                    progress.set(0)
+                    stop = watch_local(progress, target)
+                    try:
+                        files.download(path, local)
+                    finally:
+                        stop.set()
+                    progress.set(progress.total)
             else:
                 sys.exit("droiddesk-usb: cp kopíruje buď na USB (cíl usb:/…), nebo z něj (zdroje usb:/…)")
             step(100, "Hotovo")

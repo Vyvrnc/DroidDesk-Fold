@@ -18,6 +18,7 @@
  *   rm PATH           delete a file
  *   rmdir PATH        delete an empty folder
  * Errors: "E\t<command>\t<message>" on stdout; the batch goes on, the exit code is 1.
+ * Progress: "P\t<bytes>" after every chunk that put/get moved.
  */
 #include "exfat.h"
 #include <errno.h>
@@ -38,6 +39,12 @@ static char buffer[CHUNK];
 static void fail(const char *command, const char *path, int rc) {
     failures++;
     printf("E\t%s\t%s: %s\n", command, path, strerror(rc < 0 ? -rc : rc));
+}
+
+/* "P\t<bytes>" after every chunk of put/get: droiddesk-usb shows the progress of a batch. */
+static void progress(long long bytes) {
+    printf("P\t%lld\n", bytes);
+    fflush(stdout);
 }
 
 static int is_dir(const struct exfat_node *node) { return (node->attrib & EXFAT_ATTRIB_DIR) != 0; }
@@ -154,6 +161,7 @@ static void put(const char *local, const char *path) {
             break;
         }
         offset += n;
+        progress(n);
     }
     close(fd);
     if (rc == 0) {
@@ -202,6 +210,7 @@ static void get(const char *path, const char *local) {
         }
         if (rc) break;
         offset += n;
+        progress(n);
     }
     struct timespec times[2] = {{node->atime, 0}, {node->mtime, 0}};
     futimens(fd, times);
