@@ -22,7 +22,8 @@ try:
     gi.require_version("Gtk", "3.0")
     # Gdk too: without it gi may pick Gdk 4.0 first, and Gtk 3 then fails to load.
     gi.require_version("Gdk", "3.0")
-    from gi.repository import Gdk, GLib, Gtk
+    gi.require_version("Pango", "1.0")
+    from gi.repository import Gdk, GLib, Gtk, Pango
 except (ImportError, ValueError, AttributeError) as error:
     # Installs from before fold.16 lack pygobject. at-spi2 leaves gi/overrides/ behind,
     # so "import gi" can succeed as an empty namespace package (AttributeError).
@@ -100,12 +101,14 @@ def disk_summary(name):
 def progress(parent, title, args, on_done=None):
     """Runs droiddesk-usb with --yad output in a modal window with a progress bar."""
     dialog = Gtk.Dialog(title=title, transient_for=parent, modal=True)
-    dialog.set_default_size(460, -1)
+    dialog.set_default_size(620, -1)
+    dialog.set_resizable(True)
     area = dialog.get_content_area()
     area.set_spacing(8)
     area.set_border_width(12)
     bar = Gtk.ProgressBar(show_text=True)
-    text = Gtk.Label(xalign=0, wrap=True, selectable=True)
+    text = Gtk.Label(xalign=0, wrap=True, selectable=True, max_width_chars=80)
+    text.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
     area.pack_start(bar, False, False, 0)
     area.pack_start(text, False, False, 0)
     close = dialog.add_button("Zavřít", Gtk.ResponseType.CLOSE)
@@ -178,6 +181,8 @@ class FilesWindow:
         self.name = name
         self.path = "/"
         win = Gtk.Window(title=f"Soubory — {title}", transient_for=parent)
+        win.set_resizable(True)
+        win.set_type_hint(Gdk.WindowTypeHint.NORMAL)
         win.set_icon_name(ICON)
         win.set_default_size(640, 440)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
@@ -200,9 +205,13 @@ class FilesWindow:
         column.pack_start(text, True)
         column.add_attribute(text, "text", 1)
         column.set_expand(True)
+        column.set_resizable(True)
+        column.set_sort_column_id(1)
         view.append_column(column)
         size = Gtk.CellRendererText(xalign=1)
-        view.append_column(Gtk.TreeViewColumn("Velikost", size, text=2))
+        size_column = Gtk.TreeViewColumn("Velikost", size, text=2)
+        size_column.set_resizable(True)
+        view.append_column(size_column)
         view.connect("row-activated", self.activated)
         self.view = view
         scroll = Gtk.ScrolledWindow(vexpand=True)
@@ -408,7 +417,8 @@ class Tray:
     def build_window(self):
         win = Gtk.Window(title="USB disky")
         win.set_icon_name(ICON)
-        win.set_default_size(780, 340)
+        win.set_default_size(980, 360)
+        win.set_resizable(True)
         win.connect("delete-event", lambda *_: win.hide() or True)
         # A format or copy from the terminal changes what the columns show: read the disks
         # again when the window comes back to the front (at most every 5 s).
@@ -420,9 +430,18 @@ class Tray:
         for title, col in (("Stav", self.STATE), ("Zařízení", self.LABEL), ("Kapacita", self.CAPACITY),
                            ("Systém souborů", self.FS), ("Jmenovka", self.FS_LABEL), ("ID", self.ID),
                            ("Cesta", self.NAME)):
-            column = Gtk.TreeViewColumn(title, Gtk.CellRendererText(), text=col)
+            cell = Gtk.CellRendererText()
+            column = Gtk.TreeViewColumn(title, cell, text=col)
             column.set_expand(col == self.LABEL)
+            # Columns can be widened and moved; a long state is shortened with "…",
+            # the whole text is in the row's tooltip.
+            column.set_resizable(True)
+            column.set_reorderable(True)
+            if col == self.STATE:
+                cell.set_property("ellipsize", Pango.EllipsizeMode.END)
+                column.set_min_width(260)
             view.append_column(column)
+        view.set_tooltip_column(self.STATE)
         view.get_selection().connect("changed", lambda *_: self.update_buttons())
         view.connect("row-activated", lambda *_: self.files())
         self.view = view
@@ -535,12 +554,15 @@ class Tray:
                 self.summaries.pop(device, None)
                 continue
             percent, elapsed = state.get("percent"), float(state.get("elapsed") or 0)
-            text = operation
+            parts = [operation]
             if percent is not None:
-                text += f" {percent} %"
-                if 0 < percent < 100 and elapsed > 10:
-                    left = elapsed * (100 - percent) / percent
-                    text += f", zbývá ~{int(left // 60)} min" if left >= 90 else f", zbývá ~{int(left)} s"
+                parts[0] += f" {percent} %"
+            if state.get("speed"):
+                parts.append(f"{usb.human(float(state['speed']))}/s")
+            if percent is not None and 0 < percent < 100 and elapsed > 10:
+                left = elapsed * (100 - percent) / percent
+                parts.append(f"zbývá ~{int(left // 60)} min" if left >= 90 else f"zbývá ~{int(left)} s")
+            text = " · ".join(parts)
             seen[device] = text
         changed = seen != self.activities
         self.activities = seen

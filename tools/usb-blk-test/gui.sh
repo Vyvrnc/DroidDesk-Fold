@@ -10,7 +10,7 @@ python3 /t/fake_bridge.py /tmp/disk.img 512 > /tmp/bridge.log 2>&1 &
 sleep 1
 CLI="python3 /src/assets/droiddesk/droiddesk-usb.py"
 $CLI format fat32 --label FOLD --yes >/dev/null
-echo ahoj > /tmp/a.txt; $CLI cp /tmp/a.txt usb:/docs >/dev/null; $CLI mkdir usb:/docs/Fotky
+echo ahoj > /tmp/a.txt; $CLI mkdir usb:/docs/Fotky; $CLI cp /tmp/a.txt usb:/docs >/dev/null
 Xvfb :9 -screen 0 1400x700x24 >/dev/null 2>&1 &
 sleep 2
 DISPLAY=:9 timeout 60 python3 /t/gui_test.py 2>&1 | grep -v "Gtk-WARNING\|dbind-WARNING"

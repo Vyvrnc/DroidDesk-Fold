@@ -84,7 +84,7 @@ DEVICE_LOCKS = {}
 
 # What this process is doing with a disk, for the USB disky window: a JSON file next to the
 # disk's lock ($PREFIX/tmp/droiddesk-usb_dev_bus_usb_…status), written at most once a second.
-ACTIVITY = {"path": None, "op": "", "percent": None, "text": "", "last": 0.0, "started": 0.0}
+ACTIVITY = {"path": None, "op": "", "percent": None, "text": "", "last": 0.0, "started": 0.0, "speed": None}
 OPERATION_NAMES = {"check": "kontrola", "flash": "zápis obrazu", "read": "uložení obrazu", "format": "formátování",
                    "cp": "kopírování", "rm": "mazání", "mkdir": "nová složka", "ls": "výpis", "info": "zjišťování",
                    "attach": "připojení", "eject": "vysunutí"}
@@ -108,7 +108,7 @@ def activity(text=None, percent=None, final=None, force=False):
         return
     ACTIVITY["last"] = now
     state = {"pid": os.getpid(), "op": ACTIVITY["op"], "percent": ACTIVITY["percent"], "text": ACTIVITY["text"],
-             "elapsed": round(now - ACTIVITY["started"], 1), "time": time.time(),
+             "elapsed": round(now - ACTIVITY["started"], 1), "time": time.time(), "speed": ACTIVITY["speed"],
              "origin": os.environ.get("DROIDDESK_USB_ORIGIN", "cli")}
     if final is not None:
         state["done"], state["result"] = final
@@ -643,6 +643,7 @@ class Progress:
         if 0 < self.done < self.total and elapsed > 3:
             left = (self.total - self.done) / max(speed, 1)
             text += f", zbývá ~{int(left // 60)} min" if left >= 90 else f", zbývá ~{int(left)} s"
+        ACTIVITY["speed"] = speed
         step(self.done * 100 // self.total, text + ")")
 
 
@@ -1325,6 +1326,7 @@ def check_disk(dev, lun, write, assume_yes):
 
     def show(phase, done, total):
         speed = done / max(time.monotonic() - started, 0.001)
+        ACTIVITY["speed"] = speed
         # The window shows one percentage for the whole check: two passes.
         share = done * 100 // max(total, 1)
         overall = {"Čtení 1/2": share // 2, "Čtení 2/2": 50 + share // 2, "Zápis vzoru": share // 2,
