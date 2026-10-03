@@ -54,6 +54,7 @@ class LinuxRuntime(private val context: Context) {
         private const val PT_DYNAMIC = 2
 
         private const val DT_NULL = 0L
+        private const val DT_NEEDED = 1L
         private const val DT_STRTAB = 5L
         private const val DT_STRSZ = 10L
         private const val DT_RPATH = 15L
@@ -1398,6 +1399,99 @@ class LinuxRuntime(private val context: Context) {
         }
     }
 
+    // ── Absolute DT_NEEDED ──
+
+    /**
+     * Some Termux libraries name a dependency by its absolute com.termux path (libsoup-3.0
+     * needs "/data/data/com.termux/files/usr/lib/libsqlite3.so"); the dynamic linker opens
+     * that path itself, past the socket hook, and fails (gvfsd-dav for USB disky in Thunar).
+     * Such entries become the bare library name, found through LD_LIBRARY_PATH. Only files
+     * changed since the last pass are read (packages installed later), and only their ELF
+     * headers and dynamic section.
+     */
+    private fun patchAbsoluteNeeded() {
+        val stamp = File(prefixDir, "lib/.droiddesk-needed-scan")
+        val since = if (stamp.exists()) stamp.lastModified() else 0L
+        val startedAt = System.currentTimeMillis()
+        var patched = 0
+        for (dir in listOf("lib", "libexec", "bin")) {
+            File(prefixDir, dir).walkTopDown()
+                .filter { it.isFile && !java.nio.file.Files.isSymbolicLink(it.toPath()) && it.lastModified() >= since }
+                .forEach { file ->
+                    runCatching { if (patchNeededIn(file)) patched++ }
+                        .onFailure { Log.w(TAG, "DT_NEEDED patch failed for ${file.path}: ${it.message}") }
+                }
+        }
+        stamp.writeText("$patched\n")
+        stamp.setLastModified(startedAt)
+        if (patched > 0) Log.i(TAG, "Absolute DT_NEEDED replaced in $patched files")
+    }
+
+    private fun patchNeededIn(file: File): Boolean {
+        if (file.length() < 64) return false
+        java.io.RandomAccessFile(file, "rw").use { elf ->
+            val head = ByteArray(64)
+            elf.readFully(head)
+            if (head[0] != ELFMAG0 || head[1] != ELFMAG1 || head[2] != ELFMAG2 || head[3] != ELFMAG3 ||
+                head[EI_CLASS] != ELFCLASS64 || head[EI_DATA] != ELFDATA2LSB
+            ) return false
+            val phoff = getLongLe(head, E_PHOFF_OFFSET)
+            val phentsize = getShortLe(head, E_PHENTSIZE_OFFSET).toInt() and 0xFFFF
+            val phnum = getShortLe(head, E_PHNUM_OFFSET).toInt() and 0xFFFF
+            if (phoff <= 0 || phnum == 0 || phoff + phnum.toLong() * phentsize > elf.length()) return false
+            val headers = ByteArray(phnum * phentsize)
+            elf.seek(phoff)
+            elf.readFully(headers)
+            var dynamic: ByteArray? = null
+            val loads = mutableListOf<Triple<Long, Long, Long>>() // offset, vaddr, filesz
+            for (i in 0 until phnum) {
+                val at = i * phentsize
+                val type = getIntLe(headers, at + P_TYPE_OFFSET)
+                val offset = getLongLe(headers, at + P_OFFSET_OFFSET)
+                val filesz = getLongLe(headers, at + P_FILESZ_OFFSET)
+                if (type == PT_LOAD) loads.add(Triple(offset, getLongLe(headers, at + P_VADDR_OFFSET), filesz))
+                if (type == PT_DYNAMIC && offset > 0 && filesz in 1..1_000_000 && offset + filesz <= elf.length()) {
+                    dynamic = ByteArray(filesz.toInt()).also { elf.seek(offset); elf.readFully(it) }
+                }
+            }
+            val dyn = dynamic ?: return false
+            var strtab = -1L
+            var strsz = -1L
+            val needed = mutableListOf<Long>()
+            for (j in 0 until dyn.size / DYN_SIZE) {
+                val tag = getLongLe(dyn, j * DYN_SIZE + D_TAG_OFFSET)
+                val value = getLongLe(dyn, j * DYN_SIZE + D_VAL_OFFSET)
+                when (tag) {
+                    DT_NULL -> break
+                    DT_NEEDED -> needed.add(value)
+                    DT_STRTAB -> strtab = value
+                    DT_STRSZ -> strsz = value
+                }
+            }
+            if (strtab < 0 || strsz <= 0 || needed.isEmpty()) return false
+            val load = loads.firstOrNull { strtab >= it.second && strtab < it.second + it.third } ?: return false
+            val strOffset = load.first + (strtab - load.second)
+            val prefix = "/data/data/com.termux/files/usr/lib/"
+            var changed = false
+            for (name in needed) {
+                if (name < 0 || name >= strsz) continue
+                elf.seek(strOffset + name)
+                val raw = ByteArray(minOf(256L, strsz - name).toInt())
+                elf.readFully(raw)
+                val length = raw.indexOf(0.toByte()).takeIf { it >= 0 } ?: continue
+                val current = String(raw, 0, length, Charsets.UTF_8)
+                if (!current.startsWith(prefix)) continue
+                val bare = current.substringAfterLast('/').toByteArray(Charsets.UTF_8)
+                val replacement = ByteArray(length)  // the rest stays NUL
+                System.arraycopy(bare, 0, replacement, 0, bare.size)
+                elf.seek(strOffset + name)
+                elf.write(replacement)
+                changed = true
+            }
+            return changed
+        }
+    }
+
     // ── ELF RUNPATH/RPATH Patching ──
 
     fun patchElfRunpaths(prefixDir: File) {
@@ -1718,7 +1812,8 @@ class LinuxRuntime(private val context: Context) {
         env["TERMUX__PREFIX"] = prefixDir.absolutePath
         env["TERMUX__HOME"] = homeDir.absolutePath
         env["TERMUX_VERSION"] = "DroidDesk"
-        env["LD_LIBRARY_PATH"] = "${prefixDir.absolutePath}/lib"
+        // lib/gvfs: libgvfscommon/libgvfsdaemon of gvfsd and its GIO module (RUNPATH com.termux).
+        env["LD_LIBRARY_PATH"] = "${prefixDir.absolutePath}/lib:${prefixDir.absolutePath}/lib/gvfs"
         env["PATH"] = listOf(
             "${prefixDir.absolutePath}/bin",
             "${prefixDir.absolutePath}/lib/xfce4/panel",
@@ -2467,6 +2562,7 @@ class LinuxRuntime(private val context: Context) {
 
         patchShebangs()
         patchElfRunpaths(prefixDir)
+        patchAbsoluteNeeded()
         compileSocketHook()
         patchEmbeddedXfcePaths()
 
