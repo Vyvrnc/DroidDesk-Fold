@@ -49,7 +49,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CLIENT = os.path.join(HERE, "droiddesk-usb.py")
 INSTANCE = "\0droiddesk.usb-tray"
 ICON = "drive-removable-media"
-ENV = dict(os.environ, PYTHONUTF8="1")
+# DROIDDESK_USB_ORIGIN: operations started here notify through their progress window already.
+ENV = dict(os.environ, PYTHONUTF8="1", DROIDDESK_USB_ORIGIN="tray")
 
 spec = importlib.util.spec_from_file_location("droiddesk_usb", CLIENT)
 usb = importlib.util.module_from_spec(spec)
@@ -320,6 +321,8 @@ class Tray:
         self.window = None
         self.busy = False
         self.summaries = {}  # device name -> (capacity, filesystems, labels), held devices only
+        self.activities = {}  # device name -> running operation from droiddesk-usb (status files)
+        GLib.timeout_add_seconds(2, self.poll_activity)
         self.icon = Gtk.StatusIcon.new_from_icon_name(ICON)
         self.icon.set_title("USB disky")
         self.icon.set_tooltip_text("USB disky")
@@ -461,7 +464,8 @@ class Tray:
         found = storage_devices()
         if found is not None:
             held = sum(d["held"] for d in found)
-        self.icon.set_tooltip_text(f"USB disky — {held} připojeno do Linuxu" if held else "USB disky")
+        if not self.activities:
+            self.icon.set_tooltip_text(f"USB disky — {held} připojeno do Linuxu" if held else "USB disky")
         if self.window is None:
             return False
         selected = self.selected()
@@ -474,6 +478,9 @@ class Tray:
             self.status.set_text("")
         for dev in found or []:
             state = "v Linuxu" if dev["held"] else "Android"
+            running = self.activities.get(dev["name"])
+            if running:
+                state = f"{state} — {running}"
             if dev["held"]:
                 summary = self.summaries.get(dev["name"])
                 if summary is None:
@@ -488,6 +495,60 @@ class Tray:
                 self.view.get_selection().select_iter(row)
         self.update_buttons()
         return False
+
+    def poll_activity(self):
+        """Operations of droiddesk-usb (also from a terminal): the State column, the icon's
+        tooltip, and a notification when one ends."""
+        import json
+        folder = usb.status_dir()
+        seen = {}
+        try:
+            names = [n for n in os.listdir(folder) if n.startswith("droiddesk-usb_") and n.endswith(".status")]
+        except OSError:
+            names = []
+        for name in names:
+            path = os.path.join(folder, name)
+            try:
+                with open(path, encoding="utf-8") as source:
+                    state = json.load(source)
+            except (OSError, ValueError):
+                continue
+            device = name[len("droiddesk-usb"):-len(".status")].replace("_", "/")
+            operation = usb.OPERATION_NAMES.get(state.get("op"), state.get("op", ""))
+            alive = True
+            try:
+                os.kill(int(state.get("pid", 0)), 0)
+            except (OSError, ValueError):
+                alive = False
+            if "done" in state or not alive:
+                if state.get("origin") != "tray":
+                    if "done" not in state:
+                        usb.notify(f"{device}: {operation} přerušeno")
+                    elif state["done"] == 0:
+                        usb.notify(f"{device}: {operation} — hotovo. {state.get('result', '')}".strip())
+                    else:
+                        usb.notify(f"{device}: {operation} — chyba: {state.get('result', '')}")
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+                self.summaries.pop(device, None)
+                continue
+            percent, elapsed = state.get("percent"), float(state.get("elapsed") or 0)
+            text = operation
+            if percent is not None:
+                text += f" {percent} %"
+                if 0 < percent < 100 and elapsed > 10:
+                    left = elapsed * (100 - percent) / percent
+                    text += f", zbývá ~{int(left // 60)} min" if left >= 90 else f", zbývá ~{int(left)} s"
+            seen[device] = text
+        changed = seen != self.activities
+        self.activities = seen
+        if changed:
+            self.refresh()
+        if seen:
+            self.icon.set_tooltip_text("USB disky — " + "; ".join(f"{d}: {t}" for d, t in seen.items()))
+        return True
 
     def summarize(self, name):
         summary = disk_summary(name)

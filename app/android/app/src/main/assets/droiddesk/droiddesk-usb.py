@@ -82,6 +82,46 @@ def describe(dev):
 DEVICE_LOCKS = {}
 
 
+# What this process is doing with a disk, for the USB disky window: a JSON file next to the
+# disk's lock ($PREFIX/tmp/droiddesk-usb_dev_bus_usb_…status), written at most once a second.
+ACTIVITY = {"path": None, "op": "", "percent": None, "text": "", "last": 0.0, "started": 0.0}
+OPERATION_NAMES = {"check": "kontrola", "flash": "zápis obrazu", "read": "uložení obrazu", "format": "formátování",
+                   "cp": "kopírování", "rm": "mazání", "mkdir": "nová složka", "ls": "výpis", "info": "zjišťování",
+                   "attach": "připojení", "eject": "vysunutí"}
+
+
+def status_dir():
+    prefix = os.environ.get("DROIDDESK_PREFIX") or os.path.dirname(os.path.dirname(os.path.realpath(sys.executable)))
+    return os.path.join(prefix, "tmp")
+
+
+def activity(text=None, percent=None, final=None, force=False):
+    """Record progress; final=(exit code, message) marks the end."""
+    if not ACTIVITY["path"]:
+        return
+    if text is not None:
+        ACTIVITY["text"] = text
+    if percent is not None:
+        ACTIVITY["percent"] = max(0, min(100, int(percent)))
+    now = time.monotonic()
+    if final is None and not force and now - ACTIVITY["last"] < 1.0:
+        return
+    ACTIVITY["last"] = now
+    state = {"pid": os.getpid(), "op": ACTIVITY["op"], "percent": ACTIVITY["percent"], "text": ACTIVITY["text"],
+             "elapsed": round(now - ACTIVITY["started"], 1), "time": time.time(),
+             "origin": os.environ.get("DROIDDESK_USB_ORIGIN", "cli")}
+    if final is not None:
+        state["done"], state["result"] = final
+    try:
+        import json
+        tmp = ACTIVITY["path"] + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as out:
+            json.dump(state, out, ensure_ascii=False)
+        os.replace(tmp, ACTIVITY["path"])
+    except OSError:
+        pass
+
+
 def lock_device(dev):
     """One droiddesk-usb operation per disk at a time (until this process ends).
 
@@ -101,6 +141,11 @@ def lock_device(dev):
         print(f"# {text}" if YAD else text, file=sys.stdout if YAD else sys.stderr, flush=True)
         fcntl.flock(handle, fcntl.LOCK_EX)
     DEVICE_LOCKS[dev["name"]] = handle
+    # Quick reads are not worth showing; everything that changes or takes long is.
+    if ACTIVITY["op"] and ACTIVITY["op"] not in ("ls", "info", "attach", "eject") and not ACTIVITY["path"]:
+        ACTIVITY["path"] = os.path.join(folder, "droiddesk-usb" + dev["name"].replace("/", "_") + ".status")
+        ACTIVITY["started"] = time.monotonic()
+        activity(text="začíná", force=True)
 
 
 def pick(wanted):
@@ -166,6 +211,7 @@ def transfer(command, path, dev, assume_yes, lun):
                     if total > 0:
                         print(min(99, done * 100 // total))
                     print(f"# {phase}: {human(done)}  ({human(speed)}/s)")
+                    activity(text=phase, percent=done * 100 // total if total > 0 else None)
                 elif kind == "permission":
                     print(f"# {PERMISSION_TEXT}")
                     notify(PERMISSION_TEXT)
@@ -204,6 +250,7 @@ def transfer(command, path, dev, assume_yes, lun):
                 speed = done / max(time.monotonic() - started, 0.001)
                 share = f"{done * 100 // total:3d} % " if total > 0 else ""
                 print(f"\r{phase}: {share}{human(done)}  {human(speed)}/s   ", end="", flush=True)
+                activity(text=phase, percent=done * 100 // total if total > 0 else None)
             elif kind == "validate":
                 phase = "Kontrola obrazu"
                 started = time.monotonic()
@@ -342,11 +389,13 @@ class Blk:
 def say(text):
     """A status line: "# text" for yad, plain otherwise."""
     print(f"# {text}" if YAD else text)
+    activity(text=text)
 
 
 def step(percent, text):
     if YAD:
         print(percent)
+    activity(percent=percent)
     say(text)
 
 
@@ -1103,6 +1152,11 @@ def check_disk(dev, lun, write, assume_yes):
 
     def show(phase, done, total):
         speed = done / max(time.monotonic() - started, 0.001)
+        # The window shows one percentage for the whole check: two passes.
+        share = done * 100 // max(total, 1)
+        overall = {"Čtení 1/2": share // 2, "Čtení 2/2": 50 + share // 2, "Zápis vzoru": share // 2,
+                   "Kontrola": 50 + share // 2}.get(phase, share)
+        activity(text=phase, percent=overall)
         if YAD:
             print(min(99, done * 100 // max(total, 1)))
             print(f"# {phase}: {human(done)} z {human(total)} ({human(speed)}/s)")
@@ -1247,6 +1301,7 @@ def main(argv):
         print(__doc__.strip())
         return 0
     command = args[0]
+    ACTIVITY["op"] = command
     if command == "list":
         found = devices()
         if not found:
@@ -1324,5 +1379,21 @@ def main(argv):
     return 2
 
 
+def run(argv):
+    try:
+        code = main(argv)
+    except SystemExit as error:
+        code = error.code
+    except KeyboardInterrupt:
+        code = 130
+    if isinstance(code, str):
+        print(code, file=sys.stderr)
+        activity(final=(1, code.removeprefix("droiddesk-usb: ")))
+        return 1
+    code = code or 0
+    activity(final=(code, ACTIVITY["text"]))
+    return code
+
+
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(run(sys.argv[1:]))
