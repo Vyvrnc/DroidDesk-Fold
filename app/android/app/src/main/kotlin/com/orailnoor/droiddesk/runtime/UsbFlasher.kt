@@ -222,7 +222,7 @@ class UsbFlasher(
             }
             // Card readers expose one LUN per slot. Never guess between two
             // inserted cards: the user has to name the slot.
-            val media = (0 until lunCount).mapNotNull { slot ->
+            fun probe() = (0 until lunCount).mapNotNull { slot ->
                 BotScsiDevice(connection, iface, epIn, epOut, slot).let {
                     try {
                         it.init()
@@ -231,6 +231,12 @@ class UsbFlasher(
                         null
                     }
                 }
+            }
+            // Right after attach a card reader may still report "no medium" for the
+            // inserted card (seen on a 2-slot reader); ask once more before giving up.
+            val media = probe().ifEmpty {
+                Thread.sleep(700)
+                probe()
             }
             val (slot, block) = when {
                 media.isEmpty() -> return fail("no medium in the device")
