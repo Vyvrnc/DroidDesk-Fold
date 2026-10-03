@@ -50,6 +50,11 @@ Relevant upstream projects include:
 - Termux User Repository: <https://github.com/termux-user-repository/tur>
 - PRoot-Distro: <https://github.com/termux/proot-distro>
 - Debian copyright information: <https://www.debian.org/legal/licenses/>
+- Default look: Fluent GTK and icon themes by Vince Liu (GPL-3.0), Termux packages
+  `fluent-gtk-theme`, `fluent-icon-theme`: <https://github.com/vinceliuice/Fluent-gtk-theme>,
+  <https://github.com/vinceliuice/Fluent-icon-theme>
+- Claude Code (Anthropic, proprietary; not redistributed): the app catalog runs Anthropic's
+  installer `https://claude.ai/install.sh` inside Debian on request, under Anthropic's terms
 
 Runtime download does not remove the need to comply with a package's license
 when DroidDesk itself redistributes, modifies, mirrors, or preinstalls that

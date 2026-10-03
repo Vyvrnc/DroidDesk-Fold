@@ -230,7 +230,7 @@ Commands of this fork's DroidDesk app (in its terminal):
 |---|---|
 | `start-debian` | Shell in the Debian container (use it instead of plain `proot-distro login`) |
 | `debian-run CMD…` | Run one Debian program from the Termux side |
-| `claude-debian [args]` | Claude Code inside Debian, in `~/projekty/Claude` (e.g. `claude-debian --resume`) |
+| `claude-debian [args]` | Claude Code inside Debian, in `~/projekty/Claude` (e.g. `claude-debian --resume`); install it from the app's catalog (**Claude Code**: Debian + Anthropic's official installer, menu entry Development → Claude Code) |
 | `debian-setup` | Install/refresh the Debian integration (tools, locale, time zone, fonts, menu, GPU); safe to repeat |
 | `droiddesk-gpu on\|off\|status` | Hardware OpenGL for Debian programs (applies to newly started apps) |
 | `gpu-run CMD…` | One Debian program with hardware OpenGL even while it is switched off |

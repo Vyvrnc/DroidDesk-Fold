@@ -168,7 +168,58 @@ class LinuxRuntime(private val context: Context) {
         "nodejs" to (File(binDir, "node").exists() && File(binDir, "npm").exists()),
         "imagemagick" to (File(binDir, "magick").exists() || File(binDir, "convert").exists()),
         "proot_debian" to isMinimalDebianInstalled(),
+        "claude_code" to isClaudeCodeInstalled(),
     )
+
+    /** Claude Code's native installer puts it in Debian root's ~/.local/bin (claude-debian runs it). */
+    private fun isClaudeCodeInstalled(): Boolean =
+        File(debianRootfs(baseDir), "root/.local/bin/claude").exists().also { if (it) writeClaudeMenuEntry() }
+
+    /** "Claude Code" in the XFCE menu: a terminal with claude-debian (in ~/projekty/Claude when it exists). */
+    private fun writeClaudeMenuEntry() {
+        runCatching {
+            val entry = File(homeDir, ".local/share/applications/claude-code.desktop")
+            val text = """
+                [Desktop Entry]
+                Type=Application
+                Name=Claude Code
+                Comment=Claude Code (Anthropic) v Debianu
+                Exec=xfce4-terminal --title "Claude Code" -x ${File(binDir, "claude-debian").absolutePath}
+                Icon=utilities-terminal
+                Categories=Development;
+                Terminal=false
+            """.trimIndent() + "\n"
+            if (!entry.isFile || entry.readText() != text) {
+                entry.parentFile?.mkdirs()
+                entry.writeText(text)
+            }
+        }
+    }
+
+    /**
+     * Claude Code is not redistributable, so the APK carries no copy: Anthropic's own installer
+     * (https://claude.ai/install.sh, native linux-arm64 build, needs glibc) runs inside Debian,
+     * which is installed first when missing. Sign-in happens on the first start (claude-debian).
+     */
+    private fun installClaudeCode(onProgress: ((Double, String) -> Unit)?): Boolean {
+        if (!isMinimalDebianInstalled()) {
+            onProgress?.invoke(0.2, "Installing Debian for Claude Code...")
+            if (!installMinimalDebian(onProgress)) return false
+        }
+        onProgress?.invoke(0.7, "Downloading Claude Code from claude.ai...")
+        val run = File(binDir, "debian-run").absolutePath
+        val output = executeCommand(
+            "\"$run\" bash -c 'command -v curl >/dev/null || " +
+                "(apt-get update -qq && apt-get install -y -qq curl ca-certificates); " +
+                "curl -fsSL https://claude.ai/install.sh | bash'",
+        )
+        if (!isClaudeCodeInstalled()) {
+            Log.w(TAG, "Claude Code installation failed: ${output.takeLast(2000)}")
+            return false
+        }
+        onProgress?.invoke(0.95, "Claude Code installed; sign in on the first start")
+        return true
+    }
 
     private fun isMinimalDebianInstalled(): Boolean {
         val installed = debianRootfsMarkers().any(File::exists) &&
@@ -852,6 +903,32 @@ class LinuxRuntime(private val context: Context) {
                     xfconf-query -c thunar -p /misc-thumbnail-mode >/dev/null 2>&1 ||
                         xfconf-query -c thunar -p /misc-thumbnail-mode -n -t string -s THUNAR_THUMBNAIL_MODE_ALWAYS
                     mkdir -p "${'$'}(dirname "${'$'}marker3")" && touch "${'$'}marker3"
+                fi
+
+                # The look chosen on the Fold: Fluent (vinceliuice, Termux packages
+                # fluent-gtk-theme / fluent-icon-theme) dark, centered full-width titles,
+                # bigger cursor, terminal with DejaVu Sans Mono 12. Once, only when the
+                # themes are installed and the user has not picked another theme.
+                marker4="${'$'}HOME/.config/droiddesk/xfce-look-fluent-v1"
+                themes="${prefixDir.absolutePath}/share/themes"
+                icons="${prefixDir.absolutePath}/share/icons"
+                if [ ! -f "${'$'}marker4" ] && [ -d "${'$'}themes/Fluent-Dark" ] && [ -d "${'$'}icons/Fluent-dark" ]; then
+                    current=${'$'}(xfconf-query -c xsettings -p /Net/ThemeName 2>/dev/null)
+                    case "${'$'}current" in
+                        ""|Adwaita|Adwaita-dark|Default|Xfce)
+                            xfconf-query -c xsettings -p /Net/ThemeName -n -t string -s Fluent-Dark
+                            xfconf-query -c xsettings -p /Net/IconThemeName -n -t string -s Fluent-dark
+                            xfconf-query -c xsettings -p /Gtk/CursorThemeSize -n -t int -s 32
+                            xfconf-query -c xfwm4 -p /general/theme -n -t string -s Fluent-Dark
+                            xfconf-query -c xfwm4 -p /general/title_font -n -t string -s "Sans Bold 9"
+                            xfconf-query -c xfwm4 -p /general/button_layout -n -t string -s "O|SHMC"
+                            xfconf-query -c xfwm4 -p /general/title_alignment -n -t string -s center
+                            xfconf-query -c xfwm4 -p /general/full_width_title -n -t bool -s true
+                            xfconf-query -c xfce4-terminal -p /font-name -n -t string -s "DejaVu Sans Mono 12"
+                            xfconf-query -c xfce4-terminal -p /misc-maximize-default -n -t bool -s true
+                            ;;
+                    esac
+                    mkdir -p "${'$'}(dirname "${'$'}marker4")" && touch "${'$'}marker4"
                 fi
 
                 # A vertical panel (mode 1) rotates text plugins such as the battery
@@ -2265,6 +2342,10 @@ class LinuxRuntime(private val context: Context) {
         if (selectedDesktop == "xfce4" && !installPackageGroup("pkg install -y xfce4-screenshooter")) {
             Log.w(TAG, "xfce4-screenshooter unavailable; PrintScreen does nothing")
         }
+        // The default look (Fluent, see writeXfceTweaks); XFCE's own theme stays without them.
+        if (selectedDesktop == "xfce4" && !installPackageGroup("pkg install -y fluent-gtk-theme fluent-icon-theme")) {
+            Log.w(TAG, "Fluent themes unavailable; XFCE keeps its default look")
+        }
         if (!installPackageGroup("pkg install -y dosfstools exfatprogs e2fsprogs mtools")) {
             Log.w(TAG, "USB disk tools unavailable; droiddesk-usb format/files will ask for them")
         }
@@ -2350,6 +2431,7 @@ class LinuxRuntime(private val context: Context) {
                 installOptionalPackages(listOf("imagemagick"), onProgress, 0.55)
             }
             "proot_debian" -> installMinimalDebian(onProgress)
+            "claude_code" -> installClaudeCode(onProgress)
             else -> false
         }
 

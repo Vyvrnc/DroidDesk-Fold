@@ -332,6 +332,16 @@ class _AppCatalogScreenState extends State<AppCatalogScreen>
           Color(0xFFD70A53),
           optional: true,
         ),
+      if (!state.hasRoot)
+        const _FeaturedApp(
+          'claude_code',
+          'Claude Code',
+          'AI coding agent from Anthropic, installed into Debian with the official '
+              'installer. Menu: Development → Claude Code; sign in on first start.',
+          Icons.auto_awesome_rounded,
+          Color(0xFFD97757),
+          optional: true,
+        ),
     ];
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 18, 20, 32),
