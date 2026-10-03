@@ -161,6 +161,30 @@ class DesktopActivity : Activity() {
         Log.i(TAG, "DesktopActivity created mode=$sessionMode startSession=$shouldStartSession")
     }
 
+    private var captureButton: android.widget.Button? = null
+
+    private fun setPointerCapture(enable: Boolean) {
+        getSharedPreferences("desktop_controls", MODE_PRIVATE).edit().putBoolean("pointer_capture", enable).apply()
+        inputController?.setPointerCapture(enable)
+        captureButton?.text = if (enable) "Myš ✓" else "Myš"
+        Toast.makeText(
+            this,
+            if (enable) "Myš zachycena (lišty DeX se neukážou). Uvolnit: Ctrl+Alt+M" else "Myš uvolněna",
+            Toast.LENGTH_LONG,
+        ).show()
+    }
+
+    /** Ctrl+Alt+M toggles pointer capture: with the mouse captured, nothing else here is clickable. */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_M && event.isCtrlPressed && event.isAltPressed) {
+            if (event.action == KeyEvent.ACTION_UP) {
+                setPointerCapture(!getSharedPreferences("desktop_controls", MODE_PRIVATE).getBoolean("pointer_capture", false))
+            }
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) enableImmersiveMode()
@@ -341,6 +365,9 @@ class DesktopActivity : Activity() {
     private fun attachDesktopInput() {
         if (inputController == null) {
             inputController = X11InputController(lorieView!!)
+            if (getSharedPreferences("desktop_controls", MODE_PRIVATE).getBoolean("pointer_capture", false)) {
+                inputController?.setPointerCapture(true)
+            }
         }
         addDesktopControls()
         lorieView?.requestFocus()
@@ -409,6 +436,18 @@ class DesktopActivity : Activity() {
             }
         }
 
+        // DeX shows its bars when the mouse touches the top edge; capturing the pointer keeps
+        // the mouse inside the desktop. Released with Ctrl+Alt+M (or this button).
+        val captureButton = controlButton(if (preferences.getBoolean("pointer_capture", false)) "Myš ✓" else "Myš").apply {
+            contentDescription = "Capture the mouse (hides the DeX bars at the top edge)"
+            setOnClickListener {
+                val enable = !preferences.getBoolean("pointer_capture", false)
+                setPointerCapture(enable)
+                text = if (enable) "Myš ✓" else "Myš"
+            }
+        }
+        this.captureButton = captureButton
+
         val buttonRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -425,6 +464,9 @@ class DesktopActivity : Activity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT, (42 * density).toInt(),
             ))
             addView(extraKeysButton, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, (42 * density).toInt(),
+            ))
+            addView(captureButton, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, (42 * density).toInt(),
             ))
             addView(hideButton, LinearLayout.LayoutParams(

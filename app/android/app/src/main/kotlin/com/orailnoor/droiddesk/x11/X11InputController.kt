@@ -25,6 +25,20 @@ class X11InputController(private val lorieView: LorieView) {
         }
         lorieView.setOnTouchListener(::handleMotionEvent)
         lorieView.setOnGenericMotionListener(::handleMotionEvent)
+        // Captured pointer (see setPointerCapture): relative mouse events, as in Termux:X11.
+        lorieView.setOnCapturedPointerListener { view, event -> inputHandler.handleTouchEvent(lorieView, view, event) }
+    }
+
+    /**
+     * Pointer capture: Android no longer sees the mouse, so DeX does not show its bars when
+     * the cursor reaches the top edge; the X server's cursor is the only one. Requested
+     * again on the next click when Android dropped it (focus change).
+     */
+    fun setPointerCapture(enabled: Boolean) {
+        val prefs = MainActivity.getPrefs()
+        prefs.pointerCapture.put(enabled)
+        inputHandler.reloadPreferences(prefs)
+        if (enabled) lorieView.requestPointerCapture() else lorieView.releasePointerCapture()
     }
 
     fun nextMode(): Int {
@@ -48,6 +62,8 @@ class X11InputController(private val lorieView: LorieView) {
         MainActivity.getInstance().setKeyHandler(null)
         lorieView.setOnTouchListener(null)
         lorieView.setOnGenericMotionListener(null)
+        lorieView.setOnCapturedPointerListener(null)
+        lorieView.releasePointerCapture()
         lorieView.setCallback(null)
     }
 
