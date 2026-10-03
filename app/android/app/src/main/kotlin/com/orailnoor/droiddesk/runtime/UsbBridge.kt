@@ -105,7 +105,9 @@ object UsbBridge {
                     UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                         if (held.containsKey(device.deviceName)) eject(device.deviceName)
                         // Unplugged: the device's cache is gone with its power.
-                        readShapes.keys.removeAll { it.startsWith(device.deviceName + ":") }
+                        val gone = shapeId(device)
+                        readShapes.keys.removeAll { it.startsWith("$gone:") }
+                        shapeDir(context).listFiles()?.filter { it.name.startsWith("$gone:") }?.forEach { it.delete() }
                         emit("detached\t${device.deviceName}")
                     }
                 }
@@ -158,8 +160,32 @@ object UsbBridge {
     /** READ shapes per "device name:slot", kept while plugged in (see ReadShapes). */
     private val readShapes = java.util.concurrent.ConcurrentHashMap<String, ReadShapes>()
 
-    fun readShapesFor(name: String, slot: Int, step: Int): ReadShapes =
-        readShapes.getOrPut("$name:$slot:$step") { ReadShapes(step) }
+    fun readShapesFor(device: UsbDevice, slot: Int, step: Int): ReadShapes {
+        val key = "${shapeId(device)}:$slot:$step"
+        return readShapes.getOrPut(key) {
+            appContext?.let { ReadShapes.load(java.io.File(shapeDir(it), key), step) } ?: ReadShapes(step)
+        }
+    }
+
+    /** Saves the read shapes of a device after a session (they outlive a DroidDesk restart). */
+    fun saveReadShapes(device: UsbDevice) {
+        val context = appContext ?: return
+        val id = shapeId(device)
+        for ((key, shapes) in readShapes) {
+            if (key.startsWith("$id:") && shapes.dirty) {
+                runCatching { shapes.save(java.io.File(shapeDir(context), key)) }
+                    .onFailure { Log.w(TAG, "Could not save read shapes of $key", it) }
+            }
+        }
+    }
+
+    private fun shapeDir(context: Context) = java.io.File(context.filesDir, "usb-read-shapes").apply { mkdirs() }
+
+    /** Stable across reconnects of the same device: vendor, product and serial number. */
+    private fun shapeId(device: UsbDevice): String {
+        val serial = runCatching { device.serialNumber }.getOrNull()?.filter { it.isLetterOrDigit() }.orEmpty()
+        return "%04x-%04x-%s".format(device.vendorId, device.productId, serial.ifEmpty { "noserial" })
+    }
 
     /** The held connection for [device], claiming it first if needed; an error text otherwise. */
     @Synchronized

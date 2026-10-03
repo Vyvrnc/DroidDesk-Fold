@@ -226,7 +226,7 @@ class UsbFlasher(
             // Card readers expose one LUN per slot. Never guess between two
             // inserted cards: the user has to name the slot.
             fun probe() = (0 until lunCount).mapNotNull { slot ->
-                BotScsiDevice(connection, iface, epIn, epOut, slot, { step -> UsbBridge.readShapesFor(held.device.deviceName, slot, step) }).let {
+                BotScsiDevice(connection, iface, epIn, epOut, slot, { step -> UsbBridge.readShapesFor(held.device, slot, step) }).let {
                     try {
                         it.init()
                         slot to it
@@ -260,6 +260,8 @@ class UsbFlasher(
             Log.w(TAG, "USB transfer failed", error)
             // A closed socket means the client cancelled; nothing to report then.
             runCatching { fail(error.message ?: error.javaClass.simpleName) }
+        } finally {
+            UsbBridge.saveReadShapes(held.device)
         }
         }
     }

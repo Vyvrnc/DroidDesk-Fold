@@ -15,6 +15,10 @@ package com.orailnoor.droiddesk.runtime
  * of [step] blocks (sequential reads of a whole disk) are kept as bits, other shapes in a map.
  */
 class ReadShapes(private val step: Int) {
+    /** Changed since load or the last save. */
+    @Volatile var dirty = false
+        private set
+
     private val regularRead = java.util.BitSet()
     private val regularStale = java.util.BitSet()
     /** Other shapes: start block -> block counts. */
@@ -32,6 +36,7 @@ class ReadShapes(private val step: Int) {
 
     @Synchronized
     fun read(start: Long, count: Int) {
+        dirty = true
         if (regular(start, count)) {
             regularRead.set((start / step).toInt())
             return
@@ -43,6 +48,7 @@ class ReadShapes(private val step: Int) {
     /** Every shape read so far that covers part of [start, end) is stale now. */
     @Synchronized
     fun written(start: Long, end: Long) {
+        dirty = true
         val first = (start / step).toInt()
         val last = ((end - 1) / step).toInt()
         for (index in first..last) if (regularRead[index]) regularStale.set(index)
@@ -52,5 +58,59 @@ class ReadShapes(private val step: Int) {
                 if (readStart + count > start) stale.add(key(readStart, count))
             }
         }
+    }
+
+    /**
+     * The device keeps its cache while it has power, also while DroidDesk restarts (an
+     * update): the shapes are saved per device and loaded again (UsbBridge).
+     */
+    @Synchronized
+    fun save(file: java.io.File) {
+        val tmp = java.io.File(file.path + ".tmp")
+        java.io.DataOutputStream(java.io.BufferedOutputStream(tmp.outputStream())).use { out ->
+            out.writeInt(FORMAT)
+            out.writeInt(step)
+            for (bits in listOf(regularRead, regularStale)) {
+                val bytes = bits.toByteArray()
+                out.writeInt(bytes.size)
+                out.write(bytes)
+            }
+            out.writeInt(issued.size)
+            for ((start, counts) in issued) {
+                out.writeLong(start)
+                out.writeInt(counts.size)
+                counts.forEach(out::writeInt)
+            }
+            out.writeInt(stale.size)
+            stale.forEach(out::writeLong)
+        }
+        if (!tmp.renameTo(file)) tmp.delete()
+        dirty = false
+    }
+
+    companion object {
+        private const val FORMAT = 1
+
+        /** The saved shapes, or null if there are none (or for another block size). */
+        fun load(file: java.io.File, step: Int): ReadShapes? = runCatching {
+            java.io.DataInputStream(java.io.BufferedInputStream(file.inputStream())).use { input ->
+                if (input.readInt() != FORMAT || input.readInt() != step) return null
+                val shapes = ReadShapes(step)
+                for (bits in listOf(shapes.regularRead, shapes.regularStale)) {
+                    val bytes = ByteArray(input.readInt())
+                    input.readFully(bytes)
+                    bits.or(java.util.BitSet.valueOf(bytes))
+                }
+                repeat(input.readInt()) {
+                    val start = input.readLong()
+                    val counts = HashSet<Int>()
+                    repeat(input.readInt()) { counts.add(input.readInt()) }
+                    shapes.issued[start] = counts
+                    shapes.longest = maxOf(shapes.longest, counts.maxOrNull() ?: 0)
+                }
+                repeat(input.readInt()) { shapes.stale.add(input.readLong()) }
+                shapes
+            }
+        }.getOrNull()
     }
 }
