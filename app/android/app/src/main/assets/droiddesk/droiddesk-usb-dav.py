@@ -16,7 +16,7 @@ the server runs in the foreground and logs to the same path with .log instead of
 disk operation) and by itself when the device is no longer held by Linux.
 
 Every request takes the disk's lock (the one droiddesk-usb uses) only while it works on the
-disk, so droiddesk-usb and the USB disky window can run in between; requests are serialized.
+disk, so droiddesk-usb and the USB window can run in between; requests are serialized.
 Listings are cached for 2 s, files read by GET are kept in a small cache (Range requests of
 players and editors); both are dropped on every write here and whenever another droiddesk-usb
 command changed the disk.

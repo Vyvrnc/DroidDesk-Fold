@@ -86,7 +86,7 @@ def describe(dev):
 DEVICE_LOCKS = {}
 
 
-# What this process is doing with a disk, for the USB disky window: a JSON file next to the
+# What this process is doing with a disk, for the USB window: a JSON file next to the
 # disk's lock ($PREFIX/tmp/droiddesk-usb_dev_bus_usb_…status), written at most once a second.
 ACTIVITY = {"path": None, "op": "", "percent": None, "text": "", "last": 0.0, "started": 0.0, "speed": None}
 OPERATION_NAMES = {"check": "kontrola", "flash": "zápis obrazu", "read": "uložení obrazu", "format": "formátování",

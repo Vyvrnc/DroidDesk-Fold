@@ -61,11 +61,17 @@ object UsbSerial {
                 output.write("err could not open the port: ${clean(error.message)}\n".toByteArray())
                 return
             }
-            val name = driver.javaClass.simpleName.removeSuffix("SerialDriver").removeSuffix("Driver")
-            output.write("ok $name ${driver.ports.size}\n".toByteArray())
-            output.flush()
-            Log.i(TAG, "Serial port $key ($name) open for Linux")
-            runSession(port, client, output)
+            // Closed in every case from here on (also a client gone before the reply);
+            // closing the port closes the connection too.
+            try {
+                val name = driver.javaClass.simpleName.removeSuffix("SerialDriver").removeSuffix("Driver")
+                output.write("ok $name ${driver.ports.size}\n".toByteArray())
+                output.flush()
+                Log.i(TAG, "Serial port $key ($name) open for Linux")
+                runSession(port, client, output)
+            } finally {
+                runCatching { port.close() }
+            }
         } finally {
             open.remove(key)
             Log.i(TAG, "Serial port $key closed")
@@ -167,7 +173,6 @@ object UsbSerial {
             alive.set(false)
             io.stop()
             poller?.interrupt()
-            runCatching { port.close() } // closes the connection too
         }
     }
 

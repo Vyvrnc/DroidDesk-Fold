@@ -90,7 +90,7 @@ object UsbBridge {
         usbEvents = null
     }
 
-    // ── Events for the "USB disky" panel icon (request "watch") ──
+    // ── Events for the "USB" panel icon (request "watch") ──
 
     private val watchers = java.util.concurrent.CopyOnWriteArrayList<java.io.OutputStream>()
     @Volatile private var usbEvents: BroadcastReceiver? = null

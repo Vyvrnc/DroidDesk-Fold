@@ -49,7 +49,7 @@ DATA_BITS = {0: 5, 0o20: 6, 0o40: 7, 0o60: 8}
 SPEEDS = {getattr(termios, name): int(name[1:]) for name in dir(termios)
           if name.startswith("B") and name[1:].isdigit()}
 DROP_NOTICE_S = 5.0
-MARK_AFTER_S = 0.2
+MARK_AFTER_S = 1.0
 
 
 def die(message):
@@ -205,6 +205,7 @@ class Session:
         self.driver = ""
         self.attrs = None
         self.attrs_since = 0.0
+        self.traffic_at = 0.0
 
     def frame(self, kind, payload=b""):
         for at in range(0, max(len(payload), 1), 0xFFFF):
@@ -231,6 +232,26 @@ class Session:
                 return
             die(text.removeprefix("err ") or "neznámá chyba")
 
+    def reserve(self, auto):
+        """Takes the name through the control socket's abstract address (atomic), so a
+        second open can never replace the link of a live port. [auto]: try the next name."""
+        while True:
+            control = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                control.bind(control_address(self.name))
+                control.listen(4)
+                self.control = control
+                return
+            except OSError:
+                control.close()
+                if not auto:
+                    die(f"{self.name} už používá jiný otevřený port (droiddesk-serial list)")
+                number = int(self.name[len("ttyUSB"):]) + 1
+                if number >= 64:
+                    die("žádné volné jméno ttyUSB0–63")
+                self.name = f"ttyUSB{number}"
+                self.path = os.path.join(os.path.dirname(self.path), self.name)
+
     def open_terminal(self):
         self.master, self.slave = os.openpty()
         # Raw from the start: a cooked terminal would echo the adapter's bytes back to it
@@ -238,6 +259,7 @@ class Session:
         # its settings between programs and the master never sees a hangup.
         tty.setraw(self.slave)
         attrs = termios.tcgetattr(self.slave)
+        attrs[1] = 0  # setraw leaves ONLCR and delays in oflag
         attrs[4] = attrs[5] = termios.B9600
         termios.tcsetattr(self.slave, termios.TCSANOW, attrs)
         os.set_blocking(self.master, False)
@@ -248,9 +270,6 @@ class Session:
         except OSError:
             pass
         os.symlink(os.ttyname(self.slave), link)
-        self.control = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.control.bind(control_address(self.name))
-        self.control.listen(4)
 
     def write_state(self):
         state = {"pid": os.getpid(), "name": self.name, "path": self.path, "device": self.dev["name"],
@@ -281,15 +300,23 @@ class Session:
         or data bits never does (see parameters), so pymodbus opening with even parity at the
         same baud rate failed. OPOST is switched back on once the settings are stable: every
         program clears it (cfmakeraw, pyserial, libmodbus), so its tcsetattr always changes
-        something. OPOST without ONLCR/OCRNL/OLCUC/XTABS leaves the bytes as they are."""
+        something. Only when the output flags are otherwise all off: OPOST alone leaves the
+        bytes as they are (with ONLCR it would turn \n into \r\n).
+
+        The write races with a program changing the settings at the same instant (its change
+        would be lost), so it happens once per change, after a second without changes and
+        without traffic, from a fresh read: the window is microseconds once a second at most."""
         attrs = termios.tcgetattr(self.slave)
         now = time.monotonic()
         if attrs != self.attrs:
             self.attrs, self.attrs_since = attrs, now
-        elif not attrs[1] & termios.OPOST and now - self.attrs_since > MARK_AFTER_S:
-            attrs[1] |= termios.OPOST
-            termios.tcsetattr(self.slave, termios.TCSANOW, attrs)
+        elif attrs[1] == 0 and now - max(self.attrs_since, self.traffic_at) > MARK_AFTER_S:
+            fresh = termios.tcgetattr(self.slave)
+            if fresh == attrs:
+                fresh[1] = termios.OPOST
+                termios.tcsetattr(self.slave, termios.TCSANOW, fresh)
             self.attrs = termios.tcgetattr(self.slave)
+            self.attrs_since = now
 
     def sync_parameters(self):
         params = parameters(self.slave, self.fixed)
@@ -378,20 +405,23 @@ class Session:
                 reply = "err bad request"
             client.sendall((reply + "\n").encode())
 
-    def run(self, ready=None, on_ready=None):
+    def run(self, ready=None, on_ready=None, auto_name=False):
+        self.reserve(auto_name)
         self.connect()
-        self.open_terminal()
-        self.sync_parameters()
-        self.set_lines(True, True)
-        self.write_state()
-        if ready is not None:
-            os.write(ready, (self.path + "\n").encode())
-            os.close(ready)
-        if on_ready is not None:
-            on_ready()
         try:
+            self.open_terminal()
+            self.sync_parameters()
+            self.set_lines(True, True)
+            self.write_state()
+            if ready is not None:
+                os.write(ready, (self.path + "\n").encode())
+                os.close(ready)
+            if on_ready is not None:
+                on_ready()
             while True:
                 readable, _, _ = select.select([self.master, self.sock, self.control], [], [], 0.1)
+                if readable:
+                    self.traffic_at = time.monotonic()
                 if self.sock in readable and not self.handle_frames():
                     sys.stderr.write(f"{PROG}: {self.name}: převodník odpojen nebo aplikace skončila\n")
                     return
@@ -454,16 +484,18 @@ def cmd_open(args):
                                                     {3: "1.5"}.get(fixed[2], fixed[2])))
             print(usb.shown(state["path"]))
             return
+    auto_name = not name
     name = name or free_name()
     if "/" in name or not name:
         die("--name je jméno bez cesty, např. ttyUSB0")
+    if not auto_name and any(st["name"] == name for st in sessions()):
+        die(f"{name} už používá jiný otevřený port (droiddesk-serial list)")
     session = Session(dev, port, name, os.path.join(tty_dir()[0], name), fixed)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     if foreground:
-        print(usb.shown(session.path), flush=True)
         try:
-            session.run()
+            session.run(on_ready=lambda: print(usb.shown(session.path), flush=True), auto_name=auto_name)
         except KeyboardInterrupt:
             pass
         return
@@ -488,7 +520,7 @@ def cmd_open(args):
                       os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         os.dup2(log, 2)
         os.close(log)
-    session.run(ready=write_end, on_ready=detach)
+    session.run(ready=write_end, on_ready=detach, auto_name=auto_name)
 
 
 def control(state, request):

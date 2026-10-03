@@ -129,7 +129,7 @@ class LinuxRuntime(private val context: Context) {
     /** Qualcomm exposes the Adreno render device through KGSL on Android. */
     private fun hasAdrenoGpu(): Boolean = File("/dev/kgsl-3d0").exists()
 
-    // The fork supports XFCE only: the dock, Android menu, USB disky and tweaks are
+    // The fork supports XFCE only: the dock, Android menu, USB window and tweaks are
     // built for it. A choice saved by an older build (lxqt/mate/kde) also gets XFCE.
     @Suppress("UNUSED_PARAMETER")
     private fun normalizedDesktop(desktopEnv: String): String = "xfce4"
@@ -725,7 +725,7 @@ class LinuxRuntime(private val context: Context) {
                         wrapper.setExecutable(true, false)
                     }
                 }
-                // "USB disky": icon in the dock's systray and a window (GTK 3 through pygobject).
+                // "USB": icon in the dock's systray and a window (GTK 3 through pygobject).
                 val trayClient = File(binDir, "droiddesk-usb-tray.py")
                 context.assets.open("droiddesk/droiddesk-usb-tray.py").use { input ->
                     trayClient.outputStream().use(input::copyTo)
@@ -743,8 +743,8 @@ class LinuxRuntime(private val context: Context) {
                     """
                     [Desktop Entry]
                     Type=Application
-                    Name=USB disky
-                    Comment=Flash drives and card readers: attach, eject, write and save images
+                    Name=USB
+                    Comment=Flash drives, card readers and USB serial adapters
                     Exec=${trayCommand.absolutePath} --window
                     Icon=drive-removable-media
                     Categories=System;Utility;
@@ -756,7 +756,7 @@ class LinuxRuntime(private val context: Context) {
                     """
                     [Desktop Entry]
                     Type=Application
-                    Name=USB disky (ikona v panelu)
+                    Name=USB (ikona v panelu)
                     Exec=${trayCommand.absolutePath}
                     NoDisplay=true
                     """.trimIndent() + "\n",
@@ -872,7 +872,7 @@ class LinuxRuntime(private val context: Context) {
                     xfce4-panel -r
                 fi
 
-                # Systray for the "USB disky" icon (droiddesk-usb-tray), before the
+                # Systray for the "USB" icon (droiddesk-usb-tray), before the
                 # battery or the clock. Only once pygobject is there to draw the icon.
                 if "${File(binDir, "python3").absolutePath}" -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null &&
                     ! xfconf-query -c xfce4-panel -p /plugins/plugin-27 >/dev/null 2>&1; then
@@ -1443,7 +1443,7 @@ class LinuxRuntime(private val context: Context) {
     /**
      * Some Termux libraries name a dependency by its absolute com.termux path (libsoup-3.0
      * needs "/data/data/com.termux/files/usr/lib/libsqlite3.so"); the dynamic linker opens
-     * that path itself, past the socket hook, and fails (gvfsd-dav for USB disky in Thunar).
+     * that path itself, past the socket hook, and fails (gvfsd-dav for USB disks in Thunar).
      * Such entries become the bare library name, found through LD_LIBRARY_PATH. Only files
      * changed since the last pass are read (packages installed later), and only their ELF
      * headers and dynamic section.
@@ -1906,7 +1906,7 @@ class LinuxRuntime(private val context: Context) {
         }
 
         env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=${tmpDir.absolutePath}/dbus-session"
-        // gvfs (dav:// in Thunar for USB disky, sftp://, …): GIO looks for its client module
+        // gvfs (dav:// in Thunar for USB disks, sftp://, …): GIO looks for its client module
         // and gvfsd for its mount definitions only at the compile-time com.termux paths.
         env["GIO_EXTRA_MODULES"] = "${prefixDir.absolutePath}/lib/gio/modules"
         env["GVFS_MOUNTABLE_DIR"] = "${prefixDir.absolutePath}/share/gvfs/mounts"
@@ -2248,9 +2248,9 @@ class LinuxRuntime(private val context: Context) {
             return false
         }
         if (selectedDesktop == "xfce4" && !installPackageGroup("pkg install -y pygobject")) {
-            Log.w(TAG, "pygobject unavailable; the USB disky panel icon stays off")
+            Log.w(TAG, "pygobject unavailable; the USB panel icon stays off")
         }
-        // USB disky: format and files (droiddesk-usb installs them on first use otherwise).
+        // USB disks: format and files (droiddesk-usb installs them on first use otherwise).
         // PrintScreen: XFCE's default shortcut runs xfce4-screenshooter.
         if (selectedDesktop == "xfce4" && !installPackageGroup("pkg install -y xfce4-screenshooter")) {
             Log.w(TAG, "xfce4-screenshooter unavailable; PrintScreen does nothing")

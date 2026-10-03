@@ -361,7 +361,7 @@ object AndroidAppBridge {
         } else {
             emptyList()
         }
-        // Plugin 27 is the systray for the "USB disky" icon, added once pygobject is installed.
+        // Plugin 27 is the systray for the "USB" icon, added once pygobject is installed.
         val tray = if (File(context.filesDir, "usr/lib").listFiles().orEmpty()
                 .any { File(it, "site-packages/gi/__init__.py").isFile }
         ) {

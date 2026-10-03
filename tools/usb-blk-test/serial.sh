@@ -88,12 +88,29 @@ r = p.read(7); print("reply", r.hex())
 sys.exit(0 if len(r) == 7 and r[3:5] == struct.pack(">H", 22) else 1)
 EOF
 python3 /tmp/rtu.py "$TTY" >/dev/null 2>&1; [ $? -ne 0 ]; check $? "pyserial even parity alone: no answer (pty limit)"
+sleep 1.5  # the daemon marks the terminal a second after the last change
 python3 /tmp/rtu.py "$TTY" 2>&1 | grep -q "Invalid argument"; [ $? -ne 0 ]; check $? "reopen with the same settings: no EINVAL (glibc readback)"
 $S set "$TTY" 8E1; check $? "set 8E1"
 python3 /tmp/rtu.py "$TTY"; check $? "pyserial Modbus RTU with set 8E1"
 $S list | grep -q "19200 8E1 (pevný formát)"; check $? "list shows the fixed format"
 $S set "$TTY" auto; check $? "set auto"
 $S set "$TTY" 9X1 2>/dev/null; [ $? -ne 0 ]; check $? "bad format refused"
+
+# A program that clears only OPOST (cfmakeraw, picocom) keeps ONLCR from the terminal: the
+# marker must never turn that into \n -> \r\n.
+python3 - "$TTY" <<'EOF'
+import os, sys, termios, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_NOCTTY)
+a = termios.tcgetattr(fd); a[1] &= ~termios.OPOST; a[3] &= ~(termios.ICANON | termios.ECHO)
+termios.tcsetattr(fd, termios.TCSANOW, a)
+time.sleep(1.5)
+os.write(fd, b"a\nb\n"); time.sleep(0.3)
+print("oflag", oct(termios.tcgetattr(fd)[1]))
+EOF
+tail -2 /tmp/bridge.log | grep -qx "D 4"; check $? "no newline translation (4 bytes stay 4)"
+# Taken name: refused, the live port keeps its link.
+$S open --name ttyUSB0 2>/tmp/err; [ $? -ne 0 ] || [ "$($S list | grep -c ttyUSB0)" = 1 ]; check $? "second open of a live name does not take it over"
+[ -e "$TTY" ]; check $? "live link intact"
 
 $S lines "$TTY" --dtr 0; check $? "lines --dtr 0"
 sleep 0.3; seen "M 0 1"

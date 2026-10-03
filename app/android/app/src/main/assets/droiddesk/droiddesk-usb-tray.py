@@ -1,4 +1,4 @@
-"""droiddesk-usb-tray — the "USB disky" icon in the XFCE panel.
+"""droiddesk-usb-tray — the "USB" icon in the XFCE panel (disks and serial adapters).
 
   droiddesk-usb-tray            icon in the panel (systray plugin), started by autostart
   droiddesk-usb-tray --window   open the window (starts the icon too when it is not running)
@@ -35,12 +35,12 @@ except (ImportError, ValueError, AttributeError) as error:
     have_pygobject = gi_module is not None and hasattr(gi_module, "require_version")
     if "--window" in sys.argv and (have_pygobject or os.environ.get("DROIDDESK_USB_TRAY_INSTALLED")):
         # pygobject is there but GTK does not load (typelibs, display): say so, no loop.
-        subprocess.run(["notify-send", "-i", "dialog-error", "USB disky", f"GTK se nenačetlo: {error}"],
+        subprocess.run(["notify-send", "-i", "dialog-error", "USB", f"GTK se nenačetlo: {error}"],
                        check=False)
     elif "--window" in sys.argv:
         wrapper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "droiddesk-usb-tray")
-        subprocess.Popen(["xfce4-terminal", "--title=USB disky", "-x", "bash", "-c",
-                          "echo 'USB disky potřebují balíček pygobject, instaluji…'; "
+        subprocess.Popen(["xfce4-terminal", "--title=USB", "-x", "bash", "-c",
+                          "echo 'Okno USB potřebuje balíček pygobject, instaluji…'; "
                           "pkg install -y pygobject && "
                           f"(DROIDDESK_USB_TRAY_INSTALLED=1 setsid '{wrapper}' --window &); "
                           "echo; read -rp 'Enter zavře okno. '"])
@@ -715,8 +715,8 @@ class Tray:
         self.dav = DavServers()
         GLib.timeout_add_seconds(2, self.poll_activity)
         self.icon = Gtk.StatusIcon.new_from_icon_name(ICON)
-        self.icon.set_title("USB disky")
-        self.icon.set_tooltip_text("USB disky")
+        self.icon.set_title("USB")
+        self.icon.set_tooltip_text("USB")
         self.icon.connect("activate", lambda *_: self.toggle())
         self.icon.connect("popup-menu", self.popup)
         threading.Thread(target=self.watch, daemon=True).start()
@@ -725,7 +725,7 @@ class Tray:
 
     def popup(self, icon, button, when):
         menu = Gtk.Menu()
-        for text, action in (("Otevřít USB disky", self.show), ("Vysunout vše", self.eject_all)):
+        for text, action in (("Otevřít okno USB", self.show), ("Vysunout vše", self.eject_all)):
             item = Gtk.MenuItem(label=text)
             item.connect("activate", lambda *_, a=action: a())
             menu.append(item)
@@ -777,8 +777,8 @@ class Tray:
     def offer_attach(self, dev):
         try:
             out = subprocess.run(
-                ["notify-send", "-i", ICON, "-A", "attach=Připojit do Linuxu", "-A", "open=Otevřít USB disky",
-                 "USB disky", f"Připojeno: {label_of(dev)}"],
+                ["notify-send", "-i", ICON, "-A", "attach=Připojit do Linuxu", "-A", "open=Otevřít okno USB",
+                 "USB", f"Připojeno: {label_of(dev)}"],
                 capture_output=True, text=True, timeout=300)
         except (OSError, subprocess.TimeoutExpired):
             return
@@ -794,7 +794,7 @@ class Tray:
         try:
             out = subprocess.run(
                 ["notify-send", "-i", "network-wired", "-A", "open=Otevřít jako sériový port",
-                 "-A", "window=Otevřít USB disky", "Sériový převodník", f"Připojeno: {label_of(dev)}"],
+                 "-A", "window=Otevřít okno USB", "Sériový převodník", f"Připojeno: {label_of(dev)}"],
                 capture_output=True, text=True, timeout=300)
         except (OSError, subprocess.TimeoutExpired):
             return
@@ -816,7 +816,7 @@ class Tray:
         self.window.present()
 
     def build_window(self):
-        win = Gtk.Window(title="USB disky")
+        win = Gtk.Window(title="USB")
         win.set_icon_name(ICON)
         win.set_default_size(980, 360)
         win.set_resizable(True)
@@ -888,7 +888,7 @@ class Tray:
         if found is not None:
             held = sum(d["held"] for d in found)
         if not self.activities:
-            self.icon.set_tooltip_text(f"USB disky — {held} připojeno do Linuxu" if held else "USB disky")
+            self.icon.set_tooltip_text(f"USB — {held} připojeno do Linuxu" if held else "USB")
         if found is not None:
             self.dav.sync(found)
         if self.window is None:
@@ -981,7 +981,7 @@ class Tray:
         if changed:
             self.refresh()
         if seen:
-            self.icon.set_tooltip_text("USB disky — " + "; ".join(f"{d}: {t}" for d, t in seen.items()))
+            self.icon.set_tooltip_text("USB — " + "; ".join(f"{d}: {t}" for d, t in seen.items()))
         return True
 
     def summarize(self, name):
