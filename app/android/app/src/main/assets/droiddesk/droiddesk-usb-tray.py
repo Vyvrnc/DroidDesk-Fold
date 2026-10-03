@@ -174,12 +174,20 @@ def ask_text(parent, title, prompt, value=""):
     return result if answer == Gtk.ResponseType.OK and result else None
 
 
+URI_TARGETS = [Gtk.TargetEntry.new("text/uri-list", 0, 0)]
+
+
 class FilesWindow:
-    """Files on the disk (FAT, exFAT, NTFS, ext2/3/4): browse, upload, download, new folder, delete."""
+    """Files on the disk (FAT, exFAT, NTFS, ext2/3/4): browse, open (with saving changes back),
+    upload, download, drag and drop both ways, new folder, delete."""
 
     def __init__(self, parent, name, title):
         self.name = name
         self.path = "/"
+        # Opened files: local copy -> [path on the disk, mtime when saved/opened, mtime asked about]
+        self.opened = {}
+        self.cache = os.path.join(os.environ.get("TMPDIR", "/tmp"), "droiddesk-usb-open",
+                                  name.strip("/").replace("/", "_"))
         win = Gtk.Window(title=f"Soubory — {title}", transient_for=parent)
         win.set_resizable(True)
         win.set_type_hint(Gdk.WindowTypeHint.NORMAL)
@@ -213,6 +221,11 @@ class FilesWindow:
         size_column.set_resizable(True)
         view.append_column(size_column)
         view.connect("row-activated", self.activated)
+        # Drag out: the files are downloaded first; drag in (Thunar, desktop): uploaded here.
+        view.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, URI_TARGETS, Gdk.DragAction.COPY)
+        view.connect("drag-data-get", self.drag_out)
+        view.drag_dest_set(Gtk.DestDefaults.ALL, URI_TARGETS, Gdk.DragAction.COPY)
+        view.connect("drag-data-received", self.drag_in)
         self.view = view
         scroll = Gtk.ScrolledWindow(vexpand=True)
         scroll.add(view)
@@ -220,7 +233,8 @@ class FilesWindow:
         self.status = Gtk.Label(xalign=0, wrap=True, selectable=True)
         box.pack_start(self.status, False, False, 0)
         buttons = Gtk.Box(spacing=6)
-        for text_, action in (("Nahrát soubory…", self.upload_files), ("Nahrát složku…", self.upload_folder),
+        for text_, action in (("Otevřít", self.open_selected),
+                              ("Nahrát soubory…", self.upload_files), ("Nahrát složku…", self.upload_folder),
                               ("Stáhnout…", self.download), ("Nová složka…", self.new_folder),
                               ("Smazat", self.delete), ("Obnovit", lambda: self.go(self.path))):
             button = Gtk.Button(label=text_)
@@ -228,8 +242,10 @@ class FilesWindow:
             buttons.pack_start(button, False, False, 0)
         box.pack_start(buttons, False, False, 0)
         win.add(box)
+        win.connect("delete-event", lambda *_: not self.closing())
         self.window = win
         win.show_all()
+        GLib.timeout_add_seconds(2, self.watch_opened)
         self.go("/")
 
     def go(self, path):
@@ -266,6 +282,125 @@ class FilesWindow:
         row = self.store[path]
         if row[3]:
             self.go(self.child(row[1]))
+        else:
+            self.open_file(row[1])
+
+    # ── open, edit, save back ──
+
+    def local_copy(self, usb_path):
+        return os.path.join(self.cache, *usb_path.strip("/").split("/"))
+
+    def open_selected(self):
+        model, paths = self.view.get_selection().get_selected_rows()
+        files = [model[p][1] for p in paths if not model[p][3]]
+        if not files:
+            self.status.set_text("Vyber soubor k otevření.")
+        for name in files:
+            self.open_file(name)
+
+    def open_file(self, name):
+        """Download into the cache, open with the default application, watch for changes."""
+        usb_path = self.child(name)
+        local = self.local_copy(usb_path)
+        if local in self.opened and os.path.exists(local):
+            self.launch(local)
+            return
+        os.makedirs(os.path.dirname(local), exist_ok=True)
+
+        def opened(code):
+            if code == 0 and os.path.exists(local):
+                mtime = os.path.getmtime(local)
+                self.opened[local] = [usb_path, mtime, mtime]
+                self.status.set_text(f"Otevřeno: {name} (změny nabídnu uložit zpátky na USB)")
+                self.launch(local)
+        progress(self.window, f"Otevírám {name}", ("cp", f"usb:{usb_path}", local, self.name, "--yad"), opened)
+
+    def launch(self, local):
+        """The default application for the file (Linux, or Android when there is none)."""
+        try:
+            subprocess.Popen([os.path.join(usb.PREFIX, "bin", "droiddesk-open"), local])
+        except OSError as error:
+            self.status.set_text(f"Nelze otevřít: {error}")
+
+    def watch_opened(self):
+        """Every 2 s: an opened file that was saved in its application -> offer to save it back."""
+        if not self.window.get_visible() and not self.opened:
+            return False
+        for local, entry in list(self.opened.items()):
+            try:
+                mtime = os.path.getmtime(local)
+            except OSError:
+                continue
+            if mtime != entry[1] and mtime != entry[2]:
+                entry[2] = mtime  # ask once per change
+                self.offer_save(local)
+        return True
+
+    def offer_save(self, local):
+        usb_path = self.opened[local][0]
+        if confirm(self.window, "Uložit změny zpátky na USB?",
+                   f"{os.path.basename(local)} se změnil.\nUložit ho na USB jako usb:{usb_path}?", "Uložit"):
+            self.save_back(local)
+
+    def save_back(self, local):
+        entry = self.opened[local]
+        mtime = os.path.getmtime(local)
+
+        def saved(code):
+            if code == 0:
+                entry[1] = entry[2] = mtime
+                self.go(self.path)
+        progress(self.window, "Ukládám na USB", ("cp", local, f"usb:{entry[0]}", self.name, "--yad"), saved)
+
+    def closing(self):
+        """Window closed: unsaved changes are offered once more; the cache is cleaned."""
+        for local, entry in list(self.opened.items()):
+            try:
+                if os.path.getmtime(local) != entry[1]:
+                    entry[2] = os.path.getmtime(local)
+                    if confirm(self.window, "Neuložené změny",
+                               f"{os.path.basename(local)} se změnil a na USB uložen není.\nUložit ho teď?", "Uložit"):
+                        code, text = run_client("cp", local, f"usb:{entry[0]}", self.name)
+                        if code:
+                            self.status.set_text(text.removeprefix("droiddesk-usb: "))
+                            return False  # keep the window open
+            except OSError:
+                pass
+        self.opened.clear()
+        import shutil
+        shutil.rmtree(self.cache, ignore_errors=True)
+        return True
+
+    # ── drag and drop ──
+
+    def drag_out(self, widget, context, data, info, time_):
+        names = self.selected()
+        if not names:
+            return
+        target = os.path.join(self.cache, "drag")
+        os.makedirs(target, exist_ok=True)
+        self.status.set_text("Stahuji pro přetažení…")
+        while Gtk.events_pending():
+            Gtk.main_iteration()
+        code, text = run_client("cp", *[f"usb:{self.child(n)}" for n in names], target, self.name)
+        if code:
+            self.status.set_text(text.removeprefix("droiddesk-usb: "))
+            return
+        self.status.set_text("")
+        data.set_uris([GLib.filename_to_uri(os.path.join(target, n), None) for n in names])
+
+    def drag_in(self, widget, context, x, y, data, info, time_):
+        paths = []
+        for uri in data.get_uris() or []:
+            try:
+                path, _ = GLib.filename_from_uri(uri)
+            except GLib.Error:
+                continue
+            if path and os.path.exists(path) and not path.startswith(self.cache):
+                paths.append(path)
+        if paths:
+            progress(self.window, "Kopírování na USB", ("cp", *paths, f"usb:{self.path}", self.name, "--yad"),
+                     lambda code: self.go(self.path))
 
     def selected(self):
         model, paths = self.view.get_selection().get_selected_rows()
