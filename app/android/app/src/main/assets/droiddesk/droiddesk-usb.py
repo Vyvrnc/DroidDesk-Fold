@@ -345,7 +345,7 @@ class Blk:
         if status != b"\0":
             (length,) = struct.unpack(">H", self.io.read(2))
             raise BlkError(self.io.read(length).decode("utf-8", "replace"))
-        if op == b"R":
+        if op in (b"R", b"r"):
             data = self.io.read(count * self.bs)
             if len(data) != count * self.bs:
                 raise BlkError("spojení s aplikací se přerušilo")

@@ -104,6 +104,8 @@ object UsbBridge {
                     UsbManager.ACTION_USB_DEVICE_ATTACHED -> emit("attached\t" + describe(device))
                     UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                         if (held.containsKey(device.deviceName)) eject(device.deviceName)
+                        // Unplugged: the device's cache is gone with its power.
+                        readShapes.keys.removeAll { it.startsWith(device.deviceName + ":") }
                         emit("detached\t${device.deviceName}")
                     }
                 }
@@ -149,12 +151,15 @@ object UsbBridge {
         val iface: UsbInterface,
         val epIn: android.hardware.usb.UsbEndpoint,
         val epOut: android.hardware.usb.UsbEndpoint,
-    ) {
-        /** Block ranges written since attach (start -> end), see UsbFlasher.serveBlocks. */
-        val written = java.util.TreeMap<Long, Long>()
-    }
+    )
 
     private val held = java.util.concurrent.ConcurrentHashMap<String, HeldDevice>()
+
+    /** READ shapes per "device name:slot", kept while plugged in (see ReadShapes). */
+    private val readShapes = java.util.concurrent.ConcurrentHashMap<String, ReadShapes>()
+
+    fun readShapesFor(name: String, slot: Int, step: Int): ReadShapes =
+        readShapes.getOrPut("$name:$slot:$step") { ReadShapes(step) }
 
     /** The held connection for [device], claiming it first if needed; an error text otherwise. */
     @Synchronized

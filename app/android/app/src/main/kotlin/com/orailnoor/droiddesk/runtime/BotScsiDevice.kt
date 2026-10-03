@@ -24,7 +24,11 @@ class BotScsiDevice(
     private val epIn: UsbEndpoint,
     private val epOut: UsbEndpoint,
     val lun: Int,
+    /** READ shapes of this device and slot, kept across sessions (see ReadShapes). */
+    private val shapesFor: ((step: Int) -> ReadShapes)? = null,
 ) {
+    /** Known once the block size is: commands are split into [MAX_COMMAND_BYTES]. */
+    private val shapes: ReadShapes? by lazy { shapesFor?.invoke(MAX_COMMAND_BYTES / blockSize) }
     class MediumNotPresent : IOException("no medium")
     class SenseError(val key: Int, val asc: Int, val ascq: Int) :
         IOException("SCSI error: sense key 0x%x, ASC 0x%02x/0x%02x".format(key, asc, ascq)) {
@@ -179,9 +183,52 @@ class BotScsiDevice(
         var done = 0
         while (done < length) {
             val part = minOf(step, length - done)
-            transferOnce(lba + done / blockSize, buffer, offset + done, part, dirIn, fua)
+            val at = lba + done / blockSize
+            if (dirIn) {
+                readFresh(at, buffer, offset + done, part / blockSize, fua)
+            } else {
+                transferOnce(at, buffer, offset + done, part, dirIn = false)
+                shapes?.written(at, at + part / blockSize)
+            }
             done += part
         }
+    }
+
+    /**
+     * One READ, never in a shape the device may answer from a stale cache entry: such a
+     * read is split into two shapes that are not stale; a single stale block is read as
+     * part of a slightly longer read.
+     */
+    private fun readFresh(lba: Long, buffer: ByteArray, offset: Int, count: Int, fua: Boolean) {
+        val tracker = shapes
+        if (tracker == null || !tracker.isStale(lba, count)) {
+            transferOnce(lba, buffer, offset, count * blockSize, dirIn = true, fua = fua)
+            tracker?.read(lba, count)
+            return
+        }
+        if (count > 1) {
+            // Split points from the middle outwards until both halves are fresh.
+            val candidates = (1 until count).sortedBy { kotlin.math.abs(it - count / 2) }
+            val split = candidates.firstOrNull { !tracker.isStale(lba, it) && !tracker.isStale(lba + it, count - it) }
+            if (split != null) {
+                readFresh(lba, buffer, offset, split, fua)
+                readFresh(lba + split, buffer, offset + split * blockSize, count - split, fua)
+                return
+            }
+        }
+        // One block (or no fresh split): a longer read around it, copied out.
+        for (extra in 1..8) {
+            for (start in listOf(lba, lba - extra)) {
+                val n = count + extra
+                if (start < 0 || start + n > blockCount || tracker.isStale(start, n)) continue
+                val wide = ByteArray(n * blockSize)
+                transferOnce(start, wide, 0, wide.size, dirIn = true, fua = fua)
+                tracker.read(start, n)
+                System.arraycopy(wide, ((lba - start) * blockSize).toInt(), buffer, offset, count * blockSize)
+                return
+            }
+        }
+        throw IOException("no fresh read shape for block $lba+$count")
     }
 
     /** One READ/WRITE command; both are idempotent, so a transport error is retried after reset. */
