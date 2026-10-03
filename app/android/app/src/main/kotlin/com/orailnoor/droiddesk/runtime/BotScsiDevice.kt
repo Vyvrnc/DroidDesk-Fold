@@ -72,6 +72,8 @@ class BotScsiDevice(
         const val CHUNK = 64 * 1024
         /** Bytes per READ/WRITE command; smaller commands recover faster. */
         const val MAX_COMMAND_BYTES = 256 * 1024
+        /** Blocks a stale read may be widened by to get a fresh shape (see ReadShapes). */
+        const val MAX_COVER_EXTRA = 512
         /** Transport-level retries (after reset recovery) per command. */
         const val TRANSPORT_RETRIES = 3
         const val SENSE_LENGTH = 18
@@ -216,11 +218,14 @@ class BotScsiDevice(
                 return
             }
         }
-        // One block (or no fresh split): a longer read around it, copied out.
-        for (extra in 1..8) {
-            for (start in listOf(lba, lba - extra)) {
+        // One block (or no fresh split): a longer read around it, copied out. Hot blocks
+        // (FAT, folders, the boot sector) are written again and again and every write makes
+        // all shapes read over them stale, so the search space has to be large.
+        for (extra in 1..MAX_COVER_EXTRA) {
+            for (back in 0..extra) {
+                val start = lba - back
                 val n = count + extra
-                if (start < 0 || start + n > blockCount || tracker.isStale(start, n)) continue
+                if (start < 0 || start + n > blockCount || n * blockSize > MAX_COMMAND_BYTES || tracker.isStale(start, n)) continue
                 val wide = ByteArray(n * blockSize)
                 transferOnce(start, wide, 0, wide.size, dirIn = true, fua = fua)
                 tracker.read(start, n)
