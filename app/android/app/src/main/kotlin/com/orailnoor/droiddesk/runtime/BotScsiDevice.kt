@@ -49,6 +49,15 @@ class BotScsiDevice(
         @JvmStatic
         external fun nativeReset(fd: Int): Int
 
+        /** USBDEVFS_BULK: transferred bytes, or -errno (EPIPE = stall, unlike bulkTransfer's -1). */
+        @JvmStatic
+        external fun nativeBulk(fd: Int, endpoint: Int, buffer: ByteArray, offset: Int, length: Int, timeout: Int): Int
+
+        const val EPIPE = 32
+        const val EIO = 5
+        /** Upper bound for reading leftover data where a CSW was expected. */
+        const val DRAIN_DEADLINE_MS = 3_000L
+
         const val CBW_SIGNATURE = 0x43425355
         const val CSW_SIGNATURE = 0x53425355
         const val TIMEOUT_MS = 10_000
@@ -204,9 +213,10 @@ class BotScsiDevice(
                 }
                 // Behind the DeX dock's hub the reader sometimes stops answering on
                 // bulk OUT altogether; neither clearing halts nor the Bulk-Only reset
-                // brings it back. From the second failure on, reset the port, as
-                // Linux usb-storage does.
-                if (transportErrors >= 2) portReset() else Thread.sleep(200)
+                // brings it back. Reset the port only before the last attempt, as
+                // Linux usb-storage does: a reset disturbs the hub and the other
+                // devices on it, and the resynchronization above fixes most errors.
+                if (transportErrors >= TRANSPORT_RETRIES) portReset() else Thread.sleep(200)
             }
         }
     }
@@ -216,9 +226,10 @@ class BotScsiDevice(
      * until the unit is ready. The device keeps its address and its medium.
      */
     private fun portReset() {
-        if (!nativeAvailable) return Thread.sleep(200)
+        if (!nativeAvailable) throw RecoveryFailed("port reset unavailable")
         val result = nativeReset(connection.fileDescriptor)
         android.util.Log.w("BotScsiDevice", "Port reset of the USB device: $result")
+        if (result != 0) throw RecoveryFailed("port reset failed (errno ${-result})")
         Thread.sleep(500)
         if (!connection.claimInterface(iface, true)) throw IOException("could not claim the interface after a port reset")
         startup { command(ByteArray(6), null, 0, 0, dirIn = false) }
@@ -226,6 +237,10 @@ class BotScsiDevice(
 
     /** A USB-level failure (bad CSW, phase error, incomplete data) that a retry may fix. */
     private class TransportError(message: String) : IOException(message)
+
+    /** Recovery itself failed: no further command may be sent; the device needs replugging. */
+    class RecoveryFailed(message: String) :
+        IOException("$message — the USB device does not recover; eject it and plug it in again")
 
     /** A command whose data length may be shorter than requested (INQUIRY, capacity). */
     private fun dataCommand(cdb: ByteArray, data: ByteArray, length: Int, dirIn: Boolean, minimum: Int): Int {
@@ -265,58 +280,104 @@ class BotScsiDevice(
             put(if (dirIn) 0x80.toByte() else 0); put(lun.toByte()); put(cdb.size.toByte()); put(cdb)
         }.array()
         val sentAt = android.os.SystemClock.elapsedRealtime()
-        val sent = connection.bulkTransfer(epOut, cbw, 31, TIMEOUT_MS)
+        val sent = bulk(epOut, cbw, 0, 31, TIMEOUT_MS)
         if (sent != 31) {
             val took = android.os.SystemClock.elapsedRealtime() - sentAt
-            // The OUT pipe stalled or timed out: clear both halts (host and device
-            // side) before the class reset, so the next CBW starts clean.
-            clearHalt(epOut)
-            resetRecovery()
-            throw TransportError("could not send the SCSI command (bulk OUT returned $sent after $took ms)")
+            recover()
+            throw TransportError("could not send the SCSI command (bulk OUT ${describe(sent)} after $took ms)")
         }
         var done = 0
         if (length > 0 && data != null) {
             val ep = if (dirIn) epIn else epOut
             while (done < length) {
                 val want = minOf(CHUNK, length - done)
-                val n = connection.bulkTransfer(ep, data, offset + done, want, timeout)
+                val n = bulk(ep, data, offset + done, want, timeout)
                 if (n < 0) {
-                    // Usually a stall; the CSW still follows once the halt is cleared.
-                    clearHalt(ep)
-                    break
+                    android.util.Log.w("BotScsiDevice", "data phase: bulk ${if (dirIn) "IN" else "OUT"} ${describe(n)} " +
+                        "at $done of $length bytes (tag $currentTag)")
+                    if (n == -EPIPE) {
+                        // A stall: the CSW follows once the halt is cleared (BOT 6.7.2, 6.7.3).
+                        if (!clearHalt(ep)) throw RecoveryFailed("clearing the endpoint halt failed")
+                        break
+                    }
+                    // Timeout, protocol error, disconnect: the device is somewhere inside
+                    // the data phase. Clearing a halt that is not there loses the step;
+                    // Bulk-Only reset recovery instead, then retry the command.
+                    recover()
+                    throw TransportError("data phase ${describe(n)} ($done of $length bytes)")
                 }
                 done += n
-                // Only a short packet (not a multiple of the packet size, or a
-                // zero-length one) ends the data phase. A request that simply
-                // returned fewer bytes is continued; stopping there read the rest
-                // of the data as the CSW ("invalid command status").
-                if (n == 0 || n % ep.maxPacketSize != 0) break
+                if (n < want) {
+                    if (!dirIn) {
+                        // The device took less than offered without stalling: not a BOT state.
+                        recover()
+                        throw TransportError("bulk OUT took $n of $want bytes")
+                    }
+                    // A short or zero-length packet ends the data phase (BOT 6.7.2). Judged
+                    // per transfer: a ZLP after full packets leaves n packet aligned.
+                    break
+                }
             }
         }
         // Room for a whole packet: anything longer than 13 bytes here is a
         // protocol error, not a buffer overflow.
         val csw = ByteArray(maxOf(13, epIn.maxPacketSize))
-        var got = connection.bulkTransfer(epIn, csw, csw.size, timeout)
-        if (got < 0) {
-            clearHalt(epIn)
-            got = connection.bulkTransfer(epIn, csw, csw.size, timeout)
+        var got = bulk(epIn, csw, 0, csw.size, timeout)
+        if (got == -EPIPE) {
+            if (!clearHalt(epIn)) throw RecoveryFailed("clearing the endpoint halt failed")
+            got = bulk(epIn, csw, 0, csw.size, timeout)
         }
-        val c = ByteBuffer.wrap(csw).order(ByteOrder.LITTLE_ENDIAN)
-        val signature = c.int
-        val cswTag = c.int
+        var c = ByteBuffer.wrap(csw).order(ByteOrder.LITTLE_ENDIAN)
+        var signature = c.int
+        var cswTag = c.int
+        if (dirIn && got == csw.size && signature != CSW_SIGNATURE) {
+            // Data where the CSW should be: the data phase ended early on our side. Read
+            // the rest (bounded in bytes and time) until the CSW with this command's tag
+            // arrives; it then goes through the normal status check below, and the short
+            // transfer makes the caller retry the command without a reset.
+            android.util.Log.w("BotScsiDevice", "data instead of CSW after $done of $length bytes (tag $currentTag), draining")
+            var budget = length.toLong() - done + csw.size
+            val deadline = android.os.SystemClock.elapsedRealtime() + DRAIN_DEADLINE_MS
+            while (budget > 0 && got == csw.size && !(signature == CSW_SIGNATURE && cswTag == currentTag)) {
+                val left = deadline - android.os.SystemClock.elapsedRealtime()
+                if (left <= 0) break
+                budget -= got
+                got = bulk(epIn, csw, 0, csw.size, minOf(timeout.toLong(), left).toInt())
+                if (got < 0) break
+                c = ByteBuffer.wrap(csw).order(ByteOrder.LITTLE_ENDIAN)
+                signature = c.int
+                cswTag = c.int
+            }
+        }
         if (got != 13 || signature != CSW_SIGNATURE || cswTag != currentTag) {
-            resetRecovery()
+            recover()
             throw TransportError(
-                "invalid command status (%d bytes, signature %08x, tag %d/%d)".format(got, signature, cswTag, currentTag),
+                "invalid command status (%s, signature %08x, tag %d/%d)".format(describe(got), signature, cswTag, currentTag),
             )
         }
         val residue = c.int.toLong() and 0xFFFFFFFFL
         val status = csw[12].toInt() and 0xFF
         if (status >= 2 || residue > length) {
-            resetRecovery()
+            recover()
             return Result(2, done, residue)
         }
         return Result(status, done, residue)
+    }
+
+    private fun bulk(ep: UsbEndpoint, buffer: ByteArray, offset: Int, length: Int, timeout: Int): Int =
+        if (nativeAvailable) {
+            nativeBulk(connection.fileDescriptor, ep.address, buffer, offset, length, timeout)
+        } else {
+            connection.bulkTransfer(ep, buffer, offset, length, timeout).let { if (it < 0) -EIO else it }
+        }
+
+    private fun describe(result: Int): String = when {
+        result >= 0 -> "$result bytes"
+        result == -EPIPE -> "stall"
+        result == -110 -> "timeout"
+        result == -19 -> "device gone"
+        result == -71 -> "protocol error"
+        else -> "errno ${-result}"
     }
 
     /** REQUEST SENSE with exactly 18 bytes; longer sense data is cut by the device. */
@@ -338,15 +399,17 @@ class BotScsiDevice(
      * "could not send the SCSI command" that no retry fixed). USBDEVFS_CLEAR_HALT
      * does both, like the kernel's usb_clear_halt.
      */
-    private fun clearHalt(ep: UsbEndpoint) {
-        if (nativeAvailable && nativeClearHalt(connection.fileDescriptor, ep.address) == 0) return
-        connection.controlTransfer(0x02, 0x01, 0, ep.address, null, 0, TIMEOUT_MS)
+    private fun clearHalt(ep: UsbEndpoint): Boolean =
+        nativeAvailable && nativeClearHalt(connection.fileDescriptor, ep.address) == 0
+
+    /** Bulk-Only Mass Storage Reset, then clear both halts (BOT 5.3.4); false if any step failed. */
+    private fun resetRecovery(): Boolean {
+        if (connection.controlTransfer(0x21, 0xFF, 0, iface.id, null, 0, TIMEOUT_MS) < 0) return false
+        return clearHalt(epIn) && clearHalt(epOut)
     }
 
-    /** Bulk-Only Mass Storage Reset, then clear both halts (BOT 5.3.4). */
-    private fun resetRecovery() {
-        connection.controlTransfer(0x21, 0xFF, 0, iface.id, null, 0, TIMEOUT_MS)
-        clearHalt(epIn)
-        clearHalt(epOut)
+    /** Reset recovery that must work: otherwise no further command goes to the device. */
+    private fun recover() {
+        if (!resetRecovery()) throw RecoveryFailed("Bulk-Only reset recovery failed")
     }
 }

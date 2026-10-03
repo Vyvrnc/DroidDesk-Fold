@@ -25,3 +25,26 @@ Java_com_orailnoor_droiddesk_runtime_BotScsiDevice_nativeReset(JNIEnv *env, jcla
     (void) cls;
     return ioctl(fd, USBDEVFS_RESET, 0) < 0 ? -errno : 0;
 }
+
+// USBDEVFS_BULK with the error kept: Android's bulkTransfer returns -1 for a stall,
+// a timeout and a disconnect alike, but Bulk-Only recovery differs (a stall: clear the
+// halt and read the CSW; anything else: reset recovery). Returns bytes or -errno.
+JNIEXPORT jint JNICALL
+Java_com_orailnoor_droiddesk_runtime_BotScsiDevice_nativeBulk(JNIEnv *env, jclass cls, jint fd, jint endpoint,
+                                                             jbyteArray buffer, jint offset, jint length, jint timeout) {
+    (void) cls;
+    if (offset < 0 || length < 0 || offset + length > (*env)->GetArrayLength(env, buffer)) return -EINVAL;
+    jbyte *data = (*env)->GetByteArrayElements(env, buffer, NULL);
+    if (!data) return -ENOMEM;
+    struct usbdevfs_bulktransfer bulk = {
+        .ep = (unsigned int) endpoint,
+        .len = (unsigned int) length,
+        .timeout = (unsigned int) timeout,
+        .data = data + offset,
+    };
+    int n = ioctl(fd, USBDEVFS_BULK, &bulk);
+    int result = n < 0 ? -errno : n;
+    // Copy back only what an IN transfer filled.
+    (*env)->ReleaseByteArrayElements(env, buffer, data, (endpoint & 0x80) ? 0 : JNI_ABORT);
+    return result;
+}
