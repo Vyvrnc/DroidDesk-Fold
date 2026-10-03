@@ -520,9 +520,11 @@ def run_tool(args, env, show=True, check=True, stdin=None):
     finally:
         CHILDREN.remove(child)
     result = subprocess.CompletedProcess(args, child.returncode, stdout, stderr)
+    if os.environ.get("DROIDDESK_BLK_DEBUG"):
+        sys.stderr.write(result.stderr)
     if show:
         for line in (result.stdout + result.stderr).splitlines():
-            if line.strip():
+            if line.strip() and "is not a block device" not in line and not line.startswith("droiddesk-blk[debug]"):
                 say(line.strip())
     # A deferred write can fail after the tool already reported success.
     shim_errors = [line for line in result.stderr.splitlines() if line.startswith("droiddesk-blk: error:")]
@@ -992,6 +994,22 @@ def files_for(dev, lun, number):
     return (FatFiles if part["fs"].startswith("fat") else ExtFiles)(dev, lun, part)
 
 
+RENAME_DIRS = []
+
+
+def rename_link(source, name):
+    """The source under another name, for tools that take the name from the file: a symlink
+    in a private temporary folder (removed at exit)."""
+    if os.path.basename(source) == name:
+        return source
+    import tempfile
+    folder = tempfile.mkdtemp(prefix="droiddesk-usb-")
+    RENAME_DIRS.append(folder)
+    link = os.path.join(folder, name)
+    os.symlink(os.path.abspath(source), link)
+    return link
+
+
 def files_command(command, args, lun, number, raw):
     device = next((a for a in args if a.startswith("/dev/bus/usb/")), None)
     args = [a for a in args if a != device]
@@ -1017,10 +1035,29 @@ def files_command(command, args, lun, number, raw):
                     if not os.path.exists(source):
                         sys.exit(f"droiddesk-usb: {source} neexistuje")
                 target = usb_path(dest)
-                if target != "/":
+                parent, name = target.rsplit("/", 1)
+                parent = parent or "/"
+                existing = target == "/" or any(n == name for _, _, n in files.ls(parent, missing_ok=True))
+                if existing and not files.is_dir(target):
+                    if len(sources) == 1 and os.path.isfile(sources[0]):
+                        # Replace the file: upload under its name into the parent folder.
+                        target, sources = parent, [rename_link(sources[0], name)]
+                    else:
+                        sys.exit(f"droiddesk-usb: {target} je soubor, ne složka")
+                elif not existing and len(sources) == 1:
+                    # Like cp: a missing target is the new name of the one source.
+                    if parent != "/":
+                        files.mkdir(parent)
+                    if os.path.isdir(sources[0]):
+                        files.mkdir(target)
+                        sources = [os.path.join(sources[0], c) for c in sorted(os.listdir(sources[0]))]
+                    else:
+                        target, sources = parent, [rename_link(sources[0], name)]
+                elif target != "/":
                     files.mkdir(target)
                 step(10, f"Kopíruji na USB do {target}…")
-                files.upload(sources, target)
+                if sources:
+                    files.upload(sources, target)
             elif all(s.startswith("usb:") for s in sources) and not dest.startswith("usb:"):
                 for source in sources:
                     step(10, f"Kopíruji z USB {usb_path(source)}…")
@@ -1036,6 +1073,10 @@ def files_command(command, args, lun, number, raw):
                 files.mkdir(usb_path(path))
     finally:
         files.close()
+        for folder in RENAME_DIRS:
+            for entry in os.listdir(folder):
+                os.unlink(os.path.join(folder, entry))
+            os.rmdir(folder)
     return 0
 
 

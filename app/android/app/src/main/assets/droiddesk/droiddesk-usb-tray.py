@@ -20,7 +20,7 @@ try:
     import gi
 
     gi.require_version("Gtk", "3.0")
-    from gi.repository import GLib, Gtk
+    from gi.repository import Gdk, GLib, Gtk
 except (ImportError, ValueError, AttributeError) as error:
     # Installs from before fold.16 lack pygobject. at-spi2 leaves gi/overrides/ behind,
     # so "import gi" can succeed as an empty namespace package (AttributeError).
@@ -615,9 +615,25 @@ class Tray:
         dialog.destroy()
         if answer != Gtk.ResponseType.OK:
             return
-        # Show what would be lost: filesystem, label and the top folder.
+        # Show what would be lost: filesystem, label and the top folder. Reading it takes a
+        # few seconds on a slow stick: say so, and keep the window responsive meanwhile.
+        self.busy = True
+        self.update_buttons()
+        self.status.set_text("Zjišťuji, co je na disku…")
+        self.window.get_window().set_cursor(Gdk.Cursor.new_from_name(self.window.get_display(), "wait"))
+
+        def work():
+            result = client_lines("ls", row[self.NAME], "--raw", "usb:/")
+            GLib.idle_add(self.format_confirm, row, kind, name, result)
+        threading.Thread(target=work, daemon=True).start()
+
+    def format_confirm(self, row, kind, name, result):
+        self.window.get_window().set_cursor(None)
+        self.busy = False
+        self.status.set_text("")
+        self.update_buttons()
+        code, lines, _ = result
         now = f"Teď je na disku: {row[self.FS]}" + (f" „{row[self.FS_LABEL]}“" if row[self.FS_LABEL] else "")
-        code, lines, _ = client_lines("ls", row[self.NAME], "--raw", "usb:/")
         if code == 0:
             names = [line.split("\t", 2)[2] for line in lines if line.count("\t") >= 2]
             names = [n for n in names if n != "lost+found"]
@@ -629,6 +645,7 @@ class Tray:
                    f"{usb.FS_NAMES.get(kind, kind)}.", "Naformátovat"):
             args = ["format", row[self.NAME], kind, "--yes", "--yad"] + (["--label", name] if name else [])
             self.operation("Formátování", tuple(args), row[self.NAME])
+        return False
 
 
 def serve(tray, server):
