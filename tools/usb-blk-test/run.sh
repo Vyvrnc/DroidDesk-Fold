@@ -10,7 +10,7 @@ gcc -shared -fPIC -O2 -Wall -o /tmp/libdroiddesk_blk.so /src/cpp/blk_shim.c -ldl
 P=/tmp/prefix
 rm -rf "$P"; mkdir -p "$P/bin" "$P/lib"
 cp /tmp/libdroiddesk_blk.so "$P/lib/"
-for t in mkfs.fat mkfs.exfat mkfs.ext4 mkntfs debugfs mdir mcopy mdel mdeltree mmd mrd; do ln -s "$(command -v $t)" "$P/bin/$t"; done
+for t in mkfs.fat mkfs.exfat mkfs.ext4 mkntfs debugfs mdir mcopy mdel mdeltree mmd mrd mmove mshowfat; do ln -s "$(command -v $t)" "$P/bin/$t"; done
 ln -s "$(command -v python3)" "$P/bin/python3"
 E=/src/cpp/exfat
 gcc -shared -fPIC -O2 -w -I$E/libexfat -DPACKAGE='"droiddesk-exfat"' -DVERSION='"1.4.0"' -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE     -o "$P/lib/libdroiddesk_exfat.so" $E/exfat_tool.c $E/libexfat/*.c || echo "FAIL: exfat build"

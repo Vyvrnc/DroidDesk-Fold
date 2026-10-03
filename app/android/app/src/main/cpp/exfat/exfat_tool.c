@@ -17,6 +17,8 @@
  *   mkdir PATH        create a folder (fine if it is already there)
  *   rm PATH           delete a file
  *   rmdir PATH        delete an empty folder
+ *   mv PATH NEWPATH   rename/move a file or folder; an existing NEWPATH is replaced like
+ *                     rename(2) does (a file by a file, an empty folder by a folder)
  * Errors: "E\t<command>\t<message>" on stdout; the batch goes on, the exit code is 1.
  * Progress: "P\t<bytes>" after every chunk that put/get moved.
  */
@@ -266,9 +268,9 @@ int droiddesk_exfat_main(int argc, char **argv) {
         char *second = strtok(NULL, "\t");
         char *extra = strtok(NULL, "\t");
         if (!command || !first) continue;
-        /* put and get take two paths, everything else one: a tab inside a name must not
+        /* put, get and mv take two paths, everything else one: a tab inside a name must not
          * shift the fields onto another file. */
-        int two = strcmp(command, "put") == 0 || strcmp(command, "get") == 0;
+        int two = strcmp(command, "put") == 0 || strcmp(command, "get") == 0 || strcmp(command, "mv") == 0;
         if (extra || (two != (second != NULL))) {
             failures++;
             printf("E\t%s\twrong number of fields\n", command);
@@ -283,6 +285,12 @@ int droiddesk_exfat_main(int argc, char **argv) {
         else if (strcmp(command, "mkdir") == 0 && !ro) make_dir(first);
         else if (strcmp(command, "rm") == 0 && !ro) remove_path(first, 0);
         else if (strcmp(command, "rmdir") == 0 && !ro) remove_path(first, 1);
+        else if (strcmp(command, "mv") == 0 && second && !ro) {
+            /* exfat_rename: replaces an existing target (and frees its clusters), refuses a
+             * folder into itself; a change of case only is the same node. */
+            int rc = exfat_rename(&ef, first, second);
+            if (rc != 0) fail("mv", first, rc);
+        }
         else {
             failures++;
             printf("E\t%s\tunknown command or read-only\n", command);

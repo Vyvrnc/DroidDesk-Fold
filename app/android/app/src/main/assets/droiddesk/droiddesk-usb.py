@@ -19,6 +19,8 @@ after asking the user. This client talks to UsbBridge in the app.
   droiddesk-usb cp FILE... usb:/FOLDER                  copy to the disk (folders recursively)
   droiddesk-usb cp usb:/PATH... TARGET                  copy from the disk
   droiddesk-usb rm [-r] usb:/PATH...  |  mkdir usb:/PATH...
+  droiddesk-usb mv usb:/PATH usb:/NEWPATH               rename/move (into NEWPATH when it is a folder;
+                                                        an existing file NEWPATH is replaced)
   --part N (partition from "info"), --raw (tab separated output)
   --yad                                                 progress lines for yad --progress
   droiddesk-usb exec DEVICE -- COMMAND...               raw usbfs fd for libusb
@@ -29,6 +31,7 @@ exactly one mass storage device is attached. After a read or flash the device
 stays with Linux (no unmount/remount between operations) until "eject". --lun picks the slot of a
 multi-slot card reader when more than one card is inserted.
 """
+import contextlib
 import ctypes
 import fcntl
 import os
@@ -86,7 +89,8 @@ DEVICE_LOCKS = {}
 # disk's lock ($PREFIX/tmp/droiddesk-usb_dev_bus_usb_…status), written at most once a second.
 ACTIVITY = {"path": None, "op": "", "percent": None, "text": "", "last": 0.0, "started": 0.0, "speed": None}
 OPERATION_NAMES = {"check": "kontrola", "flash": "zápis obrazu", "read": "uložení obrazu", "format": "formátování",
-                   "cp": "kopírování", "rm": "mazání", "mkdir": "nová složka", "ls": "výpis", "info": "zjišťování",
+                   "cp": "kopírování", "rm": "mazání", "mkdir": "nová složka", "mv": "přesun", "ls": "výpis",
+                   "info": "zjišťování",
                    "attach": "připojení", "eject": "vysunutí"}
 
 
@@ -146,6 +150,29 @@ def lock_device(dev):
         ACTIVITY["path"] = os.path.join(folder, "droiddesk-usb" + dev["name"].replace("/", "_") + ".status")
         ACTIVITY["started"] = time.monotonic()
         activity(text="začíná", force=True)
+
+
+def lock_path(dev):
+    return os.path.join(status_dir(), "droiddesk-usb" + dev["name"].replace("/", "_") + ".lock")
+
+
+def status_path(dev):
+    """The activity file of a disk (see activity()); the WebDAV server watches it."""
+    return os.path.join(status_dir(), "droiddesk-usb" + dev["name"].replace("/", "_") + ".status")
+
+
+@contextlib.contextmanager
+def device_locked(dev):
+    """The disk's lock for one operation only (lock_device holds it until the process ends):
+    for droiddesk-usb-dav, so the CLI and the window get the disk between its requests.
+    Not reentrant: do not nest it for one disk in one process."""
+    os.makedirs(status_dir(), exist_ok=True)
+    with open(lock_path(dev), "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def pick(wanted):
@@ -307,7 +334,8 @@ EXT_OWNER = 1000
 PACKAGES = {"mkfs.fat": "dosfstools", "mkfs.exfat": "exfatprogs", "mkfs.ext4": "e2fsprogs",
             "mkntfs": "ntfs-3g",
             "debugfs": "e2fsprogs", "mdir": "mtools", "mcopy": "mtools", "mdel": "mtools",
-            "mdeltree": "mtools", "mmd": "mtools", "mrd": "mtools"}
+            "mdeltree": "mtools", "mmd": "mtools", "mrd": "mtools", "mmove": "mtools",
+            "mshowfat": "mtools"}
 FS_NAMES = {"fat12": "FAT12", "fat16": "FAT16", "fat32": "FAT32", "exfat": "exFAT", "ntfs": "NTFS",
             "ext2": "ext2", "ext3": "ext3", "ext4": "ext4", "iso9660": "ISO 9660"}
 
@@ -818,11 +846,79 @@ def usb_path(path):
     return safe(path)
 
 
+def split_path(path):
+    """"/a/b/c" -> ("/a/b", "c"); "/c" -> ("/", "c")."""
+    parent, name = path.rstrip("/").rsplit("/", 1)
+    return parent or "/", name
+
+
+def check_move(src, dst):
+    """False when there is nothing to do; exits for moves rename(2) refuses up front."""
+    if src == "/" or dst == "/":
+        sys.exit("droiddesk-usb: kořen disku nejde přesunout ani nahradit")
+    if dst.startswith(src.rstrip("/") + "/"):
+        sys.exit(f"droiddesk-usb: složku {src} nejde přesunout do ní samotné")
+    return src != dst
+
+
+def entry_of(files, path, fold_case=False):
+    """(is_dir, size, name) of path from its folder's listing, or None."""
+    if path == "/":
+        return (True, 0, "")
+    parent, name = split_path(path)
+    for entry in files.ls(parent, missing_ok=True):
+        if entry[2] == name or (fold_case and entry[2].lower() == name.lower()):
+            return entry
+    return None
+
+
+def move_by_copy(files, src, dst):
+    """Move as download + upload + delete (folders debugfs cannot relink)."""
+    import shutil
+    import tempfile
+    folder = tempfile.mkdtemp(prefix="droiddesk-usb-mv-")
+    try:
+        files.download(src, folder)
+        local = os.path.join(folder, split_path(src)[1])
+        parent, name = split_path(dst)
+        if name != split_path(src)[1]:
+            os.makedirs(os.path.join(folder, "to"))
+            os.rename(local, os.path.join(folder, "to", name))
+            local = os.path.join(folder, "to", name)
+        if not os.path.exists(local):
+            sys.exit(f"droiddesk-usb: {src} se nepodařilo zkopírovat")
+        files.upload([local], parent)
+        files.remove(src, True)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+SHORT_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&'()-@^_`{}~")
+
+
+def short_name(name):
+    """(11 bytes, lower-case flags) when mtools stores name as a bare 8.3 entry (no long name):
+    base and extension valid and each all upper or all lower case. Else None."""
+    base, dot, ext = name.rpartition(".") if "." in name else (name, "", "")
+    if not base or "." in base or len(base) > 8 or len(ext) > 3 or (dot and not ext):
+        return None
+    flags = 0
+    for part, bit in ((base, 0x08), (ext, 0x10)):
+        if not set(part.upper()) <= SHORT_CHARS:
+            return None
+        if part != part.upper():
+            if part != part.lower():
+                return None
+            flags |= bit
+    return (base.upper().ljust(8) + ext.upper().ljust(3)).encode("ascii"), flags
+
+
 class FatFiles:
     """FAT through mtools; the drive letter u: is /dev/droiddesk-blk."""
 
     def __init__(self, dev, lun, part):
         ensure_tools("mdir", "mcopy", "mdel", "mdeltree", "mmd", "mrd")
+        self.dev, self.lun, self.part = dev, lun, part
         self.env = tool_env(dev, lun, part)
         rc = os.path.join(os.environ.get("TMPDIR", "/tmp"), f"droiddesk-mtools-{os.getpid()}.rc")
         with open(rc, "w") as out:
@@ -900,6 +996,76 @@ class FatFiles:
             if missing:
                 run_tool(["mmd", f"u:{at}"], self.env)
 
+    def move(self, src, dst):
+        """rename(2): an existing file dst is replaced, an empty folder dst too. mmove also
+        moves folders to another folder (it fixes their ".." entry)."""
+        if not check_move(src, dst):
+            return
+        ensure_tools("mmove", "mshowfat")
+        source = entry_of(self, src, fold_case=True)
+        if source is None:
+            sys.exit(f"droiddesk-usb: {src} na disku není")
+        (src_parent, src_name), (dst_parent, dst_name) = split_path(src), split_path(dst)
+        if src_parent.lower() == dst_parent.lower() and src_name.lower() == dst_name.lower():
+            # Only the case changes: FAT sees one name, mmove would refuse the "clash".
+            temporary = f"{src_parent.rstrip('/')}/DDMV{os.getpid() % 10000:04d}.TMP"
+            run_tool(["mmove", f"u:{src}", f"u:{temporary}"], self.env, show=False)
+            run_tool(["mmove", f"u:{temporary}", f"u:{dst}"], self.env, show=False)
+            self._set_case(dst)
+            return
+        target = entry_of(self, dst, fold_case=True)
+        if target is not None:
+            if target[0] and not source[0]:
+                sys.exit(f"droiddesk-usb: {dst} je složka")
+            if not target[0] and source[0]:
+                sys.exit(f"droiddesk-usb: {dst} není složka")
+            if target[0] and self.ls(dst):
+                sys.exit(f"droiddesk-usb: složka {dst} není prázdná")
+            run_tool(["mrd" if target[0] else "mdel", f"u:{dst}"], self.env, show=False)
+        run_tool(["mmove", f"u:{src}", f"u:{dst}"], self.env, show=False)
+        self._set_case(dst)
+
+    def _set_case(self, path):
+        """mmove keeps the moved entry's lower-case flags (byte 12, Windows NT) instead of
+        setting them for the new name: "x.tmp" -> "notes.txt" came out as NOTES.TXT. For a
+        new name stored as a bare 8.3 entry, set the flags in the parent's directory."""
+        short = short_name(split_path(path)[1])
+        if short is None:
+            return
+        raw, flags = short
+        parent = split_path(path)[0]
+        out = run_tool(["mshowfat", f"u:{parent}"], self.env, show=False, check=False).stdout
+        clusters = []
+        for first, last in re.findall(r"<(\d+)(?:-(\d+))?>", out):
+            clusters += range(int(first), int(last or first) + 1)
+        with open_blk(self.dev, self.lun) as blk:
+            start = self.part["start"]
+            boot = blk.read_bytes(start, 512)
+            bps, spc = struct.unpack_from("<H", boot, 11)[0], boot[13]
+            reserved, fats, root_entries = struct.unpack_from("<H", boot, 14)[0], boot[16], struct.unpack_from("<H", boot, 17)[0]
+            fat_size = struct.unpack_from("<H", boot, 22)[0] or struct.unpack_from("<I", boot, 36)[0]
+            root_start = reserved + fats * fat_size
+            data_start = root_start + (root_entries * 32 + bps - 1) // bps
+            if parent == "/" and root_entries:  # FAT12/16: a fixed root folder
+                regions = [(start + root_start * bps, root_entries * 32)]
+            else:
+                regions = [(start + (data_start + (c - 2) * spc) * bps, spc * bps) for c in clusters if c >= 2]
+            for offset, length in regions:
+                if offset % blk.bs or length % blk.bs:
+                    return
+                data = bytearray(blk.read_bytes(offset, length))
+                for at in range(0, length, 32):
+                    if data[at] == 0:
+                        return
+                    if data[at] == 0xE5 or data[at + 11] == 0x0F or data[at:at + 11] != raw:
+                        continue
+                    if data[at + 12] & 0x18 != flags:
+                        data[at + 12] = (data[at + 12] & ~0x18) | flags
+                        sector = at // blk.bs * blk.bs
+                        blk.write((offset + sector) // blk.bs, bytes(data[sector:sector + blk.bs]))
+                        blk.flush()
+                    return
+
 
 class ExtFiles:
     """ext2/3/4 through debugfs (e2fsprogs)."""
@@ -907,6 +1073,7 @@ class ExtFiles:
     def __init__(self, dev, lun, part):
         ensure_tools("debugfs")
         self.env = tool_env(dev, lun, part)
+        self.env["DEBUGFS_PAGER"] = "__none__"
 
     def close(self):
         pass
@@ -1056,6 +1223,63 @@ class ExtFiles:
             if errors:
                 sys.exit("droiddesk-usb: " + "; ".join(errors[:3]))
 
+    def _stat(self, path):
+        """{"inode", "dir", "links", "indexed"} of path, or None."""
+        out, _ = self.debugfs([f'stat "{path}"'])
+        inode = re.search(r"Inode: (\d+)\s+Type: (\S+)", out)
+        if not inode:
+            return None
+        links = re.search(r"Links: (\d+)", out)
+        flags = re.search(r"Flags: 0x([0-9a-fA-F]+)", out)
+        return {"inode": int(inode.group(1)), "dir": inode.group(2) == "directory",
+                "links": int(links.group(1)) if links else 0,
+                "indexed": bool(flags and int(flags.group(1), 16) & 0x1000)}  # EXT2_INDEX_FL
+
+    def _run(self, commands):
+        _, errors = self.debugfs(commands, write=True)
+        if errors:
+            sys.exit("droiddesk-usb: " + "; ".join(errors[:3]))
+
+    def move(self, src, dst):
+        """rename(2) with debugfs: "ln" + "unlink" only touch directory entries, so the link
+        count stays right. A folder moved to another folder also gets its ".." entry relinked
+        and both parents' link counts fixed; a folder with an htree index (big, written by
+        Linux) is copied and deleted instead, as its first block is the index root."""
+        if not check_move(src, dst):
+            return
+        source = self._stat(src)
+        if source is None:
+            sys.exit(f"droiddesk-usb: {src} na disku není")
+        target = self._stat(dst)
+        if target is not None:
+            if target["inode"] == source["inode"]:
+                return  # another name of the same file: rename(2) does nothing
+            if target["dir"] and not source["dir"]:
+                sys.exit(f"droiddesk-usb: {dst} je složka")
+            if not target["dir"] and source["dir"]:
+                sys.exit(f"droiddesk-usb: {dst} není složka")
+            if target["dir"] and self.ls(dst):
+                sys.exit(f"droiddesk-usb: složka {dst} není prázdná")
+            self._run([f'rmdir "{dst}"' if target["dir"] else f'rm "{dst}"'])
+        (src_parent, _), (dst_parent, _) = split_path(src), split_path(dst)
+        if self._stat(dst_parent) is None:
+            sys.exit(f"droiddesk-usb: složka {dst_parent} na disku není")
+        if not source["dir"] or src_parent == dst_parent:
+            self._run([f'ln "{src}" "{dst}"', f'unlink "{src}"'])
+            return
+        if source["indexed"]:
+            move_by_copy(self, src, dst)
+            return
+        old, new = self._stat(src_parent), self._stat(dst_parent)
+        commands = [f'ln "{src}" "{dst}"', f'unlink "{src}"',
+                    f'unlink "{dst}/.."', f'ln "<{new["inode"]}>" "{dst}/.."']
+        # links_count 1 on a folder means "too many to count" (dir_nlink): leave it so.
+        if old["links"] > 2:
+            commands.append(f'sif "<{old["inode"]}>" links_count {old["links"] - 1}')
+        if new["links"] > 1:
+            commands.append(f'sif "<{new["inode"]}>" links_count {new["links"] + 1}')
+        self._run(commands)
+
 
 class BatchFiles:
     """exFAT (libexfat) and NTFS (libntfs-3g) through DroidDesk's batch tools: one mount per
@@ -1201,6 +1425,14 @@ class BatchFiles:
         if errors:
             sys.exit("droiddesk-usb: " + "; ".join(errors[:3]))
 
+    def move(self, src, dst):
+        """rename(2) in the batch tool (exfat_rename / link + delete on NTFS)."""
+        if not check_move(src, dst):
+            return
+        _, errors = self.run([f"mv\t{src}\t{dst}"], write=True)
+        if errors:
+            sys.exit("droiddesk-usb: " + "; ".join(errors[:3]))
+
 
 def files_for(dev, lun, number):
     part = pick_part(dev, lun, number)
@@ -1296,6 +1528,19 @@ def files_command(command, args, lun, number, raw):
         elif command == "mkdir":
             for path in args:
                 files.mkdir(usb_path(path))
+        elif command == "mv":
+            if len(args) != 2 or not all(a.startswith("usb:") for a in args):
+                sys.exit("droiddesk-usb: mv usb:/CESTA usb:/NOVÁ_CESTA")
+            src, dst = usb_path(args[0]), usb_path(args[1])
+            if entry_of(files, src, fold_case=True) is None:
+                sys.exit(f"droiddesk-usb: {src} na disku není")
+            # Like mv: into an existing folder (unless that folder is the source itself,
+            # e.g. a change of case on FAT).
+            if dst != "/" and dst.lower() != src.lower() and files.is_dir(dst):
+                dst = f"{dst.rstrip('/')}/{split_path(src)[1]}"
+            elif dst == "/":
+                dst = "/" + split_path(src)[1]
+            files.move(src, dst)
     finally:
         files.close()
         for folder in RENAME_DIRS:
@@ -1543,7 +1788,7 @@ def main(argv):
         if len(kinds) != 1:
             sys.exit("droiddesk-usb: format [DEVICE] fat32|exfat|ntfs|ext4 [--label NÁZEV]")
         return format_disk(pick(device), lun, kinds[0], label or "", assume_yes)
-    if command in ("ls", "cp", "rm", "mkdir"):
+    if command in ("ls", "cp", "rm", "mkdir", "mv"):
         return files_command(command, args[1:], lun, part_number, raw)
     if command in ("flash", "read") and len(args) >= 2:
         path = os.path.abspath(args[1])

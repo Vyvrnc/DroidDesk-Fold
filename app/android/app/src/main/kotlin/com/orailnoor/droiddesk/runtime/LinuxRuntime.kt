@@ -686,6 +686,18 @@ class LinuxRuntime(private val context: Context) {
                         if (!tmp.renameTo(target)) error("rename to ${target.path} failed")
                     }
                 }
+                // WebDAV for Thunar (dav:// through gvfs), started per held disk by the tray.
+                val davServer = File(binDir, "droiddesk-usb-dav.py")
+                context.assets.open("droiddesk/droiddesk-usb-dav.py").use { input ->
+                    davServer.outputStream().use(input::copyTo)
+                }
+                File(binDir, "droiddesk-usb-dav").let { davCommand ->
+                    davCommand.writeText(
+                        "#!${File(binDir, "bash").absolutePath}\n" +
+                            "exec \"${File(binDir, "python3").absolutePath}\" \"${davServer.absolutePath}\" \"${'$'}@\"\n",
+                    )
+                    davCommand.setExecutable(true, false)
+                }
                 // "USB disky": icon in the dock's systray and a window (GTK 3 through pygobject).
                 val trayClient = File(binDir, "droiddesk-usb-tray.py")
                 context.assets.open("droiddesk/droiddesk-usb-tray.py").use { input ->

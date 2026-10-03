@@ -18,6 +18,8 @@
  *   mkdir PATH        create a folder (fine if it is already there)
  *   rm PATH           delete a file
  *   rmdir PATH        delete an empty folder
+ *   mv PATH NEWPATH   rename/move a file or folder; an existing NEWPATH is replaced like
+ *                     rename(2) does (a file by a file, an empty folder by a folder)
  * Errors: "E\t<command>\t<message>" on stdout; the batch goes on, the exit code is 1.
  * Progress: "P\t<bytes>" after every chunk that put/get moved.
  * A volume that cannot be mounted gives "E\tmount\t<message>" and exit code 1.
@@ -408,6 +410,133 @@ static void remove_path(const char *path, int want_dir) {
     if (rc) fail(command, path, rc);
 }
 
+/* Removes the name PATH; the inode goes with its last name (ntfs_delete). 0 or an errno. */
+static int unlink_name(const char *path) {
+    ntfs_inode *ni = lookup(path);
+    if (!ni) return err();
+    ntfschar *uname;
+    int ulen;
+    ntfs_inode *dir = open_parent(path, &uname, &ulen);
+    if (!dir) {
+        int rc = err();
+        ntfs_inode_close(ni);
+        return rc;
+    }
+    /* ntfs_delete() closes ni in any case. */
+    int rc = ntfs_delete(vol, path, ni, dir, uname, (u8)ulen) ? err() : 0;
+    free(uname);
+    if (ntfs_inode_close(dir) && !rc) rc = err();
+    return rc;
+}
+
+/* A further name NEWPATH for the inode at OLD (also for folders, as ntfs-3g's rename does). */
+static int link_name(const char *old, const char *newpath) {
+    ntfs_inode *ni = lookup(old);
+    if (!ni) return err();
+    ntfschar *uname = NULL;
+    int ulen, rc = 0;
+    ntfs_inode *dir = open_parent(newpath, &uname, &ulen);
+    if (!dir) rc = err();
+    else if (ntfs_forbidden_names(vol, uname, ulen, TRUE)) rc = EINVAL;
+    else if (ntfs_link(ni, dir, uname, (u8)ulen)) rc = err();
+    if (dir) {
+        free(uname);
+        if (ntfs_inode_close(dir) && !rc) rc = err();
+    }
+    if (ntfs_inode_close(ni) && !rc) rc = err();
+    return rc;
+}
+
+/*
+ * rename(2) on NTFS the way ntfs-3g's ntfs_fuse_rename() does it: a new name, then the old
+ * one removed. An existing target first gets a temporary name, so it comes back when a
+ * later step fails, and is deleted at the end.
+ */
+static void move(const char *old, const char *newpath) {
+    ntfs_inode *ni = lookup(old);
+    if (!ni) {
+        fail("mv", old, err());
+        return;
+    }
+    int src_dir = is_dir(ni);
+    u64 src_no = ni->mft_no;
+    ntfs_inode_close(ni);
+    if (src_no < FILE_first_user) {
+        fail("mv", old, EPERM);
+        return;
+    }
+    size_t n = strlen(old);
+    if (src_dir && strncmp(newpath, old, n) == 0 && newpath[n] == '/') {
+        fail("mv", newpath, EINVAL);  /* a folder into itself */
+        return;
+    }
+    ntfs_inode *target = lookup(newpath);
+    if (!target && errno == ENOENT) {
+        /* A name differing only in case is one name for Windows: replacing another file
+         * that way is refused, a change of case of this file is fine. */
+        ntfschar *uname;
+        int ulen;
+        ntfs_inode *dir = open_parent(newpath, &uname, &ulen);
+        if (!dir) {
+            fail("mv", newpath, err());
+            return;
+        }
+        NVolClearCaseSensitive(vol);
+        u64 mref = ntfs_inode_lookup_by_name(dir, uname, ulen);
+        NVolSetCaseSensitive(vol);
+        free(uname);
+        ntfs_inode_close(dir);
+        if (mref != (u64)-1 && MREF(mref) != src_no) {
+            fail("mv", newpath, EEXIST);
+            return;
+        }
+    } else if (!target) {
+        fail("mv", newpath, err());
+        return;
+    }
+    int rc = 0;
+    if (!target) {
+        rc = link_name(old, newpath);
+        if (!rc) {
+            rc = unlink_name(old);
+            if (rc) unlink_name(newpath);
+        }
+        if (rc) fail("mv", old, rc);
+        return;
+    }
+    int target_dir = is_dir(target);
+    u64 target_no = target->mft_no;
+    if (target_no == src_no) {
+        ntfs_inode_close(target);  /* the same file (POSIX: nothing to do) */
+        return;
+    }
+    if (target_no < FILE_first_user) rc = EPERM;
+    else if (target_dir && !src_dir) rc = EISDIR;
+    else if (!target_dir && src_dir) rc = ENOTDIR;
+    else if (target_dir && ntfs_check_empty_dir(target)) rc = err();
+    ntfs_inode_close(target);
+    if (rc) {
+        fail("mv", newpath, rc);
+        return;
+    }
+    char *tmp = malloc(strlen(newpath) + 40);
+    sprintf(tmp, "%s.droiddesk-mv-%llu", newpath, (unsigned long long)target_no);
+    rc = link_name(newpath, tmp);
+    if (!rc && (rc = unlink_name(newpath)) != 0) unlink_name(tmp);
+    if (!rc && (rc = link_name(old, newpath)) != 0) {
+        link_name(tmp, newpath);
+        unlink_name(tmp);
+    }
+    if (!rc && (rc = unlink_name(old)) != 0) {
+        unlink_name(newpath);
+        link_name(tmp, newpath);
+        unlink_name(tmp);
+    }
+    if (!rc) rc = unlink_name(tmp);  /* the replaced file is freed here */
+    free(tmp);
+    if (rc) fail("mv", old, rc);
+}
+
 static void mount_failed(const char *device, int rc) {
     failures++;
     if (rc == EPERM)
@@ -469,6 +598,7 @@ int droiddesk_ntfs_main(int argc, char **argv) {
         else if (strcmp(command, "mkdir") == 0 && !ro) make_dir(first);
         else if (strcmp(command, "rm") == 0 && !ro) remove_path(first, 0);
         else if (strcmp(command, "rmdir") == 0 && !ro) remove_path(first, 1);
+        else if (strcmp(command, "mv") == 0 && second && !ro) move(first, second);
         else {
             failures++;
             printf("E\t%s\tunknown command or read-only\n", command);

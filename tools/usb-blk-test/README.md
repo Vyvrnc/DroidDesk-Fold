@@ -12,3 +12,6 @@ from an image file, in Debian arm64:
 
     docker run ... debian:trixie bash /t/ntfs_test.sh     # NTFS tool in depth (dirty/hibernated volumes)
     docker run ... debian:trixie bash /t/concurrency.sh   # parallel commands, killed client, debug mode, dup/fork
+    docker run ... debian:trixie bash /t/dav.sh           # droiddesk-usb mv + droiddesk-usb-dav (WebDAV, curl) on
+                                                          # fat32/ext4/exfat/ntfs, fsck after each; GVFS=1 adds gio
+                                                          # (gvfs dav backend, as Thunar); ends with DAV_ALL_OK

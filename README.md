@@ -246,6 +246,8 @@ Commands of this fork's DroidDesk app (in its terminal):
 | `droiddesk-usb ls [usb:/PATH]` | Files on the disk (FAT, exFAT, NTFS, ext2/3/4) |
 | `droiddesk-usb cp FILE… usb:/FOLDER` / `cp usb:/PATH… TARGET` | Copy to / from the disk, folders recursively |
 | `droiddesk-usb rm [-r] usb:/PATH…`, `mkdir usb:/PATH…` | Delete, create folders on the disk |
+| `droiddesk-usb mv usb:/A usb:/B` | Rename or move on the disk (replaces a file like `mv`) |
+| `droiddesk-usb-dav DEVICE [--secret]` | WebDAV server for Thunar (`dav://localhost:PORT/…`); the USB disky window starts it for every disk held by Linux and adds a Thunar bookmark "USB – …" |
 | `droiddesk-usb-tray --window` | The "USB disky" window (also in the menu and as an icon in the dock) |
 | `droiddesk-usb exec DEVICE -- CMD…` | Experimental: give a libusb program the USB device (`DROIDDESK_USB_FD`) |
 

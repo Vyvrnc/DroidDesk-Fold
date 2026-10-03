@@ -48,6 +48,9 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)  # Gtk.StatusIcon
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLIENT = os.path.join(HERE, "droiddesk-usb.py")
+DAV = os.path.join(HERE, "droiddesk-usb-dav.py")
+BOOKMARKS = os.path.expanduser("~/.config/gtk-3.0/bookmarks")
+BOOKMARK_PREFIX = "USB – "
 INSTANCE = "\0droiddesk.usb-tray"
 ICON = "drive-removable-media"
 # DROIDDESK_USB_ORIGIN: operations started here notify through their progress window already.
@@ -457,6 +460,79 @@ class FilesWindow:
             self.go(self.path)
 
 
+class DavServers:
+    """WebDAV for Thunar: one droiddesk-usb-dav per disk held by Linux (under a random secret
+    path: any Android app can reach 127.0.0.1), with a Thunar bookmark "USB – <name>"."""
+
+    def __init__(self):
+        self.urls = {}       # device name -> dav:// URL
+        self.starting = set()
+        self.failed = set()  # no usable filesystem etc.: not retried until released
+        # Bookmarks of servers from an earlier session: running ones come back in sync().
+        self.set_bookmarks({})
+
+    def sync(self, found):
+        held = {d["name"]: d for d in found or [] if d["held"]}
+        for name, dev in held.items():
+            if name not in self.urls and name not in self.starting and name not in self.failed:
+                self.start(name, label_of(dev))
+        for name in list(self.urls):
+            if name not in held:
+                self.stop(name)
+        self.failed &= set(held)
+
+    def start(self, name, label):
+        self.starting.add(name)
+
+        def work():
+            try:
+                child = subprocess.Popen([sys.executable, DAV, name, "--secret"], stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE, text=True, env=ENV, start_new_session=True)
+                url = child.stdout.readline().strip()
+            except OSError:
+                url = ""
+            GLib.idle_add(self.started, name, label, url)
+        threading.Thread(target=work, daemon=True).start()
+
+    def started(self, name, label, url):
+        self.starting.discard(name)
+        if not url:
+            self.failed.add(name)
+            return False
+        self.urls[name] = (url, label)
+        self.set_bookmarks(self.urls)
+        return False
+
+    def stop(self, name):
+        self.urls.pop(name, None)
+        try:
+            subprocess.Popen([sys.executable, DAV, name, "--stop"], env=ENV, start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            pass
+        self.set_bookmarks(self.urls)
+
+    def url(self, name):
+        entry = self.urls.get(name)
+        return entry[0] if entry else None
+
+    @staticmethod
+    def set_bookmarks(urls):
+        """Thunar's side pane: our "USB – …" dav:// entries replaced by the running servers."""
+        try:
+            with open(BOOKMARKS, encoding="utf-8") as source:
+                lines = source.read().splitlines()
+        except OSError:
+            lines = []
+        keep = [line for line in lines
+                if not (line.startswith("dav://localhost:") and BOOKMARK_PREFIX in line)]
+        keep += [f"{url} {BOOKMARK_PREFIX}{label}" for url, label in urls.values()]
+        if keep != lines:
+            os.makedirs(os.path.dirname(BOOKMARKS), exist_ok=True)
+            with open(BOOKMARKS, "w", encoding="utf-8") as out:
+                out.write("\n".join(keep) + ("\n" if keep else ""))
+
+
 class Tray:
     # Columns of the device list.
     STATE, LABEL, CAPACITY, FS, FS_LABEL, ID, NAME, HELD = range(8)
@@ -466,6 +542,7 @@ class Tray:
         self.busy = False
         self.summaries = {}  # device name -> (capacity, filesystems, labels), held devices only
         self.activities = {}  # device name -> running operation from droiddesk-usb (status files)
+        self.dav = DavServers()
         GLib.timeout_add_seconds(2, self.poll_activity)
         self.icon = Gtk.StatusIcon.new_from_icon_name(ICON)
         self.icon.set_title("USB disky")
@@ -590,6 +667,7 @@ class Tray:
         for key, text, action in (("attach", "Připojit do Linuxu", self.attach),
                                   ("eject", "Vysunout", self.eject),
                                   ("files", "Soubory…", self.files),
+                                  ("thunar", "Thunar", self.thunar),
                                   ("flash", "Zapsat obraz…", self.flash),
                                   ("read", "Uložit obraz…", self.read),
                                   ("format", "Naformátovat…", self.format),
@@ -620,6 +698,8 @@ class Tray:
             held = sum(d["held"] for d in found)
         if not self.activities:
             self.icon.set_tooltip_text(f"USB disky — {held} připojeno do Linuxu" if held else "USB disky")
+        if found is not None:
+            self.dav.sync(found)
         if self.window is None:
             return False
         selected = self.selected()
@@ -729,7 +809,7 @@ class Tray:
                 button.set_sensitive(True)
             elif key == "attach":
                 button.set_sensitive(bool(row) and not row[self.HELD] and not self.busy)
-            elif key in ("eject", "files"):
+            elif key in ("eject", "files", "thunar"):
                 button.set_sensitive(bool(row) and row[self.HELD] and not self.busy)
             else:
                 button.set_sensitive(bool(row) and not self.busy)
@@ -768,6 +848,18 @@ class Tray:
     def eject(self):
         row = self.selected()
         self.in_background(("eject", row[self.NAME]), "Vysouvám…")
+
+    def thunar(self):
+        """The disk in Thunar through WebDAV (gvfs dav backend)."""
+        row = self.selected()
+        url = self.dav.url(row[self.NAME]) if row else None
+        if not url:
+            self.status.set_text("WebDAV pro tento disk neběží (systém souborů?). Soubory jdou přes Soubory….")
+            return
+        try:
+            subprocess.Popen(["thunar", url], start_new_session=True)
+        except OSError as error:
+            self.status.set_text(f"Thunar nejde spustit: {error}")
 
     def files(self):
         row = self.selected()
