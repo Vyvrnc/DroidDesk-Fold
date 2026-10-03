@@ -1772,6 +1772,10 @@ class LinuxRuntime(private val context: Context) {
         }
 
         env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=${tmpDir.absolutePath}/dbus-session"
+        // gvfs (dav:// in Thunar for USB disky, sftp://, …): GIO looks for its client module
+        // and gvfsd for its mount definitions only at the compile-time com.termux paths.
+        env["GIO_EXTRA_MODULES"] = "${prefixDir.absolutePath}/lib/gio/modules"
+        env["GVFS_MOUNTABLE_DIR"] = "${prefixDir.absolutePath}/share/gvfs/mounts"
 
         env["DPKG_ADMINDIR"] = "${prefixDir.absolutePath}/var/lib/dpkg"
         env["APT_CONFIG"] = "${prefixDir.absolutePath}/etc/apt/apt.conf.d/99-droiddesk-paths.conf"
@@ -2518,6 +2522,7 @@ class LinuxRuntime(private val context: Context) {
                   <listen>unix:path=${dbusSocket.absolutePath}</listen>
                   <auth>EXTERNAL</auth>
                   <servicedir>${File(prefixDir, "share/dbus-1/services").absolutePath}</servicedir>
+                  <servicedir>${File(homeDir, ".local/share/dbus-1/services").absolutePath}</servicedir>
                   <policy context="default">
                     <allow send_destination="*" eavesdrop="true"/>
                     <allow eavesdrop="true"/>
@@ -2526,6 +2531,16 @@ class LinuxRuntime(private val context: Context) {
                 </busconfig>
                 """.trimIndent() + "\n",
             )
+            // Termux's gvfs package ships no D-Bus service file, so gvfsd never started and
+            // gio fell back to local files ("volume doesn't implement mount").
+            val gvfsd = File(prefixDir, "libexec/gvfsd")
+            val userServices = File(homeDir, ".local/share/dbus-1/services").apply { mkdirs() }
+            val gvfsService = File(userServices, "org.gtk.vfs.Daemon.service")
+            if (gvfsd.exists()) {
+                gvfsService.writeText("[D-BUS Service]\nName=org.gtk.vfs.Daemon\nExec=${gvfsd.absolutePath}\n")
+            } else {
+                gvfsService.delete()
+            }
             val dbusCmd = listOf(
                 File(prefixDir, "bin/dbus-daemon").absolutePath,
                 "--config-file=${dbusConfig.absolutePath}",
