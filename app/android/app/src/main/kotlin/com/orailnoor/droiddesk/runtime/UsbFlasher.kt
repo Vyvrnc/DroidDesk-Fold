@@ -30,6 +30,8 @@ class UsbFlasher(
     private companion object {
         const val TAG = "UsbFlasher"
         const val CHUNK = 1 shl 20
+        /** Writes go out as whole pages of this size (see writePages). */
+        const val PAGE = 4096
         const val PROGRESS_EVERY_MS = 500L
     }
 
@@ -158,7 +160,7 @@ class UsbFlasher(
                         replies.write(buffer, 0, bytes.toInt())
                     }
                     'W'.code -> {
-                        block.write(lba, buffer, 0, bytes.toInt())
+                        writePages(block, lba, buffer, bytes.toInt())
                         replies.writeByte(0)
                     }
                     'F'.code -> {
@@ -180,6 +182,32 @@ class UsbFlasher(
             replies.flush()
         }
         replies.flush()
+    }
+
+    /**
+     * Writes whole 4 KiB pages: the neighbouring blocks of a partial page are read and
+     * written along. A Samsung flash drive (090c:1000) acknowledged a 512-byte write and
+     * returned the new sector to a one-block read, but a longer read of that area came from
+     * the old page (mtools then did not see a folder it had just created; SYNCHRONIZE
+     * CACHE did not help). With no partial page writes, no page gets into that state.
+     */
+    private fun writePages(block: BotScsiDevice, lba: Long, data: ByteArray, length: Int) {
+        val bs = block.blockSize
+        val per = if (bs < PAGE) (PAGE / bs).toLong() else 1L
+        val count = (length / bs).toLong()
+        val start = lba / per * per
+        val end = minOf((lba + count + per - 1) / per * per, block.blockCount)
+        if (per == 1L || (start == lba && end == lba + count) || end < lba + count) {
+            block.write(lba, data, 0, length)
+            return
+        }
+        val page = ByteArray(((end - start) * bs).toInt())
+        // The edges are shorter than a page, and were themselves written as whole pages.
+        if (start < lba) block.read(start, page, 0, ((lba - start) * bs).toInt())
+        val tail = lba + count
+        if (end > tail) block.read(tail, page, ((tail - start) * bs).toInt(), ((end - tail) * bs).toInt())
+        System.arraycopy(data, 0, page, ((lba - start) * bs).toInt(), length)
+        block.write(start, page, 0, page.size)
     }
 
     private fun replyError(replies: java.io.DataOutputStream, message: String) {
