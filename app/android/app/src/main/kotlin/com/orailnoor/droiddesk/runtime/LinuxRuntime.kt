@@ -776,6 +776,8 @@ class LinuxRuntime(private val context: Context) {
                         wrapper.setExecutable(true, false)
                     }
                 }
+                // "Claude Code" menu entry when it is installed in Debian (also from a terminal).
+                isClaudeCodeInstalled()
                 // "USB": icon in the dock's systray and a window (GTK 3 through pygobject).
                 val trayClient = File(binDir, "droiddesk-usb-tray.py")
                 context.assets.open("droiddesk/droiddesk-usb-tray.py").use { input ->

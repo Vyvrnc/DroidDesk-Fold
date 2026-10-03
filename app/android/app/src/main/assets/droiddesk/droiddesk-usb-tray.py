@@ -901,6 +901,12 @@ class Tray:
             self.icon.set_tooltip_text(f"USB — {held} připojeno do Linuxu" if held else "USB")
         if found is not None:
             self.dav.sync(found)
+        # Held disks get their summary (filesystem label for the Thunar bookmark) also while
+        # the window is closed.
+        for dev in found or []:
+            if dev["held"] and dev["name"] not in self.summaries:
+                self.summaries[dev["name"]] = ("…", "…", "")
+                threading.Thread(target=self.summarize, args=(dev["name"],), daemon=True).start()
         if self.window is None:
             return False
         self.serial.update(everything)
@@ -1006,7 +1012,7 @@ class Tray:
         def apply():
             self.summaries[name] = summary
             self.dav.relabel(name)
-            for row in self.store:
+            for row in (self.store if self.window is not None else []):
                 if row[self.NAME] == name:
                     row[self.CAPACITY], row[self.FS], row[self.FS_LABEL] = summary
             return False
