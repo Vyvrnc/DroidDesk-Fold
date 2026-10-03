@@ -28,7 +28,8 @@ import kotlin.concurrent.thread
  *
  * Protocol, one line per request on the abstract socket "droiddesk.usb":
  *   list              -> one tab-separated line per device, then an empty line
- *                        name, vid, pid, mass storage (1/0), manufacturer, product
+ *                        name, vid, pid, mass storage (1/0), manufacturer, product, held (1/0),
+ *                        serial ports (0 = not a supported USB serial adapter)
  *   flash <name> <lun|-> <path>  (stable path, libaums like EtchDroid) writes a
  *                     raw, .xz or .gz image and verifies it by reading it back;
  *   read <name> <lun|-> <path>   copies the whole device into a file. "-" picks
@@ -43,6 +44,7 @@ import kotlin.concurrent.thread
  *   eject <name>      -> hands a held device back to Android
  *   watch             -> stays open and streams "attached\t<list line>", "detached\t<name>",
  *                        "held\t<name>" and "released\t<name>"
+ *   serial <name> <port> -> a USB serial adapter's port as a framed byte stream (UsbSerial)
  *   open <name>       -> (raw, experimental) asks for permission if needed, claims the mass storage
  *                        interface and answers "ok <interface> <ep in> <ep out>"
  *                        with the fd attached, or "err <reason>". The device stays
@@ -129,7 +131,7 @@ object UsbBridge {
         }
     }
 
-    /** The tab-separated device line of "list" (name, vid, pid, storage, maker, product, held). */
+    /** The tab-separated device line of "list" (name, vid, pid, storage, maker, product, held, serial ports). */
     private fun describe(device: UsbDevice): String = listOf(
         device.deviceName,
         "%04x".format(device.vendorId),
@@ -138,6 +140,7 @@ object UsbBridge {
         clean(runCatching { device.manufacturerName }.getOrNull()),
         clean(runCatching { device.productName }.getOrNull()),
         if (held.containsKey(device.deviceName)) "1" else "0",
+        UsbSerial.ports(device).toString(),
     ).joinToString("\t")
 
     /**
@@ -331,6 +334,22 @@ object UsbBridge {
                 request.startsWith("eject ") -> {
                     val name = request.removePrefix("eject ").trim()
                     output.write((if (eject(name)) "ok\n" else "err $name is not held\n").toByteArray())
+                }
+                request.startsWith("serial ") -> {
+                    val parts = request.split(' ')
+                    val device = parts.getOrNull(1)?.let { usb.deviceList[it] }
+                    val index = parts.getOrNull(2)?.toIntOrNull() ?: 0
+                    when {
+                        device == null -> output.write("err no such device ${parts.getOrNull(1).orEmpty()}\n".toByteArray())
+                        held.containsKey(device.deviceName) ->
+                            output.write("err ${device.deviceName} is held as a disk\n".toByteArray())
+                        !usb.hasPermission(device) && !run {
+                            output.write("permission\n".toByteArray())
+                            output.flush()
+                            requestPermission(context, usb, device)
+                        } -> output.write("err permission denied\n".toByteArray())
+                        else -> UsbSerial.serve(usb, device, index, client)
+                    }
                 }
                 request.startsWith("open ") -> {
                     val name = request.removePrefix("open ").trim()

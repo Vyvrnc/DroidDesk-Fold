@@ -71,9 +71,10 @@ def devices():
             line = line.rstrip("\n")
             if not line:
                 break
-            name, vid, pid, storage, maker, product, held = (line.split("\t") + [""] * 7)[:7]
+            name, vid, pid, storage, maker, product, held, serial = (line.split("\t") + [""] * 8)[:8]
             found.append({"name": name, "vid": vid, "pid": pid, "storage": storage == "1",
-                          "maker": maker, "product": product, "held": held == "1"})
+                          "maker": maker, "product": product, "held": held == "1",
+                          "serial": int(serial) if serial.isdigit() else 0})
     return found
 
 

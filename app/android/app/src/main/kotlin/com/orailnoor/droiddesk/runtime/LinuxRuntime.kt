@@ -698,6 +698,33 @@ class LinuxRuntime(private val context: Context) {
                     )
                     davCommand.setExecutable(true, false)
                 }
+                // USB serial adapters as a pty (/tmp/ttyUSB0) through UsbBridge "serial".
+                val serialClient = File(binDir, "droiddesk-serial.py")
+                context.assets.open("droiddesk/droiddesk-serial.py").use { input ->
+                    serialClient.outputStream().use(input::copyTo)
+                }
+                File(binDir, "droiddesk-serial").let { serialCommand ->
+                    serialCommand.writeText(
+                        "#!${File(binDir, "bash").absolutePath}\n" +
+                            "exec \"${File(binDir, "python3").absolutePath}\" \"${serialClient.absolutePath}\" \"${'$'}@\"\n",
+                    )
+                    serialCommand.setExecutable(true, false)
+                }
+                // In Debian too, written on every start (debian-setup runs once, at install).
+                val debianBin = File(debianRootfs(baseDir), "usr/local/bin")
+                if (debianBin.isDirectory) {
+                    File(debianBin, "droiddesk-serial").let { wrapper ->
+                        wrapper.writeText(
+                            "#!/bin/sh\n" +
+                                "# droiddesk-serial: USB serial adapters as /tmp/ttyUSB0 (the app's Python, Termux side).\n" +
+                                "DROIDDESK_DEBIAN_ROOT=\"${debianRootfs(baseDir).absolutePath}\" " +
+                                "DROIDDESK_DEBIAN_TMP=\"${tmpDir.absolutePath}\" " +
+                                "LD_LIBRARY_PATH=\"${File(prefixDir, "lib").absolutePath}\" " +
+                                "exec \"${File(binDir, "python3").absolutePath}\" \"${serialClient.absolutePath}\" \"${'$'}@\"\n",
+                        )
+                        wrapper.setExecutable(true, false)
+                    }
+                }
                 // "USB disky": icon in the dock's systray and a window (GTK 3 through pygobject).
                 val trayClient = File(binDir, "droiddesk-usb-tray.py")
                 context.assets.open("droiddesk/droiddesk-usb-tray.py").use { input ->

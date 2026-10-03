@@ -73,4 +73,6 @@ flutter {
 dependencies {
     // .xz images for droiddesk-usb flash.
     implementation("org.tukaani:xz:1.12")
+    // USB serial adapters (FTDI, CP210x, CH34x, PL2303, CDC-ACM) for droiddesk-serial; MIT.
+    implementation("com.github.mik3y:usb-serial-for-android:3.11.0")
 }

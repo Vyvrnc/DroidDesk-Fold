@@ -6,6 +6,8 @@
 The window lists USB flash drives and card readers (capacity, filesystem, label) with buttons
 Připojit do Linuxu / Vysunout / Soubory… / Zapsat obraz… / Uložit obraz… / Naformátovat…; the
 work is done by droiddesk-usb (same folder), progress comes from its --yad lines. A newly plugged drive shows a notification with "Připojit do Linuxu".
+USB serial adapters get their own list (open/close the port as /tmp/ttyUSB…, the format) through
+droiddesk-serial.
 """
 import importlib.util
 import os
@@ -49,6 +51,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)  # Gtk.StatusIcon
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLIENT = os.path.join(HERE, "droiddesk-usb.py")
 DAV = os.path.join(HERE, "droiddesk-usb-dav.py")
+SERIAL = os.path.join(HERE, "droiddesk-serial.py")
 BOOKMARKS = os.path.expanduser("~/.config/gtk-3.0/bookmarks")
 BOOKMARK_PREFIX = "USB – "
 INSTANCE = "\0droiddesk.usb-tray"
@@ -61,11 +64,177 @@ usb = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(usb)
 
 
-def storage_devices():
+_serial_spec = importlib.util.spec_from_file_location("droiddesk_serial", SERIAL)
+serial_tool = importlib.util.module_from_spec(_serial_spec)
+_serial_spec.loader.exec_module(serial_tool)
+
+
+def all_devices():
     try:
-        return [d for d in usb.devices() if d["storage"] or d["held"]]
+        return usb.devices()
     except SystemExit:  # the app does not answer
         return None
+
+
+def storage_devices(everything=False):
+    found = all_devices() if everything is False else everything
+    return None if found is None else [d for d in found if d["storage"] or d["held"]]
+
+
+def debian_path(host_path):
+    """/tmp/ttyUSB0 for a port in the session's TMPDIR (Debian's /tmp)."""
+    tmp = os.environ.get("TMPDIR", "").rstrip("/")
+    return "/tmp" + host_path[len(tmp):] if tmp and host_path.startswith(tmp + "/") else host_path
+
+
+def run_serial(*args):
+    out = subprocess.run([sys.executable, SERIAL, *args], capture_output=True, text=True, env=ENV)
+    text = (out.stdout + out.stderr).strip().splitlines()
+    return out.returncode, (text[-1] if text else "").removeprefix("droiddesk-serial: ")
+
+
+class SerialPanel:
+    """USB serial adapters in the window: open a port as /tmp/ttyUSB…, close it, set the format."""
+    STATE, LABEL, PATH, PARAMS, ID, NAME, PORT, OPEN, HOST, TIP = range(10)
+    FORMATS = (("auto", "Podle programu (rychlost vždy, sudá parita jen s INPCK, 8 datových bitů)"),
+               ("8N1", "8N1"), ("8E1", "8E1 (Modbus RTU obvykle)"), ("8O1", "8O1"), ("8N2", "8N2"),
+               ("7E1", "7E1 (Modbus ASCII)"), ("7O1", "7O1"), ("7N2", "7N2"))
+
+    def __init__(self, tray, box):
+        self.tray = tray
+        self.busy = False
+        self.frame = Gtk.Frame(label="Sériové převodníky (RS232 / RS485 / TTL)")
+        self.frame.set_no_show_all(True)
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=8)
+        self.store = Gtk.ListStore(str, str, str, str, str, str, int, bool, str, str)
+        view = Gtk.TreeView(model=self.store)
+        for title, col in (("Stav", self.STATE), ("Převodník", self.LABEL), ("Port", self.PATH),
+                           ("Parametry", self.PARAMS), ("ID", self.ID), ("Zařízení", self.NAME)):
+            column = Gtk.TreeViewColumn(title, Gtk.CellRendererText(), text=col)
+            column.set_expand(col == self.LABEL)
+            column.set_resizable(True)
+            view.append_column(column)
+        view.set_tooltip_column(self.TIP)
+        view.get_selection().connect("changed", lambda *_: self.update_buttons())
+        self.view = view
+        inner.pack_start(view, False, False, 0)
+        self.status = Gtk.Label(xalign=0, wrap=True, selectable=True)
+        inner.pack_start(self.status, False, False, 0)
+        buttons = Gtk.Box(spacing=6)
+        self.buttons = {}
+        for key, text, action in (("open", "Otevřít port", self.open_port),
+                                  ("close", "Zavřít port", self.close_port),
+                                  ("format", "Formát…", self.choose_format),
+                                  ("copy", "Kopírovat cestu", self.copy_path)):
+            button = Gtk.Button(label=text)
+            button.connect("clicked", lambda *_, a=action: a())
+            buttons.pack_start(button, False, False, 0)
+            self.buttons[key] = button
+        inner.pack_start(buttons, False, False, 0)
+        hint = Gtk.Label(xalign=0, wrap=True)
+        hint.set_markup("<small>Cestu zadejte v programu (mbpoll, picocom, minicom, pymodbus, pyserial). "
+                        "Rychlost nastavuje program; datové bity a sudou paritu pseudoterminál nepředá, "
+                        "pro pymodbus/pyserial se sudou paritou zvolte Formát… (např. 8E1).</small>")
+        inner.pack_start(hint, False, False, 0)
+        self.frame.add(inner)
+        inner.show_all()
+        box.pack_start(self.frame, False, False, 0)
+
+    def update(self, everything):
+        adapters = [d for d in everything or [] if d.get("serial", 0) > 0]
+        sessions = {(st["device"], st["port"]): st for st in serial_tool.sessions()}
+        selected = self.selected()
+        self.store.clear()
+        for dev in adapters:
+            for port in range(dev["serial"]):
+                state = sessions.get((dev["name"], port))
+                label = label_of(dev) + (f" — port {port}" if dev["serial"] > 1 else "")
+                if state:
+                    params = state["params"] + (" (pevný)" if state.get("fixed") else "")
+                    row = [("otevřen" + (f", zahozeno {state['dropped']} B" if state.get("dropped") else "")),
+                           label, debian_path(state["path"]), params, f"{dev['vid']}:{dev['pid']}",
+                           dev["name"], port, True, state["path"],
+                           f"V Debianu {debian_path(state['path'])}, v XFCE (Termux) {state['path']}; "
+                           f"ovladač {state.get('driver', '')}"]
+                else:
+                    row = ["zavřený", label, "—", "", f"{dev['vid']}:{dev['pid']}", dev["name"], port, False, "",
+                           "Otevřít port: vznikne /tmp/ttyUSB… pro programy v Debianu i v XFCE"]
+                it = self.store.append(row)
+                if selected and selected[self.NAME] == dev["name"] and selected[self.PORT] == port:
+                    self.view.get_selection().select_iter(it)
+        if len(self.store) == 1:
+            self.view.get_selection().select_iter(self.store.get_iter_first())
+        self.frame.set_visible(len(self.store) > 0)
+        self.update_buttons()
+
+    def selected(self):
+        model, row = self.view.get_selection().get_selected()
+        return list(model[row]) if row else None
+
+    def update_buttons(self):
+        row = self.selected()
+        for key, button in self.buttons.items():
+            if key == "open":
+                button.set_sensitive(bool(row) and not row[self.OPEN] and not self.busy)
+            else:
+                button.set_sensitive(bool(row) and row[self.OPEN] and not self.busy)
+
+    def in_background(self, args, message, done_text=None):
+        self.busy = True
+        self.status.set_text(message)
+        self.update_buttons()
+
+        def work():
+            code, text = run_serial(*args)
+            GLib.idle_add(self.finished, code, text, done_text)
+        threading.Thread(target=work, daemon=True).start()
+
+    def finished(self, code, text, done_text):
+        self.busy = False
+        if code == 0 and done_text:
+            text = done_text(text)
+        self.status.set_text(text)
+        self.tray.refresh()
+        return False
+
+    def open_port(self):
+        row = self.selected()
+        self.in_background(("open", row[self.NAME], "--port", str(row[self.PORT])),
+                           "Otevírám… (povolení USB se může ukázat na displeji telefonu)",
+                           lambda path: f"Port otevřen: {debian_path(path)}")
+
+    def close_port(self):
+        row = self.selected()
+        self.in_background(("close", row[self.HOST]), "Zavírám…")
+
+    def choose_format(self):
+        row = self.selected()
+        dialog = Gtk.Dialog(title="Formát sériového portu", transient_for=self.tray.window, modal=True)
+        dialog.add_buttons("Zrušit", Gtk.ResponseType.CANCEL, "Nastavit", Gtk.ResponseType.OK)
+        area = dialog.get_content_area()
+        area.set_spacing(8)
+        area.set_border_width(12)
+        area.pack_start(Gtk.Label(label=f"{row[self.LABEL]} — {row[self.PATH]}", xalign=0), False, False, 0)
+        kinds = Gtk.ComboBoxText()
+        for key, text in self.FORMATS:
+            kinds.append(key, text)
+        current = row[self.PARAMS].split(" ")[1] if row[self.PARAMS].endswith("(pevný)") else "auto"
+        kinds.set_active_id(current if any(k == current for k, _ in self.FORMATS) else "auto")
+        area.pack_start(kinds, False, False, 0)
+        area.pack_start(Gtk.Label(label="Rychlost (baud) nastavuje program, který port používá.", xalign=0),
+                        False, False, 0)
+        dialog.show_all()
+        answer = dialog.run()
+        kind = kinds.get_active_id()
+        dialog.destroy()
+        if answer == Gtk.ResponseType.OK:
+            self.in_background(("set", row[self.HOST], kind), "Nastavuji…",
+                               lambda _: "Formát podle programu" if kind == "auto" else f"Formát {kind}")
+
+    def copy_path(self):
+        row = self.selected()
+        Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(row[self.PATH], -1)
+        self.status.set_text(f"Zkopírováno: {row[self.PATH]}")
 
 
 def label_of(dev):
@@ -542,6 +711,7 @@ class Tray:
         self.busy = False
         self.summaries = {}  # device name -> (capacity, filesystems, labels), held devices only
         self.activities = {}  # device name -> running operation from droiddesk-usb (status files)
+        self.serial_sessions = None  # open serial ports, to notice ports opened from a terminal
         self.dav = DavServers()
         GLib.timeout_add_seconds(2, self.poll_activity)
         self.icon = Gtk.StatusIcon.new_from_icon_name(ICON)
@@ -597,6 +767,9 @@ class Tray:
         if kind == "attached" and len(fields) >= 7 and fields[4] == "1":
             dev = {"name": fields[1], "maker": fields[5], "product": fields[6] if len(fields) > 6 else ""}
             threading.Thread(target=self.offer_attach, args=(dev,), daemon=True).start()
+        elif kind == "attached" and len(fields) >= 9 and fields[8].isdigit() and int(fields[8]) > 0:
+            dev = {"name": fields[1], "maker": fields[5], "product": fields[6]}
+            threading.Thread(target=self.offer_serial, args=(dev,), daemon=True).start()
         if kind in ("detached", "released") and len(fields) > 1:
             self.summaries.pop(fields[1], None)
         self.refresh()
@@ -615,6 +788,22 @@ class Tray:
             usb.notify(text)
             GLib.idle_add(self.refresh)
         elif action == "open":
+            GLib.idle_add(self.show)
+
+    def offer_serial(self, dev):
+        try:
+            out = subprocess.run(
+                ["notify-send", "-i", "network-wired", "-A", "open=Otevřít jako sériový port",
+                 "-A", "window=Otevřít USB disky", "Sériový převodník", f"Připojeno: {label_of(dev)}"],
+                capture_output=True, text=True, timeout=300)
+        except (OSError, subprocess.TimeoutExpired):
+            return
+        action = out.stdout.strip()
+        if action == "open":
+            code, text = run_serial("open", dev["name"])
+            usb.notify(f"Sériový port: {debian_path(text)}" if code == 0 else f"Sériový port: {text}", urgent=code != 0)
+            GLib.idle_add(self.refresh)
+        elif action == "window":
             GLib.idle_add(self.show)
 
     # ── window ──
@@ -678,6 +867,7 @@ class Tray:
             buttons.pack_start(button, False, False, 0)
             self.buttons[key] = button
         box.pack_start(buttons, False, False, 0)
+        self.serial = SerialPanel(self, box)
         win.add(box)
         self.window = win
 
@@ -693,7 +883,8 @@ class Tray:
 
     def refresh(self):
         held = 0
-        found = storage_devices()
+        everything = all_devices()
+        found = storage_devices(everything)
         if found is not None:
             held = sum(d["held"] for d in found)
         if not self.activities:
@@ -702,6 +893,7 @@ class Tray:
             self.dav.sync(found)
         if self.window is None:
             return False
+        self.serial.update(everything)
         selected = self.selected()
         self.store.clear()
         if found is None:
@@ -781,6 +973,11 @@ class Tray:
             seen[device] = text
         changed = seen != self.activities
         self.activities = seen
+        if self.window is not None and self.window.get_visible():
+            ports = sorted((st["name"], st["params"], st.get("dropped", 0)) for st in serial_tool.sessions())
+            if ports != self.serial_sessions:
+                self.serial_sessions = ports
+                changed = True
         if changed:
             self.refresh()
         if seen:

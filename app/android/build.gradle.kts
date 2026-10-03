@@ -2,6 +2,8 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+        // usb-serial-for-android (USB serial adapters) is published there only.
+        maven(url = "https://jitpack.io")
     }
 }
 

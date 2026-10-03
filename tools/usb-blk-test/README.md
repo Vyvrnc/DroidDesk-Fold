@@ -12,6 +12,10 @@ from an image file, in Debian arm64:
 
     docker run ... debian:trixie bash /t/ntfs_test.sh     # NTFS tool in depth (dirty/hibernated volumes)
     docker run ... debian:trixie bash /t/concurrency.sh   # parallel commands, killed client, debug mode, dup/fork
+    docker run ... debian:trixie bash /t/serial.sh        # droiddesk-serial against fake_serial_bridge.py (simulated
+                                                          # adapter: Modbus RTU slave at 19200 8E1, echo at 115200 8N1);
+                                                          # mbpoll + pyserial through the pty; ends with SERIAL_ALL_OK
+    docker run ... debian:trixie bash /t/gui_serial.sh    # serial adapters in the USB disky window, /t/gui_serial.png
     docker run ... debian:trixie bash /t/dav.sh           # droiddesk-usb mv + droiddesk-usb-dav (WebDAV, curl) on
                                                           # fat32/ext4/exfat/ntfs, fsck after each; GVFS=1 adds gio
                                                           # (gvfs dav backend, as Thunar); ends with DAV_ALL_OK
