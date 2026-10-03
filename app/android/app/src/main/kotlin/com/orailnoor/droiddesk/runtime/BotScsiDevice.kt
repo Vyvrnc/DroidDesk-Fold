@@ -153,7 +153,9 @@ class BotScsiDevice(
 
     val capacity: Long get() = blockCount * blockSize
 
-    fun read(lba: Long, buffer: ByteArray, offset: Int, length: Int) = transfer(lba, buffer, offset, length, dirIn = true)
+    /** fua: Force Unit Access, read from the medium and not from the device's cache. */
+    fun read(lba: Long, buffer: ByteArray, offset: Int, length: Int, fua: Boolean = false) =
+        transfer(lba, buffer, offset, length, dirIn = true, fua = fua)
 
     fun write(lba: Long, buffer: ByteArray, offset: Int, length: Int) = transfer(lba, buffer, offset, length, dirIn = false)
 
@@ -170,28 +172,29 @@ class BotScsiDevice(
         }
     }
 
-    private fun transfer(lba: Long, buffer: ByteArray, offset: Int, length: Int, dirIn: Boolean) {
+    private fun transfer(lba: Long, buffer: ByteArray, offset: Int, length: Int, dirIn: Boolean, fua: Boolean = false) {
         require(length % blockSize == 0) { "length must be whole blocks" }
         if (lba < 0 || lba + length / blockSize > blockCount) throw IOException("access beyond the end of the device")
         val step = MAX_COMMAND_BYTES - MAX_COMMAND_BYTES % blockSize
         var done = 0
         while (done < length) {
             val part = minOf(step, length - done)
-            transferOnce(lba + done / blockSize, buffer, offset + done, part, dirIn)
+            transferOnce(lba + done / blockSize, buffer, offset + done, part, dirIn, fua)
             done += part
         }
     }
 
     /** One READ/WRITE command; both are idempotent, so a transport error is retried after reset. */
-    private fun transferOnce(lba: Long, buffer: ByteArray, offset: Int, length: Int, dirIn: Boolean) {
+    private fun transferOnce(lba: Long, buffer: ByteArray, offset: Int, length: Int, dirIn: Boolean, fua: Boolean = false) {
+        val flags = if (fua) 0x08 else 0
         val blocks = length / blockSize
         val cdb = if (lba + blocks <= 0xFFFFFFFFL && blocks <= 0xFFFF) {
             ByteBuffer.allocate(10).order(ByteOrder.BIG_ENDIAN).apply {
-                put(if (dirIn) 0x28 else 0x2A); put(0); putInt(lba.toInt()); put(0); putShort(blocks.toShort()); put(0)
+                put(if (dirIn) 0x28 else 0x2A); put(flags.toByte()); putInt(lba.toInt()); put(0); putShort(blocks.toShort()); put(0)
             }.array()
         } else {
             ByteBuffer.allocate(16).order(ByteOrder.BIG_ENDIAN).apply {
-                put(if (dirIn) 0x88.toByte() else 0x8A.toByte()); put(0); putLong(lba); putInt(blocks); put(0); put(0)
+                put(if (dirIn) 0x88.toByte() else 0x8A.toByte()); put(flags.toByte()); putLong(lba); putInt(blocks); put(0); put(0)
             }.array()
         }
         var attempts = 0

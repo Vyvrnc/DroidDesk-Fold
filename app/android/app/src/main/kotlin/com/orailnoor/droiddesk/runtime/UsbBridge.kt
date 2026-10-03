@@ -149,7 +149,10 @@ object UsbBridge {
         val iface: UsbInterface,
         val epIn: android.hardware.usb.UsbEndpoint,
         val epOut: android.hardware.usb.UsbEndpoint,
-    )
+    ) {
+        /** Block ranges written since attach (start -> end), see UsbFlasher.serveBlocks. */
+        val written = java.util.TreeMap<Long, Long>()
+    }
 
     private val held = java.util.concurrent.ConcurrentHashMap<String, HeldDevice>()
 

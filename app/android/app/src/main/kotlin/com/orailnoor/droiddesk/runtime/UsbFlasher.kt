@@ -91,7 +91,8 @@ class UsbFlasher(
                 val want = minOf(readBack.size.toLong(), written - verified).toInt()
                 val padded = (want + block.blockSize - 1) / block.blockSize * block.blockSize
                 java.util.Arrays.fill(readBack, 0)
-                block.read(lba, readBack, 0, padded)
+                // From the medium: a device cache could otherwise confirm what it only remembers.
+                block.read(lba, readBack, 0, padded, fua = true)
                 check.update(readBack, 0, want)
                 lba += padded / block.blockSize
                 verified += want
@@ -154,8 +155,13 @@ class UsbFlasher(
             if (op == 'W'.code) requests.readFully(buffer, 0, bytes.toInt())
             try {
                 when (op) {
-                    'R'.code -> {
-                        block.read(lba, buffer, 0, bytes.toInt())
+                    'R'.code, 'r'.code -> {
+                        // A Samsung drive (090c:1000) answered a repeated long read from its
+                        // cache, keyed by the start block, even after a write into that range.
+                        // Reads over anything written since attach go with Force Unit Access.
+                        // 'r' always does (to test a device).
+                        val fua = op == 'r'.code || overlapsWritten(lba, lba + count)
+                        block.read(lba, buffer, 0, bytes.toInt(), fua)
                         replies.writeByte(0)
                         replies.write(buffer, 0, bytes.toInt())
                     }
@@ -191,7 +197,27 @@ class UsbFlasher(
      * the old page (mtools then did not see a folder it had just created; SYNCHRONIZE
      * CACHE did not help). With no partial page writes, no page gets into that state.
      */
+    private fun overlapsWritten(start: Long, end: Long): Boolean {
+        val before = held.written.floorEntry(end - 1) ?: return false
+        return before.value > start
+    }
+
+    /** Remembers [start, end) as written, merged with neighbouring ranges. */
+    private fun markWritten(start: Long, end: Long) {
+        var from = start
+        var to = end
+        held.written.floorEntry(start)?.let { if (it.value >= start) { from = it.key; to = maxOf(to, it.value) } }
+        while (true) {
+            val next = held.written.ceilingEntry(from) ?: break
+            if (next.key > to) break
+            to = maxOf(to, next.value)
+            held.written.remove(next.key)
+        }
+        held.written[from] = to
+    }
+
     private fun writePages(block: BotScsiDevice, lba: Long, data: ByteArray, length: Int) {
+        markWritten(lba, lba + length / block.blockSize)
         val bs = block.blockSize
         val per = if (bs < PAGE) (PAGE / bs).toLong() else 1L
         val count = (length / bs).toLong()
