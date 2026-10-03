@@ -844,6 +844,16 @@ class LinuxRuntime(private val context: Context) {
                     mkdir -p "${'$'}(dirname "${'$'}marker2")" && touch "${'$'}marker2"
                 fi
 
+                # Thumbnails also for remote locations: USB disks reach Thunar over
+                # WebDAV (dav://localhost), which the default "local only" skips.
+                # Once only, a user's later choice stays.
+                marker3="${'$'}HOME/.config/droiddesk/xfce-tweaks-v3"
+                if [ ! -f "${'$'}marker3" ]; then
+                    xfconf-query -c thunar -p /misc-thumbnail-mode >/dev/null 2>&1 ||
+                        xfconf-query -c thunar -p /misc-thumbnail-mode -n -t string -s THUNAR_THUMBNAIL_MODE_ALWAYS
+                    mkdir -p "${'$'}(dirname "${'$'}marker3")" && touch "${'$'}marker3"
+                fi
+
                 # A vertical panel (mode 1) rotates text plugins such as the battery
                 # label; Deskbar (mode 2) keeps the same dock with horizontal text.
                 # Once only, so a user who switches back to vertical keeps it.
