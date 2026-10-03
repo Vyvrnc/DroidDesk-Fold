@@ -7,6 +7,9 @@ import threading
 IMAGE = sys.argv[1]
 BS = int(sys.argv[2]) if len(sys.argv) > 2 else 512
 NAME = "/dev/bus/usb/001/002"
+# FAKE_WRAP=<bytes>: a fake-capacity stick, blocks beyond that wrap around (like cheap fakes).
+import os
+WRAP = int(os.environ.get("FAKE_WRAP", "0")) // BS
 lock = threading.Lock()
 stats = {"R": 0, "W": 0, "F": 0, "sessions": 0}
 
@@ -69,6 +72,8 @@ def handle(conn):
                         msg = b"access beyond the end of the device"
                         conn.sendall(b"\x01" + struct.pack(">H", len(msg)) + msg)
                         continue
+                    if WRAP and op in "RW":
+                        lba = lba % WRAP  # every request stays inside one wrap here (tests use 1 MiB multiples)
                     if op == "R":
                         img.seek(lba * BS)
                         conn.sendall(b"\x00" + img.read(n))

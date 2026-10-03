@@ -11,6 +11,8 @@ after asking the user. This client talks to UsbBridge in the app.
   droiddesk-usb eject [DEVICE]                          give the device back to Android
   droiddesk-usb watch                                   print attach/detach/hold events
   droiddesk-usb info [DEVICE]                           capacity, partitions, filesystems, labels
+  droiddesk-usb check [DEVICE] [--write]                read twice and compare; --write: fill with a
+                                                        pattern and verify (fake capacity; ERASES it)
   droiddesk-usb format [DEVICE] fat32|exfat|ntfs|ext4 [--label NAME] [--yes]
                                                         new MBR with one partition + filesystem
   droiddesk-usb ls [DEVICE] [usb:/PATH]                 files on the disk (FAT, exFAT, NTFS, ext2/3/4)
@@ -1080,6 +1082,109 @@ def files_command(command, args, lun, number, raw):
     return 0
 
 
+def check_disk(dev, lun, write, assume_yes):
+    """Read the whole disk twice and compare (stable reads), or with write=True fill it with
+    a pattern of sector numbers and read it back (fake capacity, bad sectors; erases it)."""
+    import hashlib
+    step_bytes = 1 << 20
+    with open_blk(dev, lun) as blk:
+        bs, blocks, capacity = blk.bs, blk.blocks, blk.capacity
+    say(f"Zařízení: {describe(dev)}, {human(capacity)}")
+    if write:
+        for line in contents(dev, lun):
+            say(f"Na disku: {line}")
+        if not assume_yes:
+            answer = ask(f"Test zápisem PŘEPÍŠE celé zařízení ({human(capacity)}), data budou ztracena.\n"
+                         "Pokračovat? Napiš 'ano': ")
+            if answer != "ano":
+                sys.exit("Zrušeno, nic nebylo zapsáno.")
+    per = step_bytes // bs
+    started = time.monotonic()
+
+    def show(phase, done, total):
+        speed = done / max(time.monotonic() - started, 0.001)
+        if YAD:
+            print(min(99, done * 100 // max(total, 1)))
+            print(f"# {phase}: {human(done)} z {human(total)} ({human(speed)}/s)")
+        else:
+            print(f"\r{phase}: {done * 100 // max(total, 1):3d} % {human(speed)}/s   ", end="", flush=True)
+
+    def pattern(lba, count):
+        # Every sector names itself: a fake card that wraps around shows another sector's number.
+        out = bytearray(count * bs)
+        for i in range(count):
+            out[i * bs:i * bs + 16] = struct.pack("<QQ", lba + i, 0x44524F4944444553)  # "SEDDIORD"
+        return bytes(out)
+
+    def passes():
+        """Yields (lba, data) for the whole disk, in one session."""
+        with open_blk(dev, lun) as blk:
+            lba = 0
+            while lba < blocks:
+                count = min(per, blocks - lba)
+                yield lba, blk.read(lba, count)
+                lba += count
+
+    try:
+        if not write:
+            first = []
+            for lba, data in passes():
+                first.append(hashlib.sha256(data).digest())
+                show("Čtení 1/2", lba * bs + len(data), capacity)
+            started = time.monotonic()
+            bad = []
+            for (lba, data), digest in zip(passes(), first):
+                if hashlib.sha256(data).digest() != digest:
+                    bad.append(lba)
+                show("Čtení 2/2", lba * bs + len(data), capacity)
+            print("" if not YAD else "100")
+            if bad:
+                say(f"NESTABILNÍ: {len(bad)} MiB úseků se při dvou čteních liší (první u {human(bad[0] * bs)}). "
+                    "Paměť vrací pokaždé jiná data: na zařízení se nedá spolehnout.")
+                return 1
+            say(f"Čtení stabilní: {human(capacity)} dvakrát stejně.")
+            return 0
+        with open_blk(dev, lun) as blk:
+            lba = 0
+            while lba < blocks:
+                count = min(per, blocks - lba)
+                blk.write(lba, pattern(lba, count))
+                lba += count
+                show("Zápis vzoru", lba * bs, capacity)
+            blk.flush()
+        started = time.monotonic()
+        first_bad, bad_count, wrap = None, 0, None
+        for lba, data in passes():
+            expected = pattern(lba, len(data) // bs)
+            if data != expected:
+                for i in range(len(data) // bs):
+                    sector = data[i * bs:(i + 1) * bs]
+                    if sector != expected[i * bs:(i + 1) * bs]:
+                        bad_count += 1
+                        if first_bad is None:
+                            first_bad = lba + i
+                        # Another sector's number here: writes further out landed on this one.
+                        found, magic = struct.unpack_from("<QQ", sector)
+                        if magic == 0x44524F4944444553 and found > lba + i:
+                            distance = found - (lba + i)
+                            wrap = distance if wrap is None else min(wrap, distance)
+            show("Kontrola", lba * bs + len(data), capacity)
+        print("" if not YAD else "100")
+        if wrap is not None:
+            say(f"FALEŠNÁ KAPACITA: zařízení hlásí {human(capacity)}, ale skutečně má asi {human(wrap * bs)} "
+                f"(zápisy dál přepisují začátek). {bad_count} sektorů chybných. Nepoužívat, nebo naformátovat "
+                f"jen na skutečnou velikost.")
+            return 1
+        if first_bad is not None:
+            say(f"CHYBY: {bad_count} vadných sektorů, první na {human(first_bad * bs)}. Vadná paměť: nepoužívat.")
+            return 1
+        say(f"Zápis i čtení celé kapacity ({human(capacity)}) v pořádku. Disk je teď prázdný, naformátuj ho.")
+        return 0
+    except BlkError as error:
+        print()
+        sys.exit(f"droiddesk-usb: {error}")
+
+
 def info_command(args, lun, raw):
     dev = pick(args[0] if args else None)
     with open_blk(dev, lun) as blk:
@@ -1136,7 +1241,7 @@ def main(argv):
     global YAD
     YAD = "--yad" in argv
     raw = "--raw" in argv
-    args = [a for a in argv if a not in ("--yes", "--yad", "--raw")]
+    args = [a for a in argv if a not in ("--yes", "--yad", "--raw", "--write")]
     assume_yes = "--yes" in argv
     if not args or args[0] in ("-h", "--help", "help"):
         print(__doc__.strip())
@@ -1199,6 +1304,8 @@ def main(argv):
         return 1
     if command == "info":
         return info_command(args[1:], lun, raw)
+    if command == "check":
+        return check_disk(pick(args[1] if len(args) > 1 else None), lun, "--write" in argv, assume_yes)
     if command == "format" and len(args) >= 2:
         # format [DEVICE] fat32|exfat|ext4
         device = next((a for a in args[1:] if a.startswith("/dev/bus/usb/")), None)

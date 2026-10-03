@@ -264,6 +264,7 @@ class FilesWindow:
     def choose(self, title, action, multiple=False):
         dialog = Gtk.FileChooserDialog(title=title, parent=self.window, action=action)
         dialog.add_buttons("Zrušit", Gtk.ResponseType.CANCEL, "Vybrat", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)  # Enter (also in the location bar) accepts
         dialog.set_select_multiple(multiple)
         dialog.set_current_folder(os.path.expanduser("~"))
         chosen = dialog.get_filenames() if dialog.run() == Gtk.ResponseType.OK else []
@@ -435,6 +436,7 @@ class Tray:
                                   ("flash", "Zapsat obraz…", self.flash),
                                   ("read", "Uložit obraz…", self.read),
                                   ("format", "Naformátovat…", self.format),
+                                  ("check", "Zkontrolovat", self.check),
                                   ("refresh", "Obnovit", self.reload)):
             button = Gtk.Button(label=text)
             button.connect("clicked", lambda *_, a=action: a())
@@ -561,6 +563,7 @@ class Tray:
         dialog = Gtk.FileChooserDialog(title="Zapsat obraz na USB", parent=self.window,
                                        action=Gtk.FileChooserAction.OPEN)
         dialog.add_buttons("Zrušit", Gtk.ResponseType.CANCEL, "Vybrat", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)  # Enter (also in the location bar) accepts
         images = Gtk.FileFilter()
         images.set_name("Obrazy disků")
         for pattern in ("*.img", "*.iso", "*.raw", "*.bin", "*.xz", "*.gz"):
@@ -583,6 +586,7 @@ class Tray:
         dialog = Gtk.FileChooserDialog(title="Uložit obraz USB", parent=self.window,
                                        action=Gtk.FileChooserAction.SAVE)
         dialog.add_buttons("Zrušit", Gtk.ResponseType.CANCEL, "Uložit", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
         dialog.set_do_overwrite_confirmation(True)
         dialog.set_current_folder(os.path.expanduser("~"))
         name = "".join(c if c.isalnum() or c in "-_" else "-" for c in row[self.LABEL]).strip("-") or "usb"
@@ -591,6 +595,11 @@ class Tray:
         dialog.destroy()
         if path:
             self.operation("Ukládání obrazu", ("read", path, row[self.NAME], "--yad"), row[self.NAME])
+
+    def check(self):
+        """Read the whole disk twice and compare: finds memory that returns unstable data."""
+        row = self.selected()
+        self.operation("Kontrola disku (2× čtení)", ("check", row[self.NAME], "--yad"), row[self.NAME])
 
     def format(self):
         row = self.selected()

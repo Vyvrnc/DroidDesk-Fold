@@ -242,6 +242,7 @@ Commands of this fork's DroidDesk app (in its terminal):
 | `droiddesk-usb watch` | Print attach/detach/hold events as they happen |
 | `droiddesk-usb info [DEVICE]` | Capacity, partitions, filesystems and labels of a held disk |
 | `droiddesk-usb format [DEVICE] fat32\|exfat\|ntfs\|ext4 [--label NAME]` | New MBR with one partition and a filesystem (asks first) |
+| `droiddesk-usb check [DEVICE] [--write]` | Read the whole disk twice and compare (unstable memory); `--write` fills it with a pattern and verifies (fake capacity, bad sectors — erases it) |
 | `droiddesk-usb ls [usb:/PATH]` | Files on the disk (FAT, exFAT, NTFS, ext2/3/4) |
 | `droiddesk-usb cp FILE… usb:/FOLDER` / `cp usb:/PATH… TARGET` | Copy to / from the disk, folders recursively |
 | `droiddesk-usb rm [-r] usb:/PATH…`, `mkdir usb:/PATH…` | Delete, create folders on the disk |
