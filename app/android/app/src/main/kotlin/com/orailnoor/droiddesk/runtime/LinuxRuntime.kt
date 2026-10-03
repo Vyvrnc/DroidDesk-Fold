@@ -555,6 +555,8 @@ class LinuxRuntime(private val context: Context) {
                 esac
             }
             client() {
+                # DROIDDESK_DEBIAN_ROOT/TMP: messages show Debian's paths, not the host's.
+                DROIDDESK_DEBIAN_ROOT="${debianRootfs(baseDir).absolutePath}" DROIDDESK_DEBIAN_TMP="${tmpDir.absolutePath}" \
                 LD_LIBRARY_PATH="${File(prefixDir, "lib").absolutePath}" exec "${File(binDir, "python3").absolutePath}" \
                     "${File(binDir, "droiddesk-usb.py").absolutePath}" "${'$'}@"
             }

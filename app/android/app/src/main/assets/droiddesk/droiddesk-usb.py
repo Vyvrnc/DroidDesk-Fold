@@ -389,6 +389,7 @@ class Blk:
 
 def say(text):
     """A status line: "# text" for yad, plain otherwise."""
+    text = shown(text)
     print(f"# {text}" if YAD else text)
     activity(text=text)
 
@@ -1380,6 +1381,16 @@ def main(argv):
     return 2
 
 
+def shown(text):
+    """Host paths of the Debian container back as Debian sees them (wrapper from Debian)."""
+    root, tmp = os.environ.get("DROIDDESK_DEBIAN_ROOT"), os.environ.get("DROIDDESK_DEBIAN_TMP")
+    if tmp:
+        text = text.replace(tmp.rstrip("/") + "/", "/tmp/")
+    if root:
+        text = text.replace(root.rstrip("/") + "/", "/")
+    return text
+
+
 def run(argv):
     try:
         code = main(argv)
@@ -1388,6 +1399,7 @@ def run(argv):
     except KeyboardInterrupt:
         code = 130
     if isinstance(code, str):
+        code = shown(code)
         print(code, file=sys.stderr)
         activity(final=(1, code.removeprefix("droiddesk-usb: ")))
         return 1
