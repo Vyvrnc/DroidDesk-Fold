@@ -57,6 +57,9 @@ class BotScsiDevice(
         const val EIO = 5
         /** Upper bound for reading leftover data where a CSW was expected. */
         const val DRAIN_DEADLINE_MS = 3_000L
+        /** Bytes per USBDEVFS_BULK: usbfs refuses larger single transfers with ENOMEM
+         *  (Android's own bulkTransfer silently caps at 16 KiB, libusbhost MAX_USBFS_BUFFER_SIZE). */
+        const val BULK_MAX = 16 * 1024
 
         const val CBW_SIGNATURE = 0x43425355
         const val CSW_SIGNATURE = 0x53425355
@@ -290,7 +293,7 @@ class BotScsiDevice(
         if (length > 0 && data != null) {
             val ep = if (dirIn) epIn else epOut
             while (done < length) {
-                val want = minOf(CHUNK, length - done)
+                val want = minOf(if (nativeAvailable) BULK_MAX else CHUNK, length - done)
                 val n = bulk(ep, data, offset + done, want, timeout)
                 if (n < 0) {
                     android.util.Log.w("BotScsiDevice", "data phase: bulk ${if (dirIn) "IN" else "OUT"} ${describe(n)} " +
@@ -408,8 +411,13 @@ class BotScsiDevice(
         return clearHalt(epIn) && clearHalt(epOut)
     }
 
-    /** Reset recovery that must work: otherwise no further command goes to the device. */
+    /**
+     * Reset recovery that must work before the next command: the Bulk-Only reset, and if
+     * that fails a port reset (which throws RecoveryFailed itself when it fails too).
+     */
     private fun recover() {
-        if (!resetRecovery()) throw RecoveryFailed("Bulk-Only reset recovery failed")
+        if (resetRecovery()) return
+        android.util.Log.w("BotScsiDevice", "Bulk-Only reset recovery failed, trying a port reset")
+        portReset()
     }
 }
