@@ -633,7 +633,8 @@ class DavServers:
     """WebDAV for Thunar: one droiddesk-usb-dav per disk held by Linux (under a random secret
     path: any Android app can reach 127.0.0.1), with a Thunar bookmark "USB – <name>"."""
 
-    def __init__(self):
+    def __init__(self, label_for=lambda name, product: product):
+        self.label_for = label_for  # bookmark name: filesystem label (product) once known
         self.urls = {}       # device name -> dav:// URL
         self.starting = set()
         self.failed = set()  # no usable filesystem etc.: not retried until released
@@ -669,8 +670,17 @@ class DavServers:
             self.failed.add(name)
             return False
         self.urls[name] = (url, label)
+        self.relabel(name)
         self.set_bookmarks(self.urls)
         return False
+
+    def relabel(self, name):
+        """The bookmark shows the filesystem label once the disk summary has it."""
+        entry = self.urls.get(name)
+        if entry:
+            url, product = entry[0], entry[1]
+            self.urls[name] = (url, product, self.label_for(name, product))
+            self.set_bookmarks(self.urls)
 
     def stop(self, name):
         self.urls.pop(name, None)
@@ -695,7 +705,7 @@ class DavServers:
             lines = []
         keep = [line for line in lines
                 if not (line.startswith("dav://localhost:") and BOOKMARK_PREFIX in line)]
-        keep += [f"{url} {BOOKMARK_PREFIX}{label}" for url, label in urls.values()]
+        keep += [f"{entry[0]} {BOOKMARK_PREFIX}{entry[-1]}" for entry in urls.values()]
         if keep != lines:
             os.makedirs(os.path.dirname(BOOKMARKS), exist_ok=True)
             with open(BOOKMARKS, "w", encoding="utf-8") as out:
@@ -712,7 +722,7 @@ class Tray:
         self.summaries = {}  # device name -> (capacity, filesystems, labels), held devices only
         self.activities = {}  # device name -> running operation from droiddesk-usb (status files)
         self.serial_sessions = None  # open serial ports, to notice ports opened from a terminal
-        self.dav = DavServers()
+        self.dav = DavServers(self.dav_label)
         GLib.timeout_add_seconds(2, self.poll_activity)
         self.icon = Gtk.StatusIcon.new_from_icon_name(ICON)
         self.icon.set_title("USB")
@@ -984,11 +994,18 @@ class Tray:
             self.icon.set_tooltip_text("USB — " + "; ".join(f"{d}: {t}" for d, t in seen.items()))
         return True
 
+    def dav_label(self, name, product):
+        """"SAMSUNG (Samsung Type-C)" for the Thunar bookmark; the product until it is known."""
+        summary = self.summaries.get(name)
+        labels = summary[2] if summary and summary[0] not in ("?", "…") else ""
+        return f"{labels} ({product})" if labels else product
+
     def summarize(self, name):
         summary = disk_summary(name)
 
         def apply():
             self.summaries[name] = summary
+            self.dav.relabel(name)
             for row in self.store:
                 if row[self.NAME] == name:
                     row[self.CAPACITY], row[self.FS], row[self.FS_LABEL] = summary
