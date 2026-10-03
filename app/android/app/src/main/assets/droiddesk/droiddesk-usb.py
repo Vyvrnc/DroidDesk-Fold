@@ -187,10 +187,11 @@ PERMISSION_TEXT = "Potvrď povolení USB na displeji telefonu (dialog Androidu; 
 YAD = False
 
 
-def notify(text):
-    """Desktop notification, in case the terminal is not in view."""
+def notify(text, urgent=False):
+    """Desktop notification, in case the terminal is not in view. urgent: stays until clicked."""
     try:
-        subprocess.run(["notify-send", "-i", "drive-removable-media", "DroidDesk USB", text],
+        subprocess.run(["notify-send", "-i", "drive-removable-media"] + (["-u", "critical"] if urgent else [])
+                       + ["DroidDesk USB", text],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=5)
     except (OSError, subprocess.TimeoutExpired):
         pass

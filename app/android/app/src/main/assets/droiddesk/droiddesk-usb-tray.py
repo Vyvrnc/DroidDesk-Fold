@@ -128,7 +128,7 @@ def progress(parent, title, args, on_done=None):
             bar.set_fraction(1)
         else:
             bar.set_text("Chyba")
-        usb.notify(f"{title}: {'hotovo' if code == 0 else 'chyba — ' + text.get_text()}")
+        usb.notify(f"{title}: {'hotovo' if code == 0 else 'chyba — ' + text.get_text()}", urgent=code != 0)
         if on_done:
             on_done(code)
         return False
@@ -523,11 +523,11 @@ class Tray:
             if "done" in state or not alive:
                 if state.get("origin") != "tray":
                     if "done" not in state:
-                        usb.notify(f"{device}: {operation} přerušeno")
+                        usb.notify(f"{device}: {operation} přerušeno", urgent=True)
                     elif state["done"] == 0:
                         usb.notify(f"{device}: {operation} — hotovo. {state.get('result', '')}".strip())
                     else:
-                        usb.notify(f"{device}: {operation} — chyba: {state.get('result', '')}")
+                        usb.notify(f"{device}: {operation} — chyba: {state.get('result', '')}", urgent=True)
                 try:
                     os.unlink(path)
                 except OSError:
