@@ -2111,6 +2111,10 @@ class LinuxRuntime(private val context: Context) {
             Log.w(TAG, "pygobject unavailable; the USB disky panel icon stays off")
         }
         // USB disky: format and files (droiddesk-usb installs them on first use otherwise).
+        // PrintScreen: XFCE's default shortcut runs xfce4-screenshooter.
+        if (selectedDesktop == "xfce4" && !installPackageGroup("pkg install -y xfce4-screenshooter")) {
+            Log.w(TAG, "xfce4-screenshooter unavailable; PrintScreen does nothing")
+        }
         if (!installPackageGroup("pkg install -y dosfstools exfatprogs e2fsprogs mtools")) {
             Log.w(TAG, "USB disk tools unavailable; droiddesk-usb format/files will ask for them")
         }

@@ -20,6 +20,8 @@ try:
     import gi
 
     gi.require_version("Gtk", "3.0")
+    # Gdk too: without it gi may pick Gdk 4.0 first, and Gtk 3 then fails to load.
+    gi.require_version("Gdk", "3.0")
     from gi.repository import Gdk, GLib, Gtk
 except (ImportError, ValueError, AttributeError) as error:
     # Installs from before fold.16 lack pygobject. at-spi2 leaves gi/overrides/ behind,
