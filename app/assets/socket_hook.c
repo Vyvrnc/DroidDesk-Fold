@@ -596,30 +596,94 @@ static const char* rewrite_exec_path(const char* path, char* buf, size_t buf_siz
 }
 
 static int (*real_execve)(const char *, char *const [], char *const []) = NULL;
-static int (*real_execv)(const char *, char *const []) = NULL;
 static int (*real_execvp)(const char *, char *const []) = NULL;
 static int (*real_execvpe)(const char *, char *const [], char *const []) = NULL;
+
+extern char **environ;
+
+/*
+ * A script whose "#!" line names Termux's prefix cannot be started by the
+ * kernel: the interpreter path does not exist here. dpkg runs maintainer
+ * scripts (postinst …) right after unpacking them, before the wrapper's
+ * shebang relocation pass, so the first configure of such packages failed
+ * (cups, openjdk, dbus, python … on a fresh install). Such a script is
+ * started through the relocated interpreter instead, as the kernel would:
+ * interpreter [optional argument] script args…. Returns -1 with errno
+ * untouched when the file is not such a script.
+ */
+static int exec_termux_script(const char *path, char *const argv[], char *const envp[]) {
+    if (!path || !real_execve) return -1;
+    setup();
+    int fd = real_open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    char head[256];
+    ssize_t n = read(fd, head, sizeof(head) - 1);
+    close(fd);
+    if (n < 4 || head[0] != '#' || head[1] != '!') return -1;
+    head[n] = '\0';
+    char *line_end = strchr(head, '\n');
+    if (!line_end) return -1;
+    *line_end = '\0';
+    char *interp = head + 2;
+    while (*interp == ' ' || *interp == '\t') interp++;
+    if (strncmp(interp, TERMUX_PREFIX, strlen(TERMUX_PREFIX)) != 0) return -1;
+    char *arg = interp;
+    while (*arg && *arg != ' ' && *arg != '\t') arg++;
+    if (*arg) {
+        *arg++ = '\0';
+        while (*arg == ' ' || *arg == '\t') arg++;
+        char *end = arg + strlen(arg);
+        while (end > arg && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r')) *--end = '\0';
+    }
+    char interp_buf[1024];
+    const char *new_interp = rewrite_path(interp, interp_buf, sizeof(interp_buf));
+    int argc = 0;
+    while (argv && argv[argc]) argc++;
+    char **new_argv = calloc((size_t) argc + 4, sizeof(char *));
+    if (!new_argv) return -1;
+    int i = 0;
+    new_argv[i++] = (char *) new_interp;
+    if (*arg) new_argv[i++] = arg;
+    new_argv[i++] = (char *) path;
+    for (int k = 1; k < argc; k++) new_argv[i++] = argv[k];
+    new_argv[i] = NULL;
+    int ret = real_execve(new_interp, new_argv, envp);
+    int saved = errno;
+    free(new_argv);
+    errno = saved;
+    return ret;
+}
 
 int execve(const char *pathname, char *const argv[], char *const envp[]) {
     if (!real_execve) real_execve = dlsym(RTLD_NEXT, "execve");
     char buf[1024];
-    return real_execve(rewrite_exec_path(pathname, buf, sizeof(buf)), argv, envp);
+    const char *path = rewrite_exec_path(pathname, buf, sizeof(buf));
+    int ret = real_execve(path, argv, envp);
+    if (errno == ENOENT || errno == EACCES) {
+        int saved = errno;
+        if (exec_termux_script(path, argv, envp) < 0) errno = saved;
+    }
+    return ret;
 }
 
 int execv(const char *pathname, char *const argv[]) {
-    if (!real_execv) real_execv = dlsym(RTLD_NEXT, "execv");
-    char buf[1024];
-    return real_execv(rewrite_exec_path(pathname, buf, sizeof(buf)), argv);
+    return execve(pathname, argv, environ);
 }
 
 int execvp(const char *file, char *const argv[]) {
     if (!real_execvp) real_execvp = dlsym(RTLD_NEXT, "execvp");
+    if (!real_execve) real_execve = dlsym(RTLD_NEXT, "execve");
     char buf[1024];
-    return real_execvp(rewrite_exec_path(file, buf, sizeof(buf)), argv);
+    const char *path = rewrite_exec_path(file, buf, sizeof(buf));
+    // A path (dpkg passes maintainer scripts this way) does not use the PATH search.
+    if (path && strchr(path, '/')) return execve(path, argv, environ);
+    return real_execvp(path, argv);
 }
 
 int execvpe(const char *file, char *const argv[], char *const envp[]) {
     if (!real_execvpe) real_execvpe = dlsym(RTLD_NEXT, "execvpe");
     char buf[1024];
-    return real_execvpe(rewrite_exec_path(file, buf, sizeof(buf)), argv, envp);
+    const char *path = rewrite_exec_path(file, buf, sizeof(buf));
+    if (path && strchr(path, '/')) return execve(path, argv, envp);
+    return real_execvpe(path, argv, envp);
 }

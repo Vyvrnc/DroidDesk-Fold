@@ -29,7 +29,7 @@ class LinuxRuntime(private val context: Context) {
         // without kopper (the kopper path flickers without DRI3).
         private const val MESA_KGSL_VERSION = "26.2.3-2"
         // Bump when debian-setup gains something existing installs need (rerun at session start).
-        private const val DEBIAN_SETUP_VERSION = 1
+        private const val DEBIAN_SETUP_VERSION = 2
         private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
 
         /**
@@ -567,7 +567,9 @@ class LinuxRuntime(private val context: Context) {
                 status|"") ;;
                 *) echo "Usage: droiddesk-gpu on|off|status" >&2; exit 2 ;;
             esac
-            if [ ! -d /opt/mesa-kgsl ]; then
+            if [ ! -e /dev/kgsl-3d0 ]; then
+                echo "Hardware OpenGL: not available on this GPU (needs Adreno/KGSL); software rendering (llvmpipe)"
+            elif [ ! -d /opt/mesa-kgsl ]; then
                 echo "Hardware OpenGL: not installed (run debian-setup)"
             elif [ -f /etc/droiddesk/gpu-off ]; then
                 echo "Hardware OpenGL: off"
@@ -2241,6 +2243,56 @@ class LinuxRuntime(private val context: Context) {
     }
 
     @Volatile private var debianSetupRunning = false
+    @Volatile private var lookInstallRunning = false
+
+    /**
+     * Installs from before fold.34 have no Fluent themes, so the default look (applied once
+     * by droiddesk-xfce-tweaks) never happened (tablet: plain Adwaita). Installs them in the
+     * background once and applies the look right away in the running session. Own process,
+     * not executeCommand: that one routes other commands into an active process's stdin.
+     */
+    private fun ensureDefaultLookInBackground() {
+        if (lookInstallRunning) return
+        if (File(homeDir, ".config/droiddesk/xfce-look-fluent-v1").exists()) return
+        val themesThere = File(prefixDir, "share/themes/Fluent-Dark").isDirectory &&
+            File(prefixDir, "share/icons/Fluent-dark").isDirectory
+        if (themesThere) return // droiddesk-xfce-tweaks applies it at the session's autostart
+        lookInstallRunning = true
+        Thread({
+            try {
+                val env = getTermuxEnv() + mapOf(
+                    "DEBIAN_FRONTEND" to "noninteractive",
+                    "DBUS_SESSION_BUS_ADDRESS" to "unix:path=${tmpDir.absolutePath}/dbus-session",
+                )
+                fun run(vararg command: String): Int = ProcessBuilder(*command)
+                    .directory(homeDir)
+                    .redirectErrorStream(true)
+                    .redirectOutput(ProcessBuilder.Redirect.appendTo(File(tmpDir, "droiddesk-look.log")))
+                    .also { it.environment().clear(); it.environment().putAll(env) }
+                    .start()
+                    .waitFor()
+                val installed = run(
+                    File(binDir, "apt-get").absolutePath,
+                    "-o", "Dpkg::Options::=--force-confdef", "-o", "Dpkg::Options::=--force-confold",
+                    "install", "-y", "fluent-gtk-theme", "fluent-icon-theme",
+                ) == 0
+                if (installed && File(prefixDir, "share/themes/Fluent-Dark").isDirectory) {
+                    // The session bus may still be starting.
+                    val bus = File(tmpDir, "dbus-session")
+                    val until = System.currentTimeMillis() + 60_000
+                    while (!bus.exists() && System.currentTimeMillis() < until) Thread.sleep(1000)
+                    run(File(binDir, "bash").absolutePath, File(binDir, "droiddesk-xfce-tweaks").absolutePath)
+                    Log.i(TAG, "Fluent look installed and applied")
+                } else {
+                    Log.w(TAG, "Fluent themes not installed; retrying next session (tmp/droiddesk-look.log)")
+                }
+            } catch (error: Exception) {
+                Log.w(TAG, "Default look install failed", error)
+            } finally {
+                lookInstallRunning = false
+            }
+        }, "default-look").apply { isDaemon = true }.start()
+    }
 
     /**
      * debian-setup runs at Debian's installation; without network it failed and nothing
@@ -2786,6 +2838,7 @@ class LinuxRuntime(private val context: Context) {
             writeXfceTweaks()
         }
         refreshDebianSetupInBackground()
+        if (selectedDesktop == "xfce4") ensureDefaultLookInBackground()
 
         // X11ServerService owns this socket. Never delete it from the client runtime.
         File(tmpDir, ".X11-unix").mkdirs()
