@@ -344,7 +344,8 @@ class LinuxRuntime(private val context: Context) {
                     # proot has no uid map, so Claude Code (2.1.289+) turns local cross-session
                     # messaging off unless it gets a socket path. One socket per session; the
                     # ones of sessions that ended are removed.
-                    d=/tmp/claude-msg; mkdir -p ${'$'}d
+                    # Claude Code wants a private (0700) directory it owns.
+                    d=${'$'}HOME/.cache/claude-msg; mkdir -p -m 700 ${'$'}d; chmod 700 ${'$'}d
                     for s in ${'$'}d/*.sock; do [ -e "${'$'}s" ] || continue; p=${'$'}{s##*/}; kill -0 ${'$'}{p%.sock} 2>/dev/null || rm -f "${'$'}s"; done
                     exec claude --messaging-socket-path "${'$'}d/${'$'}${'$'}.sock" "${'$'}@"' claude "${'$'}@"
             """.trimIndent() + "\n",

@@ -39,5 +39,5 @@ Used for pkg install, tumblerd, gio mount, logcat, dlopen with the hook.
 - `pkill -f` / `pgrep -f` with a pattern also match the calling shell; kill by PID.
 - Claude Code 2.1.289 in proot: "Cross-session messaging is off … user namespace without a uid
   mapping". `claude-debian` (and the Claude Code menu entry) passes
-  `--messaging-socket-path /tmp/claude-msg/<pid>.sock` since fold.38; a plain `claude` in Debian
+  `--messaging-socket-path ~/.cache/claude-msg/<pid>.sock` (directory mode 0700, required) since fold.39; a plain `claude` in Debian
   needs it by hand. Remote Control works either way.
