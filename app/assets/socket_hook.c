@@ -13,6 +13,7 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <dirent.h>
+#include <sys/syscall.h>
 #include <android/log.h>
 
 #ifndef NEW_PREFIX
@@ -654,10 +655,89 @@ static int exec_termux_script(const char *path, char *const argv[], char *const 
     return ret;
 }
 
+/*
+ * dpkg maintainer scripts also name Termux's prefix in their body (openssh:
+ * mkdir -p "/data/data/com.termux/files/usr/var/empty"; mariadb). Absolute
+ * calls are redirected, but GNU mkdir -p walks the path component by component
+ * with relative names ("com.termux" inside /data/data), which the hook cannot
+ * map: "cannot create directory '/data/data/com.termux': Permission denied".
+ * Such a script runs from an in-memory copy with the prefix replaced, through
+ * the relocated interpreter. Only maintainer scripts (…/var/lib/dpkg/info/…),
+ * so ordinary scripts keep their $0. Returns -1 when not applicable.
+ */
+#define MAX_RELOCATED_SCRIPT (1024 * 1024)
+static int exec_relocated_maintainer_script(const char *path, char *const argv[], char *const envp[]) {
+    if (!path || !strstr(path, "/var/lib/dpkg/info/") || !real_execve) return -1;
+    setup();
+    int fd = real_open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    char *text = malloc(MAX_RELOCATED_SCRIPT + 1);
+    if (!text) { close(fd); return -1; }
+    size_t len = 0;
+    ssize_t n;
+    while (len < MAX_RELOCATED_SCRIPT && (n = read(fd, text + len, MAX_RELOCATED_SCRIPT - len)) > 0) len += (size_t) n;
+    close(fd);
+    text[len] = '\0';
+    if (len < 4 || len >= MAX_RELOCATED_SCRIPT || text[0] != '#' || text[1] != '!' ||
+        memchr(text, '\0', len) || !strstr(text, TERMUX_PREFIX)) {
+        free(text);
+        return -1;
+    }
+    int mem = (int) syscall(__NR_memfd_create, "droiddesk-maintscript", 0);
+    if (mem < 0) { free(text); return -1; }
+    size_t old_len = strlen(TERMUX_PREFIX), new_len = strlen(NEW_PREFIX);
+    const char *at = text;
+    const char *hit;
+    int ok = 1;
+    while (ok && (hit = strstr(at, TERMUX_PREFIX)) != NULL) {
+        ok = write(mem, at, (size_t) (hit - at)) == hit - at && write(mem, NEW_PREFIX, new_len) == (ssize_t) new_len;
+        at = hit + old_len;
+    }
+    if (ok) ok = write(mem, at, strlen(at)) == (ssize_t) strlen(at);
+    /* The interpreter of the relocated copy. */
+    char *line_end = strchr(text, '\n');
+    if (!ok || !line_end) { close(mem); free(text); return -1; }
+    *line_end = '\0';
+    char *interp = text + 2;
+    while (*interp == ' ' || *interp == '\t') interp++;
+    char *arg = interp;
+    while (*arg && *arg != ' ' && *arg != '\t') arg++;
+    if (*arg) {
+        *arg++ = '\0';
+        while (*arg == ' ' || *arg == '\t') arg++;
+        char *end = arg + strlen(arg);
+        while (end > arg && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r')) *--end = '\0';
+    }
+    char interp_buf[1024], script_path[64];
+    const char *new_interp = rewrite_path(interp, interp_buf, sizeof(interp_buf));
+    snprintf(script_path, sizeof(script_path), "/proc/self/fd/%d", mem);
+    int argc = 0;
+    while (argv && argv[argc]) argc++;
+    char **new_argv = calloc((size_t) argc + 4, sizeof(char *));
+    if (!new_argv) { close(mem); free(text); return -1; }
+    int i = 0;
+    new_argv[i++] = (char *) new_interp;
+    if (*arg) new_argv[i++] = arg;
+    new_argv[i++] = script_path;
+    for (int k = 1; k < argc; k++) new_argv[i++] = argv[k];
+    new_argv[i] = NULL;
+    int ret = real_execve(new_interp, new_argv, envp);
+    int saved = errno;
+    free(new_argv);
+    close(mem);
+    free(text);
+    errno = saved;
+    return ret;
+}
+
 int execve(const char *pathname, char *const argv[], char *const envp[]) {
     if (!real_execve) real_execve = dlsym(RTLD_NEXT, "execve");
     char buf[1024];
     const char *path = rewrite_exec_path(pathname, buf, sizeof(buf));
+    {
+        int saved = errno;
+        if (exec_relocated_maintainer_script(path, argv, envp) < 0) errno = saved;
+    }
     int ret = real_execve(path, argv, envp);
     if (errno == ENOENT || errno == EACCES) {
         int saved = errno;

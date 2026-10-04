@@ -937,12 +937,12 @@ class LinuxRuntime(private val context: Context) {
                 marker4="${'$'}HOME/.config/droiddesk/xfce-look-fluent-v1"
                 themes="${prefixDir.absolutePath}/share/themes"
                 icons="${prefixDir.absolutePath}/share/icons"
-                if [ ! -f "${'$'}marker4" ] && [ -d "${'$'}themes/Fluent-Dark" ] && [ -d "${'$'}icons/Fluent-dark" ]; then
+                if [ ! -f "${'$'}marker4" ] && [ -d "${'$'}themes/Fluent-Dark" ]; then
                     current=${'$'}(xfconf-query -c xsettings -p /Net/ThemeName 2>/dev/null)
                     case "${'$'}current" in
                         ""|Adwaita|Adwaita-dark|Default|Xfce)
                             xfconf-query -c xsettings -p /Net/ThemeName -n -t string -s Fluent-Dark
-                            xfconf-query -c xsettings -p /Net/IconThemeName -n -t string -s Fluent-dark
+                            [ -d "${'$'}icons/Fluent-dark" ] && xfconf-query -c xsettings -p /Net/IconThemeName -n -t string -s Fluent-dark
                             xfconf-query -c xsettings -p /Gtk/CursorThemeSize -n -t int -s 32
                             xfconf-query -c xfwm4 -p /general/theme -n -t string -s Fluent-Dark
                             xfconf-query -c xfwm4 -p /general/title_font -n -t string -s "Sans Bold 9"
@@ -954,6 +954,16 @@ class LinuxRuntime(private val context: Context) {
                             ;;
                     esac
                     mkdir -p "${'$'}(dirname "${'$'}marker4")" && touch "${'$'}marker4"
+                fi
+                # Fluent icons installed after the theme (separate package): once, while the
+                # icon theme is still the default.
+                marker5="${'$'}HOME/.config/droiddesk/xfce-look-fluent-icons-v1"
+                if [ ! -f "${'$'}marker5" ] && [ -d "${'$'}icons/Fluent-dark" ]; then
+                    case "${'$'}(xfconf-query -c xsettings -p /Net/IconThemeName 2>/dev/null)" in
+                        ""|Adwaita|Default|Tango|hicolor)
+                            xfconf-query -c xsettings -p /Net/IconThemeName -n -t string -s Fluent-dark ;;
+                    esac
+                    mkdir -p "${'$'}(dirname "${'$'}marker5")" && touch "${'$'}marker5"
                 fi
 
                 # A vertical panel (mode 1) rotates text plugins such as the battery
@@ -2146,6 +2156,34 @@ class LinuxRuntime(private val context: Context) {
      * packages from the healthy main/X11 repositories. apt-get uses the last
      * verified indexes and only refreshes as a recovery step if installation fails.
      */
+    /**
+     * Termux does not support partial upgrades: the bootstrap's libraries are older than
+     * the repository's packages, and Firefox 157 needed a symbol from the newer libc++
+     * ("cannot locate symbol _ZNSt6__ndk113__hash_memoryEPKvm", tablet). Before packages
+     * are installed the installed ones are brought up to date, at most every 12 hours.
+     * Not fatal: the install itself still runs.
+     */
+    private fun syncInstalledPackages() {
+        val stamp = File(prefixDir, "var/lib/droiddesk/last-full-upgrade")
+        if (stamp.isFile && System.currentTimeMillis() - stamp.lastModified() < 12 * 3600 * 1000L) return
+        Log.i(TAG, "Updating installed packages before installing new ones")
+        executeCommand("timeout --signal=TERM --kill-after=5s 180s apt-get update")
+        if (packageOperationCancelled) return
+        val upgrade = executeCommand(
+            "DEBIAN_FRONTEND=noninteractive apt-get " +
+                "-o Dpkg::Options::=--force-confdef " +
+                "-o Dpkg::Options::=--force-confold full-upgrade -y",
+        )
+        patchShebangs(force = true)
+        executeCommand("timeout --signal=TERM --kill-after=5s 90s dpkg --configure -a")
+        if (!upgrade.startsWith("Error:")) {
+            stamp.parentFile?.mkdirs()
+            stamp.writeText("${System.currentTimeMillis()}\n")
+        } else {
+            Log.w(TAG, "Full upgrade failed; installing anyway")
+        }
+    }
+
     private fun installOptionalPackages(
         packages: List<String>,
         onProgress: ((Double, String) -> Unit)? = null,
@@ -2153,6 +2191,7 @@ class LinuxRuntime(private val context: Context) {
     ): Boolean {
         if (packages.isEmpty()) return true
         val packageNames = packages.joinToString(" ")
+        syncInstalledPackages()
 
         fun installAndRecover(): Boolean {
             val installOutput = executeCommand(
@@ -2264,6 +2303,8 @@ class LinuxRuntime(private val context: Context) {
         val themesThere = File(prefixDir, "share/themes/Fluent-Dark").isDirectory &&
             File(prefixDir, "share/icons/Fluent-dark").isDirectory
         if (themesThere) return // droiddesk-xfce-tweaks applies it at the session's autostart
+        val failedAt = File(tmpDir, "droiddesk-look.failed")
+        if (failedAt.isFile && System.currentTimeMillis() - failedAt.lastModified() < 6 * 3600 * 1000L) return
         lookInstallRunning = true
         Thread({
             try {
@@ -2278,20 +2319,29 @@ class LinuxRuntime(private val context: Context) {
                     .also { it.environment().clear(); it.environment().putAll(env) }
                     .start()
                     .waitFor()
-                val installed = run(
-                    File(binDir, "apt-get").absolutePath,
-                    "-o", "Dpkg::Options::=--force-confdef", "-o", "Dpkg::Options::=--force-confold",
-                    "install", "-y", "fluent-gtk-theme", "fluent-icon-theme",
-                ) == 0
-                if (installed && File(prefixDir, "share/themes/Fluent-Dark").isDirectory) {
+                // A stale index gave 404 for a package version the mirror had dropped
+                // (tablet); each theme on its own so missing icons do not block the rest.
+                val aptGet = File(binDir, "apt-get").absolutePath
+                run(aptGet, "update")
+                for (pkg in listOf("fluent-gtk-theme", "fluent-icon-theme")) {
+                    run(
+                        aptGet, "-o", "Dpkg::Options::=--force-confdef", "-o", "Dpkg::Options::=--force-confold",
+                        "install", "-y", pkg,
+                    )
+                }
+                if (File(prefixDir, "share/themes/Fluent-Dark").isDirectory) {
                     // The session bus may still be starting.
                     val bus = File(tmpDir, "dbus-session")
                     val until = System.currentTimeMillis() + 60_000
                     while (!bus.exists() && System.currentTimeMillis() < until) Thread.sleep(1000)
                     run(File(binDir, "bash").absolutePath, File(binDir, "droiddesk-xfce-tweaks").absolutePath)
                     Log.i(TAG, "Fluent look installed and applied")
-                } else {
-                    Log.w(TAG, "Fluent themes not installed; retrying next session (tmp/droiddesk-look.log)")
+                }
+                if (!File(prefixDir, "share/icons/Fluent-dark").isDirectory ||
+                    !File(prefixDir, "share/themes/Fluent-Dark").isDirectory
+                ) {
+                    File(tmpDir, "droiddesk-look.failed").writeText("${System.currentTimeMillis()}\n")
+                    Log.w(TAG, "Fluent themes incomplete; retrying later (tmp/droiddesk-look.log)")
                 }
             } catch (error: Exception) {
                 Log.w(TAG, "Default look install failed", error)

@@ -9,7 +9,7 @@ mkdir -p /tmp/stub/android && echo 'static inline int __android_log_print(int p,
 #define ANDROID_LOG_INFO 4
 #define ANDROID_LOG_DEBUG 3' > /tmp/stub/android/log.h
 gcc -shared -fPIC -O2 -Wall -I/tmp/stub -DNEW_PREFIX='"/tmp/newprefix"' -o /tmp/hook.so /repo/app/assets/socket_hook.c -ldl 2>&1 | grep -v "^$" | head -20
-mkdir -p /tmp/newprefix/bin && ln -sf /bin/sh /tmp/newprefix/bin/sh && ln -sf /usr/bin/env /tmp/newprefix/bin/env
+mkdir -p /tmp/newprefix/bin && ln -sf /bin/sh /tmp/newprefix/bin/sh && ln -sf /usr/bin/env /tmp/newprefix/bin/env; for t in mkdir ls; do ln -sf "$(command -v $t)" /tmp/newprefix/bin/$t; done
 printf '#!/data/data/com.termux/files/usr/bin/sh\necho "sh-script args: $*"\n' > /root/s1 && chmod +x /root/s1
 printf '#!/data/data/com.termux/files/usr/bin/env sh\necho "env-script args: $*"\n' > /root/s2 && chmod +x /root/s2
 printf '#!/bin/sh\necho "normal args: $*"\n' > /root/s3 && chmod +x /root/s3
@@ -20,4 +20,12 @@ for s in s1 s2 s3; do
 done
 out=$(LD_PRELOAD=/tmp/hook.so env /root/missing 2>&1); echo "missing -> $out"; echo "$out" | grep -q "No such file" || fail=1
 out=$(env /root/s1 2>&1); echo "without hook -> $out"
+# A maintainer script whose body names the prefix: mkdir -p walks relative components.
+mkdir -p /root/admin/var/lib/dpkg/info /tmp/newprefix/var
+printf '#!/data/data/com.termux/files/usr/bin/sh
+mkdir -p "/data/data/com.termux/files/usr/var/empty" && echo "made: $(ls -d /tmp/newprefix/var/empty)"; echo "arg: $1"
+' > /root/admin/var/lib/dpkg/info/x.postinst
+chmod +x /root/admin/var/lib/dpkg/info/x.postinst
+out=$(LD_PRELOAD=/tmp/hook.so env PATH=/tmp/newprefix/bin TMPDIR=/tmp /root/admin/var/lib/dpkg/info/x.postinst configure 2>&1); echo "postinst -> $out"
+echo "$out" | grep -q "made: /tmp/newprefix/var/empty" && echo "$out" | grep -q "arg: configure" || fail=1
 [ $fail = 0 ] && echo HOOK_OK || echo HOOK_FAILED
