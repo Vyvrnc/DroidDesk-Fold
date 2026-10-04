@@ -28,6 +28,8 @@ class LinuxRuntime(private val context: Context) {
         // <Mesa version>-<build revision>; -2 adds softpipe so zink can present
         // without kopper (the kopper path flickers without DRI3).
         private const val MESA_KGSL_VERSION = "26.2.3-2"
+        // Bump when debian-setup gains something existing installs need (rerun at session start).
+        private const val DEBIAN_SETUP_VERSION = 1
         private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
 
         /**
@@ -173,7 +175,12 @@ class LinuxRuntime(private val context: Context) {
 
     /** Claude Code's native installer puts it in Debian root's ~/.local/bin (claude-debian runs it). */
     private fun isClaudeCodeInstalled(): Boolean =
-        File(debianRootfs(baseDir), "root/.local/bin/claude").exists().also { if (it) writeClaudeMenuEntry() }
+        // The launcher is an absolute symlink into Debian (/root/.local/share/claude/versions/…):
+        // File.exists() follows it on Android's side, where /root does not exist.
+        java.nio.file.Files.exists(
+            File(debianRootfs(baseDir), "root/.local/bin/claude").toPath(),
+            java.nio.file.LinkOption.NOFOLLOW_LINKS,
+        ).also { if (it) writeClaudeMenuEntry() }
 
     /** "Claude Code" in the XFCE menu: a terminal with claude-debian (in ~/projekty/Claude when it exists). */
     private fun writeClaudeMenuEntry() {
@@ -205,6 +212,12 @@ class LinuxRuntime(private val context: Context) {
         if (!isMinimalDebianInstalled()) {
             onProgress?.invoke(0.2, "Installing Debian for Claude Code...")
             if (!installMinimalDebian(onProgress)) return false
+        }
+        // A background debian-setup (session start) holds apt's lock: let it finish.
+        val waitUntil = System.currentTimeMillis() + 10 * 60 * 1000
+        while (debianSetupRunning && System.currentTimeMillis() < waitUntil) {
+            onProgress?.invoke(0.6, "Waiting for Debian setup to finish...")
+            Thread.sleep(2000)
         }
         onProgress?.invoke(0.7, "Downloading Claude Code from claude.ai...")
         val run = File(binDir, "debian-run").absolutePath
@@ -682,6 +695,7 @@ class LinuxRuntime(private val context: Context) {
                 > /etc/apt/apt.conf.d/99droiddesk-menu-sync
             /usr/local/sbin/droiddesk-menu-sync
 
+            echo "$DEBIAN_SETUP_VERSION" > /etc/droiddesk/setup-version
             echo "DroidDesk Debian setup done"
             DROIDDESK_DEBIAN_SETUP
             """.trimIndent() + "\n",
@@ -2226,6 +2240,41 @@ class LinuxRuntime(private val context: Context) {
         return isDpkgPackageInstalled("nodejs")
     }
 
+    @Volatile private var debianSetupRunning = false
+
+    /**
+     * debian-setup runs at Debian's installation; without network it failed and nothing
+     * retried it (tablet: no curl, no PATH for ~/.local/bin, so no Claude Code). At session
+     * start it runs again in the background until it has got through once for the current
+     * DEBIAN_SETUP_VERSION (bumped when the script gains something older installs need).
+     * Idempotent; log in tmp/debian-setup.log.
+     */
+    private fun refreshDebianSetupInBackground() {
+        if (debianSetupRunning || debianRootfsMarkers().none(File::exists)) return
+        val stamp = File(debianRootfs(baseDir), "etc/droiddesk/setup-version")
+        if (stamp.isFile && stamp.readText().trim() == DEBIAN_SETUP_VERSION.toString()) return
+        val setup = File(binDir, "debian-setup")
+        if (!setup.canExecute()) writeDebianLauncher()
+        debianSetupRunning = true
+        Thread({
+            try {
+                val log = File(tmpDir, "debian-setup.log")
+                val process = ProcessBuilder(File(prefixDir, "bin/bash").absolutePath, setup.absolutePath)
+                    .directory(homeDir)
+                    .redirectErrorStream(true)
+                    .redirectOutput(log)
+                    .also { it.environment().clear(); it.environment().putAll(getTermuxEnv()) }
+                    .start()
+                val code = process.waitFor()
+                Log.i(TAG, "Background debian-setup finished with $code (log ${log.path})")
+            } catch (error: Exception) {
+                Log.w(TAG, "Background debian-setup failed", error)
+            } finally {
+                debianSetupRunning = false
+            }
+        }, "debian-setup").apply { isDaemon = true }.start()
+    }
+
     /** Installs only PRoot, proot-distro and Debian's base rootfs. */
     private fun installMinimalDebian(
         onProgress: ((Double, String) -> Unit)? = null,
@@ -2379,6 +2428,17 @@ class LinuxRuntime(private val context: Context) {
         if (!installPackageGroup("pkg install -y $nativeTools")) {
             Log.e(TAG, "Native Termux utility package install failed")
             return false
+        }
+        // Debian (glibc programs, Claude Code, apt) belongs to the desktop: installed right
+        // away. Without network or on failure the desktop still works and the catalog's
+        // "Debian Compatibility" retries it.
+        if (debianRootfsMarkers().none(File::exists)) {
+            val ok = runCatching {
+                installMinimalDebian { fraction, text ->
+                    onProgress?.invoke(0.86 + 0.07 * fraction.coerceIn(0.0, 1.0), text)
+                }
+            }.getOrDefault(false)
+            if (!ok) Log.w(TAG, "Debian could not be installed with the desktop; the catalog can retry")
         }
         onProgress?.invoke(0.94, "Finalizing native Linux environment...")
 
@@ -2725,6 +2785,7 @@ class LinuxRuntime(private val context: Context) {
             )
             writeXfceTweaks()
         }
+        refreshDebianSetupInBackground()
 
         // X11ServerService owns this socket. Never delete it from the client runtime.
         File(tmpDir, ".X11-unix").mkdirs()
