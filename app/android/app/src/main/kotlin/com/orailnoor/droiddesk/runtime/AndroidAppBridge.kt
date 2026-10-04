@@ -272,9 +272,11 @@ object AndroidAppBridge {
         val idEnd = "<!-- DroidDesk Android dock ids end -->"
         val pluginStart = "<!-- DroidDesk Android dock plugins start -->"
         val pluginEnd = "<!-- DroidDesk Android dock plugins end -->"
-        var xml = panelFile.readText()
-            .replace(managedXmlBlock(idStart, idEnd), "")
-            .replace(managedXmlBlock(pluginStart, pluginEnd), "")
+        var xml = withoutDockEntries(
+            panelFile.readText()
+                .replace(managedXmlBlock(idStart, idEnd), "")
+                .replace(managedXmlBlock(pluginStart, pluginEnd), ""),
+        )
 
         val idNeedle = Regex("<value type=\\\"int\\\" value=\\\"24\\\"/>")
         idNeedle.find(xml)?.let { match ->
@@ -382,6 +384,35 @@ object AndroidAppBridge {
                 append("xfconf-query -c xfce4-panel -p /plugins/plugin-$id/items -n -a -t string -s '$filename' >/dev/null 2>&1; ")
             }
         }
+    }
+
+    /**
+     * xfconfd rewrites xfce4-panel.xml without comments, so the dock ids lost their
+     * DroidDesk markers, survived the marker cleanup and were inserted again on every
+     * start: 30, 31, 32 five times after five starts, drawn as empty grey launchers
+     * (tablet). Removes the dock's ids (30–37) from panel-2's plugin-ids, with or without
+     * markers, drops duplicate ids, and removes unmarked plugin-30…37 launcher definitions;
+     * syncLaunchers then inserts them once.
+     */
+    private fun withoutDockEntries(input: String): String {
+        var xml = input.replace(
+            Regex(
+                "\\s*<property name=\"plugin-3[0-7]\" type=\"string\" value=\"launcher\"" +
+                    "(?:/>|>\\s*(?:<property name=\"items\" type=\"array\">.*?</property>\\s*)?</property>)",
+                RegexOption.DOT_MATCHES_ALL,
+            ),
+            "",
+        )
+        val panel = xml.indexOf("<property name=\"panel-2\"").takeIf { it >= 0 } ?: return xml
+        val idsStart = xml.indexOf("<property name=\"plugin-ids\"", panel).takeIf { it >= 0 } ?: return xml
+        val idsEnd = xml.indexOf("</property>", idsStart).takeIf { it >= 0 } ?: return xml
+        val seen = mutableSetOf<Int>()
+        val section = Regex("\\s*<value type=\"int\" value=\"(\\d+)\"/>").replace(xml.substring(idsStart, idsEnd)) { match ->
+            val id = match.groupValues[1].toInt()
+            if (id in 30..37 || !seen.add(id)) "" else match.value
+        }
+        xml = xml.substring(0, idsStart) + section + xml.substring(idsEnd)
+        return xml
     }
 
     private fun managedXmlBlock(start: String, end: String): Regex = Regex(
