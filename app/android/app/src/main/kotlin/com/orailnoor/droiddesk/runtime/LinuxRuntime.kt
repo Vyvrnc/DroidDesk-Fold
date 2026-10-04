@@ -976,6 +976,16 @@ class LinuxRuntime(private val context: Context) {
                     esac
                     mkdir -p "${'$'}(dirname "${'$'}marker4")" && touch "${'$'}marker4"
                 fi
+                # Images open in ristretto, not in Firefox (types the user has not set). Once.
+                marker6="${'$'}HOME/.config/droiddesk/image-viewer-v1"
+                viewer=${'$'}(ls "${prefixDir.absolutePath}/share/applications/"*ristretto*.desktop 2>/dev/null | head -1)
+                if [ ! -f "${'$'}marker6" ] && [ -n "${'$'}viewer" ] && command -v xdg-mime >/dev/null; then
+                    for type in image/png image/jpeg image/gif image/webp image/bmp image/tiff image/svg+xml; do
+                        grep -q "^${'$'}type=" "${'$'}HOME/.config/mimeapps.list" 2>/dev/null ||
+                            xdg-mime default "${'$'}(basename "${'$'}viewer")" "${'$'}type"
+                    done
+                    mkdir -p "${'$'}(dirname "${'$'}marker6")" && touch "${'$'}marker6"
+                fi
                 # Fluent icons installed after the theme (separate package): once, while the
                 # icon theme is still the default.
                 marker5="${'$'}HOME/.config/droiddesk/xfce-look-fluent-icons-v1"
@@ -2425,10 +2435,13 @@ class LinuxRuntime(private val context: Context) {
      */
     private fun ensureDefaultLookInBackground() {
         if (lookInstallRunning) return
-        if (File(homeDir, ".config/droiddesk/xfce-look-fluent-v1").exists()) return
+        val lookDone = File(homeDir, ".config/droiddesk/xfce-look-fluent-v1").exists()
         val themesThere = File(prefixDir, "share/themes/Fluent-Dark").isDirectory &&
             File(prefixDir, "share/icons/Fluent-dark").isDirectory
-        if (themesThere) return // droiddesk-xfce-tweaks applies it at the session's autostart
+        // Image viewer (ristretto, 0.5 MB, XFCE's own libraries): PNG/JPEG opened in Firefox.
+        val viewerThere = File(binDir, "ristretto").exists()
+        // droiddesk-xfce-tweaks applies the look and the image defaults at the session's autostart.
+        if ((lookDone || themesThere) && viewerThere) return
         val failedAt = File(tmpDir, "droiddesk-look.failed")
         if (failedAt.isFile && System.currentTimeMillis() - failedAt.lastModified() < 6 * 3600 * 1000L) return
         lookInstallRunning = true
@@ -2449,13 +2462,13 @@ class LinuxRuntime(private val context: Context) {
                 // (tablet); each theme on its own so missing icons do not block the rest.
                 val aptGet = File(binDir, "apt-get").absolutePath
                 run(aptGet, "update")
-                for (pkg in listOf("fluent-gtk-theme", "fluent-icon-theme")) {
+                for (pkg in listOf("fluent-gtk-theme", "fluent-icon-theme", "ristretto")) {
                     run(
                         aptGet, "-o", "Dpkg::Options::=--force-confdef", "-o", "Dpkg::Options::=--force-confold",
                         "install", "-y", pkg,
                     )
                 }
-                if (File(prefixDir, "share/themes/Fluent-Dark").isDirectory) {
+                if (File(prefixDir, "share/themes/Fluent-Dark").isDirectory || File(binDir, "ristretto").exists()) {
                     // The session bus may still be starting.
                     val bus = File(tmpDir, "dbus-session")
                     val until = System.currentTimeMillis() + 60_000
@@ -2629,7 +2642,7 @@ class LinuxRuntime(private val context: Context) {
             Log.w(TAG, "xfce4-screenshooter unavailable; PrintScreen does nothing")
         }
         // The default look (Fluent, see writeXfceTweaks); XFCE's own theme stays without them.
-        if (selectedDesktop == "xfce4" && !installPackageGroup("pkg install -y fluent-gtk-theme fluent-icon-theme")) {
+        if (selectedDesktop == "xfce4" && !installPackageGroup("pkg install -y fluent-gtk-theme fluent-icon-theme ristretto")) {
             Log.w(TAG, "Fluent themes unavailable; XFCE keeps its default look")
         }
         if (!installPackageGroup("pkg install -y dosfstools exfatprogs e2fsprogs mtools")) {
