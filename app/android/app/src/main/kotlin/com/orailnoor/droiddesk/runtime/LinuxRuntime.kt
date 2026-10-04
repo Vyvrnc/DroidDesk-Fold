@@ -3043,6 +3043,9 @@ class LinuxRuntime(private val context: Context) {
         // Remove stale Xfce ICE listeners left by a killed/restarted activity.
         tmpDir.listFiles { file -> file.name.startsWith(".xfsm-ICE-") }
             ?.forEach { it.delete() }
+        // Relocated copies of dpkg maintainer scripts from the socket hook.
+        tmpDir.listFiles { file -> file.name.startsWith("droiddesk-maintscript-") }
+            ?.forEach { it.delete() }
 
         // Start a session dbus-daemon and keep it as a child process. Do not use
         // --fork: a forked daemon can outlive the Android activity and leave an

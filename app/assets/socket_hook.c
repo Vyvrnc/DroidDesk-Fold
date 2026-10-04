@@ -13,7 +13,6 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <dirent.h>
-#include <sys/syscall.h>
 #include <android/log.h>
 
 #ifndef NEW_PREFIX
@@ -661,9 +660,13 @@ static int exec_termux_script(const char *path, char *const argv[], char *const 
  * calls are redirected, but GNU mkdir -p walks the path component by component
  * with relative names ("com.termux" inside /data/data), which the hook cannot
  * map: "cannot create directory '/data/data/com.termux': Permission denied".
- * Such a script runs from an in-memory copy with the prefix replaced, through
- * the relocated interpreter. Only maintainer scripts (…/var/lib/dpkg/info/…),
+ * Such a script runs from a copy with the prefix replaced, through the
+ * relocated interpreter. Only maintainer scripts (…/var/lib/dpkg/info/…),
  * so ordinary scripts keep their $0. Returns -1 when not applicable.
+ *
+ * The copy is a regular file in $TMPDIR (droiddesk-maintscript-*, removed at
+ * the next session start): an in-memory copy run as /proc/self/fd/N was
+ * refused on Android 16 ("cannot open /proc/self/fd/8: Permission denied").
  */
 #define MAX_RELOCATED_SCRIPT (1024 * 1024)
 static int exec_relocated_maintainer_script(const char *path, char *const argv[], char *const envp[]) {
@@ -683,8 +686,13 @@ static int exec_relocated_maintainer_script(const char *path, char *const argv[]
         free(text);
         return -1;
     }
-    int mem = (int) syscall(__NR_memfd_create, "droiddesk-maintscript", 0);
+    char script_path[1024];
+    const char *tmpdir = getenv("TMPDIR");
+    if (tmpdir && *tmpdir) snprintf(script_path, sizeof(script_path), "%s/droiddesk-maintscript-XXXXXX", tmpdir);
+    else snprintf(script_path, sizeof(script_path), "%s/../tmp/droiddesk-maintscript-XXXXXX", NEW_PREFIX);
+    int mem = mkstemp(script_path);
     if (mem < 0) { free(text); return -1; }
+    fchmod(mem, 0700);
     size_t old_len = strlen(TERMUX_PREFIX), new_len = strlen(NEW_PREFIX);
     const char *at = text;
     const char *hit;
@@ -696,7 +704,8 @@ static int exec_relocated_maintainer_script(const char *path, char *const argv[]
     if (ok) ok = write(mem, at, strlen(at)) == (ssize_t) strlen(at);
     /* The interpreter of the relocated copy. */
     char *line_end = strchr(text, '\n');
-    if (!ok || !line_end) { close(mem); free(text); return -1; }
+    close(mem);
+    if (!ok || !line_end) { unlink(script_path); free(text); return -1; }
     *line_end = '\0';
     char *interp = text + 2;
     while (*interp == ' ' || *interp == '\t') interp++;
@@ -708,13 +717,12 @@ static int exec_relocated_maintainer_script(const char *path, char *const argv[]
         char *end = arg + strlen(arg);
         while (end > arg && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r')) *--end = '\0';
     }
-    char interp_buf[1024], script_path[64];
+    char interp_buf[1024];
     const char *new_interp = rewrite_path(interp, interp_buf, sizeof(interp_buf));
-    snprintf(script_path, sizeof(script_path), "/proc/self/fd/%d", mem);
     int argc = 0;
     while (argv && argv[argc]) argc++;
     char **new_argv = calloc((size_t) argc + 4, sizeof(char *));
-    if (!new_argv) { close(mem); free(text); return -1; }
+    if (!new_argv) { unlink(script_path); free(text); return -1; }
     int i = 0;
     new_argv[i++] = (char *) new_interp;
     if (*arg) new_argv[i++] = arg;
@@ -724,7 +732,7 @@ static int exec_relocated_maintainer_script(const char *path, char *const argv[]
     int ret = real_execve(new_interp, new_argv, envp);
     int saved = errno;
     free(new_argv);
-    close(mem);
+    unlink(script_path);
     free(text);
     errno = saved;
     return ret;
