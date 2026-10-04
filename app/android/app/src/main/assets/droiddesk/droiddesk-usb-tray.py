@@ -270,8 +270,10 @@ def disk_summary(name):
     return (capacity, ", ".join(systems) or "žádný", ", ".join(labels))
 
 
-def progress(parent, title, args, on_done=None):
-    """Runs droiddesk-usb with --yad output in a modal window with a progress bar."""
+def progress(parent, title, args, on_done=None, auto_close=False):
+    """Runs droiddesk-usb with --yad output in a modal window with a progress bar.
+    auto_close: the window goes away by itself after a success (opening and saving files
+    back, copies in Soubory); the notification says it is done."""
     dialog = Gtk.Dialog(title=title, transient_for=parent, modal=True)
     dialog.set_default_size(620, -1)
     dialog.set_resizable(True)
@@ -306,6 +308,8 @@ def progress(parent, title, args, on_done=None):
         usb.notify(f"{title}: {'hotovo' if code == 0 else 'chyba — ' + text.get_text()}", urgent=code != 0)
         if on_done:
             on_done(code)
+        if code == 0 and auto_close:
+            GLib.timeout_add(500, lambda: dialog.response(Gtk.ResponseType.CLOSE) or False)
         return False
 
     def work():
@@ -485,7 +489,7 @@ class FilesWindow:
                 self.opened[local] = [usb_path, mtime, mtime]
                 self.status.set_text(f"Otevřeno: {name} (změny nabídnu uložit zpátky na USB)")
                 self.launch(local)
-        progress(self.window, f"Otevírám {name}", ("cp", f"usb:{usb_path}", local, self.name, "--yad"), opened)
+        progress(self.window, f"Otevírám {name}", ("cp", f"usb:{usb_path}", local, self.name, "--yad"), opened, auto_close=True)
 
     def launch(self, local):
         """The default application for the file (Linux, or Android when there is none)."""
@@ -522,7 +526,7 @@ class FilesWindow:
             if code == 0:
                 entry[1] = entry[2] = mtime
                 self.go(self.path)
-        progress(self.window, "Ukládám na USB", ("cp", local, f"usb:{entry[0]}", self.name, "--yad"), saved)
+        progress(self.window, "Ukládám na USB", ("cp", local, f"usb:{entry[0]}", self.name, "--yad"), saved, auto_close=True)
 
     def closing(self):
         """Window closed: unsaved changes are offered once more; the cache is cleaned."""
@@ -572,7 +576,7 @@ class FilesWindow:
                 paths.append(path)
         if paths:
             progress(self.window, "Kopírování na USB", ("cp", *paths, f"usb:{self.path}", self.name, "--yad"),
-                     lambda code: self.go(self.path))
+                     lambda code: self.go(self.path), auto_close=True)
 
     def selected(self):
         model, paths = self.view.get_selection().get_selected_rows()
@@ -592,13 +596,13 @@ class FilesWindow:
         files = self.choose("Nahrát soubory na USB", Gtk.FileChooserAction.OPEN, multiple=True)
         if files:
             progress(self.window, "Kopírování na USB", ("cp", *files, f"usb:{self.path}", self.name, "--yad"),
-                     lambda code: self.go(self.path))
+                     lambda code: self.go(self.path), auto_close=True)
 
     def upload_folder(self):
         folders = self.choose("Nahrát složku na USB", Gtk.FileChooserAction.SELECT_FOLDER)
         if folders:
             progress(self.window, "Kopírování na USB", ("cp", *folders, f"usb:{self.path}", self.name, "--yad"),
-                     lambda code: self.go(self.path))
+                     lambda code: self.go(self.path), auto_close=True)
 
     def download(self):
         names = self.selected()
@@ -608,7 +612,7 @@ class FilesWindow:
         target = self.choose("Kam stáhnout z USB", Gtk.FileChooserAction.SELECT_FOLDER)
         if target:
             progress(self.window, "Kopírování z USB",
-                     ("cp", *[f"usb:{self.child(n)}" for n in names], target[0], self.name, "--yad"))
+                     ("cp", *[f"usb:{self.child(n)}" for n in names], target[0], self.name, "--yad"), auto_close=True)
 
     def new_folder(self):
         name = ask_text(self.window, "Nová složka", f"Název nové složky v usb:{self.path}")
@@ -672,6 +676,12 @@ class DavServers:
         self.urls[name] = (url, label)
         self.relabel(name)
         self.set_bookmarks(self.urls)
+        # Mounted now: Thunar drops nothing on a bookmark whose location is not mounted yet.
+        try:
+            subprocess.Popen(["gio", "mount", url], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            pass
         return False
 
     def relabel(self, name):
@@ -828,7 +838,14 @@ class Tray:
     def build_window(self):
         win = Gtk.Window(title="USB")
         win.set_icon_name(ICON)
-        win.set_default_size(980, 360)
+        width = 980
+        try:
+            display = Gdk.Display.get_default()
+            monitor = display.get_primary_monitor() or display.get_monitor(0)
+            width = min(width, monitor.get_workarea().width - 40)
+        except (AttributeError, TypeError):
+            pass
+        win.set_default_size(max(width, 480), 360)
         win.set_resizable(True)
         win.connect("delete-event", lambda *_: win.hide() or True)
         # A format or copy from the terminal changes what the columns show: read the disks
@@ -861,7 +878,9 @@ class Tray:
         box.pack_start(scroll, True, True, 0)
         self.status = Gtk.Label(xalign=0, wrap=True, selectable=True)
         box.pack_start(self.status, False, False, 0)
-        buttons = Gtk.Box(spacing=6)
+        # Wrapping row: on the Fold's 1088 px the nine buttons did not fit.
+        buttons = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=6, row_spacing=6,
+                              homogeneous=False, max_children_per_line=20)
         self.buttons = {}
         for key, text, action in (("attach", "Připojit do Linuxu", self.attach),
                                   ("eject", "Vysunout", self.eject),
@@ -874,7 +893,7 @@ class Tray:
                                   ("refresh", "Obnovit", self.reload)):
             button = Gtk.Button(label=text)
             button.connect("clicked", lambda *_, a=action: a())
-            buttons.pack_start(button, False, False, 0)
+            buttons.add(button)
             self.buttons[key] = button
         box.pack_start(buttons, False, False, 0)
         self.serial = SerialPanel(self, box)
