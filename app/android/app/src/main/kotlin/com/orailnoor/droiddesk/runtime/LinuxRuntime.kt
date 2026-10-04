@@ -340,7 +340,13 @@ class LinuxRuntime(private val context: Context) {
                 --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
                 --env PROOT_LOADER_32="${File(prefixDir, "libexec/proot/loader32").absolutePath}" -- \
                 env DISPLAY="${'$'}DISPLAY" TERM="${'$'}{TERM:-xterm-256color}" \
-                bash -lc 'cd ~/projekty/Claude 2>/dev/null || cd ~; PATH="${'$'}HOME/.local/bin:${'$'}PATH"; exec claude "${'$'}@"' claude "${'$'}@"
+                bash -lc 'cd ~/projekty/Claude 2>/dev/null || cd ~; PATH="${'$'}HOME/.local/bin:${'$'}PATH"
+                    # proot has no uid map, so Claude Code (2.1.289+) turns local cross-session
+                    # messaging off unless it gets a socket path. One socket per session; the
+                    # ones of sessions that ended are removed.
+                    d=/tmp/claude-msg; mkdir -p ${'$'}d
+                    for s in ${'$'}d/*.sock; do [ -e "${'$'}s" ] || continue; p=${'$'}{s##*/}; kill -0 ${'$'}{p%.sock} 2>/dev/null || rm -f "${'$'}s"; done
+                    exec claude --messaging-socket-path "${'$'}d/${'$'}${'$'}.sock" "${'$'}@"' claude "${'$'}@"
             """.trimIndent() + "\n",
         )
         claudeLauncher.setExecutable(true, false)
