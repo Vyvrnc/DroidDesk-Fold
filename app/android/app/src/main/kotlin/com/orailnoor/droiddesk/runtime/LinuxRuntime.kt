@@ -29,7 +29,7 @@ class LinuxRuntime(private val context: Context) {
         // without kopper (the kopper path flickers without DRI3).
         private const val MESA_KGSL_VERSION = "26.2.3-2"
         // Bump when debian-setup gains something existing installs need (rerun at session start).
-        private const val DEBIAN_SETUP_VERSION = 2
+        private const val DEBIAN_SETUP_VERSION = 3
         private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
 
         /**
@@ -479,8 +479,9 @@ class LinuxRuntime(private val context: Context) {
             unset droiddesk_ld
             export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
             export WEBKIT_DISABLE_COMPOSITING_MODE=1
-            if [ -d /opt/mesa-kgsl ] && [ ! -f /etc/droiddesk/gpu-off ] && [ -w /dev/kgsl-3d0 ] &&
-                [ -f /etc/droiddesk/gpu-env.sh ]; then
+            if [ ! -f /etc/droiddesk/gpu-off ] && [ -f /etc/droiddesk/gpu-env.sh ] &&
+                { { [ -d /opt/mesa-kgsl ] && [ -w /dev/kgsl-3d0 ]; } ||
+                  { [ ! -e /dev/kgsl-3d0 ] && [ -f /etc/droiddesk/gpu-virgl ] && [ -S /tmp/.virgl_test ]; }; }; then
                 . /etc/droiddesk/gpu-env.sh
             else
                 export LIBGL_ALWAYS_SOFTWARE=1
@@ -531,10 +532,16 @@ class LinuxRuntime(private val context: Context) {
             fi
             mkdir -p /etc/droiddesk
             cat > /etc/droiddesk/gpu-env.sh <<'DROIDDESK_GPU_ENV'
-            # Hardware OpenGL from /opt/mesa-kgsl; sourced by droiddesk-gui.sh and gpu-run.
+            # Hardware OpenGL; sourced by droiddesk-gui.sh and gpu-run. Adreno: /opt/mesa-kgsl.
+            # Other GPUs (Mali, Xclipse): Debian's Mesa as a virgl client (virpipe) of the
+            # app's virgl server, which renders through ANGLE on Android's Vulkan driver.
+            if [ ! -e /dev/kgsl-3d0 ] && [ -S /tmp/.virgl_test ]; then
+                unset LIBGL_ALWAYS_SOFTWARE MESA_LOADER_DRIVER_OVERRIDE
+                export GALLIUM_DRIVER=virpipe
+            fi
             droiddesk_mesa=/opt/mesa-kgsl
             droiddesk_lib=${'$'}droiddesk_mesa/lib/aarch64-linux-gnu
-            if [ -d "${'$'}droiddesk_lib" ]; then
+            if [ -e /dev/kgsl-3d0 ] && [ -d "${'$'}droiddesk_lib" ]; then
                 unset LIBGL_ALWAYS_SOFTWARE
                 case ":${'$'}{LD_LIBRARY_PATH}:" in
                     *":${'$'}droiddesk_lib:"*) ;;
@@ -568,14 +575,23 @@ class LinuxRuntime(private val context: Context) {
             #!/bin/sh
             # Switches hardware OpenGL for all Debian programs: droiddesk-gpu on|off|status
             # Takes effect in newly started shells and apps.
+            # Without Adreno (Mali, Xclipse) "on" also asks the app for its virgl server
+            # (/etc/droiddesk/gpu-virgl), started with the next DroidDesk session.
             case "${'$'}1" in
-                on) rm -f /etc/droiddesk/gpu-off ;;
-                off) mkdir -p /etc/droiddesk && touch /etc/droiddesk/gpu-off ;;
+                on) rm -f /etc/droiddesk/gpu-off
+                    [ -e /dev/kgsl-3d0 ] || { mkdir -p /etc/droiddesk && touch /etc/droiddesk/gpu-virgl; } ;;
+                off) mkdir -p /etc/droiddesk && touch /etc/droiddesk/gpu-off && rm -f /etc/droiddesk/gpu-virgl ;;
                 status|"") ;;
                 *) echo "Usage: droiddesk-gpu on|off|status" >&2; exit 2 ;;
             esac
             if [ ! -e /dev/kgsl-3d0 ]; then
-                echo "Hardware OpenGL: not available on this GPU (needs Adreno/KGSL); software rendering (llvmpipe)"
+                if [ ! -f /etc/droiddesk/gpu-virgl ] || [ -f /etc/droiddesk/gpu-off ]; then
+                    echo "Hardware OpenGL: off (software rendering, llvmpipe). Without Adreno: droiddesk-gpu on = virgl over ANGLE/Vulkan"
+                elif [ -S /tmp/.virgl_test ]; then
+                    echo "Hardware OpenGL: on (virgl over ANGLE/Vulkan)"
+                else
+                    echo "Hardware OpenGL: on, starts with the next DroidDesk session (virgl server not running yet; log: /tmp/virgl-server.log)"
+                fi
             elif [ ! -d /opt/mesa-kgsl ]; then
                 echo "Hardware OpenGL: not installed (run debian-setup)"
             elif [ -f /etc/droiddesk/gpu-off ]; then
@@ -2289,6 +2305,111 @@ class LinuxRuntime(private val context: Context) {
     }
 
     @Volatile private var debianSetupRunning = false
+    @Volatile private var virglServer: Process? = null
+    @Volatile private var virglStarting = false
+
+    /**
+     * Hardware OpenGL for Debian programs on GPUs without KGSL (Mali, Xclipse; Galaxy Tab
+     * S10 FE): Termux's virgl_test_server_android renders through ANGLE on Android's Vulkan
+     * driver, Debian's Mesa is its client (GALLIUM_DRIVER=virpipe, /tmp/.virgl_test).
+     * Switched on by "droiddesk-gpu on" in Debian (/etc/droiddesk/gpu-virgl).
+     *
+     * The server needs a clean environment: Termux's $PREFIX/lib has libandroid-stub's
+     * libbinder_ndk.so (no symbol versions), which shadows the system one and breaks
+     * /system/lib64/libvulkan.so ("cannot find libbinder_ndk.so from verneed"), and the
+     * socket hook's dlopen takes the place of libEGL as the caller, so vendor drivers are
+     * refused for its namespace. ANGLE's directory is compiled in as a com.termux path; a
+     * copy of the server points it at a same-length symlink.
+     */
+    private fun ensureVirglServerInBackground() {
+        if (File("/dev/kgsl-3d0").exists() || virglStarting || virglServer?.isAlive == true) return
+        val rootfs = debianRootfs(baseDir)
+        if (!File(rootfs, "etc/droiddesk/gpu-virgl").exists() || File(rootfs, "etc/droiddesk/gpu-off").exists()) return
+        virglStarting = true
+        Thread({
+            try {
+                val log = File(tmpDir, "virgl-server.log")
+                val server = File(binDir, "virgl_test_server_android")
+                val angle = File(prefixDir, "opt/angle-android")
+                if (!server.isFile || !angle.isDirectory) {
+                    val env = getTermuxEnv() + mapOf("DEBIAN_FRONTEND" to "noninteractive")
+                    ProcessBuilder(
+                        File(binDir, "apt-get").absolutePath, "-o", "Dpkg::Options::=--force-confdef",
+                        "-o", "Dpkg::Options::=--force-confold", "install", "-y",
+                        "virglrenderer-android", "angle-android",
+                    ).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.appendTo(log))
+                        .also { it.environment().clear(); it.environment().putAll(env) }
+                        .start().waitFor()
+                }
+                val patched = prepareVirglServer(server, angle) ?: return@Thread
+                val socket = File(tmpDir, ".virgl_test")
+                socket.delete()
+                val process = ProcessBuilder(
+                    patched.absolutePath, "--angle-vulkan", "--multi-clients", "--socket-path", socket.absolutePath,
+                ).directory(tmpDir).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.to(log))
+                    .also {
+                        val env = it.environment()
+                        env.clear()
+                        env["LD_LIBRARY_PATH"] = File(prefixDir, "opt/virglrenderer-android/lib").absolutePath
+                        env["HOME"] = homeDir.absolutePath
+                        env["TMPDIR"] = tmpDir.absolutePath
+                    }
+                    .start()
+                virglServer = process
+                Log.i(TAG, "virgl server started (ANGLE/Vulkan), socket ${socket.path}")
+            } catch (error: Exception) {
+                Log.w(TAG, "virgl server could not start", error)
+            } finally {
+                virglStarting = false
+            }
+        }, "virgl-server").apply { isDaemon = true }.start()
+    }
+
+    /** A copy of the server with ANGLE's compiled-in com.termux directory replaced. */
+    private fun prepareVirglServer(server: File, angle: File): File? {
+        if (!server.isFile || !angle.isDirectory) return null
+        val original = "/data/data/com.termux/files/usr/opt/angle-android/"
+        val base = baseDir.absolutePath + "/"
+        val nameLength = original.length - base.length - 1
+        if (nameLength < 1) {
+            Log.w(TAG, "virgl: ${baseDir.path} is too long to patch ANGLE's path in place")
+            return null
+        }
+        val linkName = ".angle".padEnd(nameLength, '_').take(nameLength)
+        val link = File(baseDir, linkName)
+        if (runCatching { android.system.Os.readlink(link.path) }.getOrNull() != angle.absolutePath) {
+            link.delete()
+            android.system.Os.symlink(angle.absolutePath, link.path)
+        }
+        val replacement = base + linkName + "/"
+        val patched = File(prefixDir, "libexec/droiddesk-virgl-server")
+        val stamp = File(prefixDir, "libexec/droiddesk-virgl-server.src")
+        val source = "${server.length()} ${server.lastModified()} $replacement"
+        if (!patched.isFile || !stamp.isFile || stamp.readText() != source) {
+            val bytes = server.readBytes()
+            val from = original.toByteArray()
+            val to = replacement.toByteArray()
+            var i = 0
+            var count = 0
+            while (i <= bytes.size - from.size) {
+                if (bytes[i] == from[0] && (from.indices).all { bytes[i + it] == from[it] }) {
+                    System.arraycopy(to, 0, bytes, i, to.size)
+                    i += from.size
+                    count++
+                } else {
+                    i++
+                }
+            }
+            patched.parentFile?.mkdirs()
+            val tmp = File(patched.path + ".new")
+            tmp.writeBytes(bytes)
+            tmp.setExecutable(true, false)
+            if (!tmp.renameTo(patched)) error("rename to ${patched.path} failed")
+            stamp.writeText(source)
+            Log.i(TAG, "virgl server prepared: $count ANGLE path(s) -> $replacement")
+        }
+        return patched
+    }
     @Volatile private var lookInstallRunning = false
 
     /**
@@ -2895,6 +3016,7 @@ class LinuxRuntime(private val context: Context) {
             writeXfceTweaks()
         }
         refreshDebianSetupInBackground()
+        ensureVirglServerInBackground()
         if (selectedDesktop == "xfce4") ensureDefaultLookInBackground()
 
         // X11ServerService owns this socket. Never delete it from the client runtime.
@@ -3120,6 +3242,8 @@ class LinuxRuntime(private val context: Context) {
         sessionProcess = null
         dbusProcess?.destroyForcibly()
         dbusProcess = null
+        virglServer?.destroyForcibly()
+        virglServer = null
         Log.i(TAG, "Session stopped")
     }
 
