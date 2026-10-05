@@ -331,14 +331,6 @@ object AndroidAppBridge {
             packageName.takeIf { id.toIntOrNull() !in panelIds }
         }.toSet()
         if (removed.isEmpty()) return
-        // All of them missing at once is not a choice made in XFCE (the panel dropped
-        // every launcher at runtime on the tablet, 2026-10-05, and the dock came back
-        // empty for good): keep the list, the sync below puts them back.
-        val syncedCount = synced.split(',').count { it.contains(':') }
-        if (removed.size == syncedCount && syncedCount > 1) {
-            Log.w(TAG, "All Android dock apps missing from the panel; not treating it as a removal: $removed")
-            return
-        }
         setDockPackages(context, getDockPackages(context).filterNot { it in removed })
         Log.i(TAG, "Removed from the dock in XFCE, forgetting: $removed")
     }
