@@ -29,7 +29,7 @@ class LinuxRuntime(private val context: Context) {
         // without kopper (the kopper path flickers without DRI3).
         private const val MESA_KGSL_VERSION = "26.2.3-2"
         // Bump when debian-setup gains something existing installs need (rerun at session start).
-        private const val DEBIAN_SETUP_VERSION = 8
+        private const val DEBIAN_SETUP_VERSION = 9
         private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
 
         /**
@@ -434,6 +434,76 @@ class LinuxRuntime(private val context: Context) {
         )
         codexLauncher.setExecutable(true, false)
 
+        // Claude Code / Codex in a tmux session that survives closing the terminal or
+        // the desktop; a later claude-tmux / codex-tmux attaches to the same one.
+        val tmuxLauncher = File(binDir, "debian-tmux")
+        tmuxLauncher.writeText(
+            """
+            #!${File(binDir, "bash").absolutePath}
+            # debian-tmux NAME [COMMAND...]: attaches to the tmux session NAME in Debian and
+            # starts it with COMMAND first. The session outlives the terminal and the XFCE
+            # desktop, so another terminal (the app's or XFCE's) can take it over.
+            name="${'$'}1"
+            if [ -z "${'$'}name" ]; then echo "Usage: debian-tmux NAME [COMMAND...]" >&2; exit 2; fi
+            shift
+            log="${tmpDir.absolutePath}/droiddesk-tmux-${'$'}name.log"
+            # proot-distro kills the proot when its first process exits (--kill-on-exit), and the
+            # tmux server with it, so a detached host keeps a proot of its own while the session
+            # lives. The app's uid goes along: the server runs as proot's fake root, clients
+            # connect with the real uid and tmux turns them away without server-access.
+            setsid nohup "${binDir.absolutePath}/debian-run" bash -c '
+                name=${'$'}1 uid=${'$'}2; shift 2
+                command -v tmux >/dev/null || { echo "tmux is missing: apt-get install tmux"; exit 1; }
+                tmux has-session -t "=${'$'}name" 2>/dev/null && exit 0
+                conf=${'$'}HOME/.config/droiddesk/tmux.conf
+                mkdir -p "${'$'}{conf%/*}"
+                {
+                    echo "set -g default-terminal tmux-256color"
+                    echo "set -s escape-time 10"
+                    echo "set -g history-limit 50000"
+                    echo "set -s extended-keys on"
+                    echo "set -g mouse off"
+                    user=${'$'}(getent passwd "${'$'}uid" | cut -d: -f1)
+                    [ -n "${'$'}user" ] && echo "server-access -a ${'$'}user"
+                } > "${'$'}conf"
+                tmux -f "${'$'}conf" new-session -d -s "${'$'}name" "${'$'}@" || exit 0
+                while tmux has-session -t "=${'$'}name" 2>/dev/null; do sleep 5; done
+            ' droiddesk-tmux-host "${'$'}name" "${'$'}(id -u)" "${'$'}@" > "${'$'}log" 2>&1 < /dev/null &
+            exec "${binDir.absolutePath}/debian-run" bash -c '
+                for i in ${'$'}(seq 150); do
+                    tmux has-session -t "=${'$'}1" 2>/dev/null && exec tmux attach -t "=${'$'}1"
+                    sleep 0.2
+                done
+                echo "tmux session ${'$'}1 did not start, see ${'$'}2" >&2
+                exit 1
+            ' droiddesk-tmux-attach "${'$'}name" "${'$'}log"
+            """.trimIndent() + "\n",
+        )
+        tmuxLauncher.setExecutable(true, false)
+        val claudeTmuxLauncher = File(binDir, "claude-tmux")
+        claudeTmuxLauncher.writeText(
+            """
+            #!${File(binDir, "bash").absolutePath}
+            exec "${binDir.absolutePath}/debian-tmux" claude bash -lc 'cd ~/projekty/Claude 2>/dev/null || cd ~; PATH="${'$'}HOME/.local/bin:${'$'}PATH"
+                    # proot has no uid map, so Claude Code (2.1.289+) turns local cross-session
+                    # messaging off unless it gets a socket path. One socket per session; the
+                    # ones of sessions that ended are removed.
+                    # Claude Code wants a private (0700) directory it owns.
+                    d=${'$'}HOME/.cache/claude-msg; mkdir -p -m 700 ${'$'}d; chmod 700 ${'$'}d
+                    for s in ${'$'}d/*.sock; do [ -e "${'$'}s" ] || continue; p=${'$'}{s##*/}; kill -0 ${'$'}{p%.sock} 2>/dev/null || rm -f "${'$'}s"; done
+                    exec claude --messaging-socket-path "${'$'}d/${'$'}${'$'}.sock" "${'$'}@"' claude "${'$'}@"
+            """.trimIndent() + "\n",
+        )
+        claudeTmuxLauncher.setExecutable(true, false)
+        val codexTmuxLauncher = File(binDir, "codex-tmux")
+        codexTmuxLauncher.writeText(
+            """
+            #!${File(binDir, "bash").absolutePath}
+            exec "${binDir.absolutePath}/debian-tmux" codex bash -lc 'cd ~/projekty/Claude 2>/dev/null || cd ~; exec codex --no-daemon "${'$'}@"' codex "${'$'}@"
+            """.trimIndent() + "\n",
+        )
+        codexTmuxLauncher.setExecutable(true, false)
+
         // Runs one Debian command from the Termux side, e.g. from a menu entry.
         val runLauncher = File(binDir, "debian-run")
         runLauncher.writeText(
@@ -492,7 +562,7 @@ class LinuxRuntime(private val context: Context) {
             set -e
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
-            apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates dbus-x11 xz-utils pulseaudio-utils libnotify-bin
+            apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates dbus-x11 xz-utils pulseaudio-utils libnotify-bin tmux
 
             if [ -f "/usr/share/zoneinfo/$timeZone" ]; then
                 ln -sf "/usr/share/zoneinfo/$timeZone" /etc/localtime
