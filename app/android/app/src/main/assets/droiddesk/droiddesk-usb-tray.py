@@ -693,12 +693,19 @@ class DavServers:
             self.set_bookmarks(self.urls)
 
     def stop(self, name):
-        self.urls.pop(name, None)
-        try:
-            subprocess.Popen([sys.executable, DAV, name, "--stop"], env=ENV, start_new_session=True,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except OSError:
-            pass
+        entry = self.urls.pop(name, None)
+        url = entry[0] if entry else None
+
+        def work():
+            # Unmount first: gvfsd-dav kept a mount on the dead server in Thunar's Network.
+            for command in ((["gio", "mount", "-u", url],) if url else ()) + \
+                    (([sys.executable, DAV, name, "--stop"]),):
+                try:
+                    subprocess.run(command, env=ENV, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   timeout=20)  # waited for: no <defunct> children
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        threading.Thread(target=work, daemon=True).start()
         self.set_bookmarks(self.urls)
 
     def url(self, name):
