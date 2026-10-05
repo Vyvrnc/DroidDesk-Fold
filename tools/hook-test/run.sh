@@ -28,4 +28,9 @@ mkdir -p "/data/data/com.termux/files/usr/var/empty" && echo "made: $(ls -d /tmp
 chmod +x /root/admin/var/lib/dpkg/info/x.postinst
 out=$(LD_PRELOAD=/tmp/hook.so env PATH=/tmp/newprefix/bin TMPDIR=/tmp /root/admin/var/lib/dpkg/info/x.postinst configure 2>&1); echo "postinst -> $out"
 echo "$out" | grep -q "made: /tmp/newprefix/var/empty" && echo "$out" | grep -q "arg: configure" || fail=1
+# /data/data/com.termux/files/home/... is our home next to the prefix, not the prefix.
+gcc -shared -fPIC -O2 -I/tmp/stub -DNEW_PREFIX='"/tmp/files/usr"' -o /tmp/hook2.so /repo/app/assets/socket_hook.c -ldl 2>/dev/null
+mkdir -p /tmp/files/usr /tmp/files/home && echo HOMEFILE > /tmp/files/home/.bashrc
+out=$(LD_PRELOAD=/tmp/hook2.so TMPDIR=/tmp /bin/cat /data/data/com.termux/files/home/.bashrc 2>&1); echo "home -> $out"
+echo "$out" | grep -q HOMEFILE || fail=1
 [ $fail = 0 ] && echo HOOK_OK || echo HOOK_FAILED

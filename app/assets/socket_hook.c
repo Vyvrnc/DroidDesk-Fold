@@ -142,6 +142,20 @@ static const char* strip_dot_slash(const char *path) {
     return path;
 }
 
+/*
+ * "/data/data/com.termux/files/<x>" other than files/usr: the same <x> next to our
+ * prefix (files/home, files/apps …). It used to become the prefix itself, so Termux's
+ * profile sourcing /data/data/com.termux/files/home/.bashrc read a directory
+ * ("-bash: .: …/.bashrc: is a directory" in the app terminal's login shell).
+ * Returns NULL when NEW_PREFIX does not end in /usr.
+ */
+static const char* rewrite_files_path(const char *rest, char *buf, size_t buf_size) {
+    size_t prefix_len = strlen(NEW_PREFIX);
+    if (prefix_len < 4 || strcmp(NEW_PREFIX + prefix_len - 4, "/usr") != 0) return NULL;
+    snprintf(buf, buf_size, "%.*s/%s", (int) (prefix_len - 4), NEW_PREFIX, rest);
+    return buf;
+}
+
 static const char* rewrite_path(const char* path, char* buf, size_t buf_size) {
     if (!path) return path;
 
@@ -159,6 +173,8 @@ static const char* rewrite_path(const char* path, char* buf, size_t buf_size) {
     size_t base_len = strlen(REL_TERMUX_BASE);
     if (strncmp(p, REL_TERMUX_BASE, base_len) == 0) {
         char next = p[base_len];
+        if (strncmp(p + base_len, "/files/", 7) == 0 && rewrite_files_path(p + base_len + 7, buf, buf_size))
+            return buf;
         if (next == '/' || next == '\0') {
             snprintf(buf, buf_size, "%s", NEW_PREFIX);
             return buf;
@@ -174,6 +190,9 @@ static const char* rewrite_path(const char* path, char* buf, size_t buf_size) {
     size_t abs_base_len = strlen("/data/data/com.termux");
     if (strncmp(path, "/data/data/com.termux", abs_base_len) == 0) {
         char next = path[abs_base_len];
+        if (strncmp(path + abs_base_len, "/files/", 7) == 0 &&
+            rewrite_files_path(path + abs_base_len + 7, buf, buf_size))
+            return buf;
         if (next == '/' || next == '\0') {
             snprintf(buf, buf_size, "%s", NEW_PREFIX);
             return buf;
