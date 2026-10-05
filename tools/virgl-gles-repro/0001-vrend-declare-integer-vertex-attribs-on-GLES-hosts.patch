@@ -1,0 +1,21 @@
+diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
+index 4bf88e0..8eb5fc9 100644
+--- a/src/vrend/vrend_renderer.c
++++ b/src/vrend/vrend_renderer.c
+@@ -7555,6 +7555,16 @@ static bool use_integer(void) {
+    if (getenv("VIRGL_USE_INTEGER"))
+       return true;
+ 
++   /* GLES (unlike desktop GL drivers in practice) gives undefined results when a
++    * vertex attribute specified with glVertexAttribIPointer/IFormat is read through a
++    * float shader input (type mismatch is undefined in GLES), same for integer color
++    * buffers written from a float output. Mali showed this first (the "ARM" check
++    * below); ANGLE on Vulkan does it too: an `in int` attribute arrives as 0, so e.g.
++    * OrcaSlicer/libvgcode toolpaths collapse to nothing. Declaring the inputs with
++    * their real integer type is always correct, so do it for every GLES host. */
++   if (vrend_state.use_gles)
++      return true;
++
+    const char * a = (const char *) glGetString(GL_VENDOR);
+    if (!a)
+        return false;

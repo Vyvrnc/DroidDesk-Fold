@@ -1,0 +1,9 @@
+FROM virgl-gles-repro
+# ANGLE (Vulkan backend) + SwiftShader Vulkan, taken from the Electron v35 Linux build
+# (Chrome/Electron >= 36 link ANGLE statically, so no libEGL/libGLESv2 there).
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl unzip \
+    && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /opt/angle && cd /tmp \
+ && curl -sfLo e.zip https://github.com/electron/electron/releases/download/v35.7.5/electron-v35.7.5-linux-x64.zip \
+ && unzip -o e.zip libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1 vk_swiftshader_icd.json -d /opt/angle \
+ && cd /opt/angle && ln -s libEGL.so libEGL.so.1 && ln -s libGLESv2.so libGLESv2.so.2 && rm /tmp/e.zip

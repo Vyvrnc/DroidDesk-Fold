@@ -2432,6 +2432,11 @@ class LinuxRuntime(private val context: Context) {
                         val env = it.environment()
                         env.clear()
                         env["LD_LIBRARY_PATH"] = File(prefixDir, "opt/virglrenderer-android/lib").absolutePath
+                        // Integer vertex attributes as ivec/uvec on the GLES host; virglrenderer only
+                        // does that for ARM GPUs by itself. Without it ANGLE read OrcaSlicer's
+                        // `in int vertex_id` as 0 and the G-code preview drew nothing
+                        // (tools/virgl-gles-repro).
+                        env["VIRGL_USE_INTEGER"] = "1"
                         env["HOME"] = homeDir.absolutePath
                         env["TMPDIR"] = tmpDir.absolutePath
                     }
