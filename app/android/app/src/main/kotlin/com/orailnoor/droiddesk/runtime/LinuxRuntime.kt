@@ -385,7 +385,8 @@ class LinuxRuntime(private val context: Context) {
         )
         claudeLauncher.setExecutable(true, false)
 
-        // Codex CLI (npm, Node in Debian), started like claude-debian.
+        // Codex CLI (npm, Node in Debian), started like claude-debian. --no-daemon: its
+        // background app-server never got its control socket up in proot (Codex 0.160).
         val codexLauncher = File(binDir, "codex-debian")
         codexLauncher.writeText(
             """
@@ -401,7 +402,7 @@ class LinuxRuntime(private val context: Context) {
                 --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
                 --env PROOT_LOADER_32="${File(prefixDir, "libexec/proot/loader32").absolutePath}" -- \
                 env DISPLAY="${'$'}DISPLAY" TERM="${'$'}{TERM:-xterm-256color}" \
-                bash -lc 'cd ~/projekty/Claude 2>/dev/null || cd ~; exec codex "${'$'}@"' codex "${'$'}@"
+                bash -lc 'cd ~/projekty/Claude 2>/dev/null || cd ~; exec codex --no-daemon "${'$'}@"' codex "${'$'}@"
             """.trimIndent() + "\n",
         )
         codexLauncher.setExecutable(true, false)
