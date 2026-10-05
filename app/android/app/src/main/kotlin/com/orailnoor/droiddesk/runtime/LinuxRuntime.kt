@@ -29,7 +29,7 @@ class LinuxRuntime(private val context: Context) {
         // without kopper (the kopper path flickers without DRI3).
         private const val MESA_KGSL_VERSION = "26.2.3-2"
         // Bump when debian-setup gains something existing installs need (rerun at session start).
-        private const val DEBIAN_SETUP_VERSION = 7
+        private const val DEBIAN_SETUP_VERSION = 8
         private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
 
         /**
@@ -297,9 +297,18 @@ class LinuxRuntime(private val context: Context) {
             export DISPLAY="${'$'}{DISPLAY:-:0}"
             export TMPDIR="${tmpDir.absolutePath}"
             mkdir -p "${tmpDir.absolutePath}/proot"
+            # Without Adreno, Mesa took /dev/dri/renderD128 (Xclipse's sgpu) for amdgpu.
+            # An empty /dev/dri lets the virgl client run without LIBGL_ALWAYS_SOFTWARE,
+            # which hung wineboot (EGL refuses it when a hardware device is selected).
+            droiddesk_dri=()
+            if [ ! -e /dev/kgsl-3d0 ]; then
+                mkdir -p "${tmpDir.absolutePath}/empty-dri"
+                droiddesk_dri=(--bind "${tmpDir.absolutePath}/empty-dri:/dev/dri")
+            fi
             exec "${File(binDir, "proot-distro").absolutePath}" login debian \
                 --bind "${tmpDir.absolutePath}:/tmp" \
                 --bind /storage:/storage \
+                "${'$'}{droiddesk_dri[@]}" \
                 --env DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/dbus-session" \
                 --env PROOT_TMP_DIR="${tmpDir.absolutePath}/proot" \
                 --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
@@ -315,10 +324,16 @@ class LinuxRuntime(private val context: Context) {
             #!${File(binDir, "bash").absolutePath}
             export TMPDIR="${tmpDir.absolutePath}"
             mkdir -p "${tmpDir.absolutePath}/proot"
+            droiddesk_dri=()
+            if [ ! -e /dev/kgsl-3d0 ]; then
+                mkdir -p "${tmpDir.absolutePath}/empty-dri"
+                droiddesk_dri=(--bind "${tmpDir.absolutePath}/empty-dri:/dev/dri")
+            fi
             mode="${'$'}{1:-gui}"
             exec "${File(binDir, "proot-distro").absolutePath}" login debian \
                 --bind "${tmpDir.absolutePath}:/tmp" \
                 --bind /storage:/storage \
+                "${'$'}{droiddesk_dri[@]}" \
                 --env DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/dbus-session" \
                 --env PROOT_TMP_DIR="${tmpDir.absolutePath}/proot" \
                 --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
@@ -365,9 +380,15 @@ class LinuxRuntime(private val context: Context) {
             export DISPLAY="${'$'}{DISPLAY:-:0}"
             export TMPDIR="${tmpDir.absolutePath}"
             mkdir -p "${tmpDir.absolutePath}/proot"
+            droiddesk_dri=()
+            if [ ! -e /dev/kgsl-3d0 ]; then
+                mkdir -p "${tmpDir.absolutePath}/empty-dri"
+                droiddesk_dri=(--bind "${tmpDir.absolutePath}/empty-dri:/dev/dri")
+            fi
             exec "${File(binDir, "proot-distro").absolutePath}" login debian \
                 --bind "${tmpDir.absolutePath}:/tmp" \
                 --bind /storage:/storage \
+                "${'$'}{droiddesk_dri[@]}" \
                 --env DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/dbus-session" \
                 --env PROOT_TMP_DIR="${tmpDir.absolutePath}/proot" \
                 --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
@@ -394,9 +415,15 @@ class LinuxRuntime(private val context: Context) {
             export DISPLAY="${'$'}{DISPLAY:-:0}"
             export TMPDIR="${tmpDir.absolutePath}"
             mkdir -p "${tmpDir.absolutePath}/proot"
+            droiddesk_dri=()
+            if [ ! -e /dev/kgsl-3d0 ]; then
+                mkdir -p "${tmpDir.absolutePath}/empty-dri"
+                droiddesk_dri=(--bind "${tmpDir.absolutePath}/empty-dri:/dev/dri")
+            fi
             exec "${File(binDir, "proot-distro").absolutePath}" login debian \
                 --bind "${tmpDir.absolutePath}:/tmp" \
                 --bind /storage:/storage \
+                "${'$'}{droiddesk_dri[@]}" \
                 --env DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/dbus-session" \
                 --env PROOT_TMP_DIR="${tmpDir.absolutePath}/proot" \
                 --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
@@ -415,9 +442,15 @@ class LinuxRuntime(private val context: Context) {
             export DISPLAY="${'$'}{DISPLAY:-:0}"
             export TMPDIR="${tmpDir.absolutePath}"
             mkdir -p "${tmpDir.absolutePath}/proot"
+            droiddesk_dri=()
+            if [ ! -e /dev/kgsl-3d0 ]; then
+                mkdir -p "${tmpDir.absolutePath}/empty-dri"
+                droiddesk_dri=(--bind "${tmpDir.absolutePath}/empty-dri:/dev/dri")
+            fi
             exec "${File(binDir, "proot-distro").absolutePath}" login debian \
                 --bind "${tmpDir.absolutePath}:/tmp" \
                 --bind /storage:/storage \
+                "${'$'}{droiddesk_dri[@]}" \
                 --env DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/dbus-session" \
                 --env PROOT_TMP_DIR="${tmpDir.absolutePath}/proot" \
                 --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
@@ -442,9 +475,15 @@ class LinuxRuntime(private val context: Context) {
             #!${File(binDir, "bash").absolutePath}
             export TMPDIR="${tmpDir.absolutePath}"
             mkdir -p "${tmpDir.absolutePath}/proot"
+            droiddesk_dri=()
+            if [ ! -e /dev/kgsl-3d0 ]; then
+                mkdir -p "${tmpDir.absolutePath}/empty-dri"
+                droiddesk_dri=(--bind "${tmpDir.absolutePath}/empty-dri:/dev/dri")
+            fi
             exec "${File(binDir, "proot-distro").absolutePath}" login debian \
                 --bind "${tmpDir.absolutePath}:/tmp" \
                 --bind /storage:/storage \
+                "${'$'}{droiddesk_dri[@]}" \
                 --env DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/dbus-session" \
                 --env PROOT_TMP_DIR="${tmpDir.absolutePath}/proot" \
                 --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
@@ -591,12 +630,11 @@ class LinuxRuntime(private val context: Context) {
             # Other GPUs (Mali, Xclipse): Debian's Mesa as a virgl client (virpipe) of the
             # app's virgl server, which renders through ANGLE on Android's Vulkan driver.
             if [ ! -e /dev/kgsl-3d0 ] && [ -S /tmp/.virgl_test ]; then
-                # LIBGL_ALWAYS_SOFTWARE stays: virpipe is one of the software winsys
-                # drivers, and without it Mesa opens /dev/dri/renderD128 (Xclipse's
-                # sgpu) as amdgpu, fails on "Unknown gfx version: 10.0" and EGL apps
-                # (wine) fail with it.
-                unset MESA_LOADER_DRIVER_OVERRIDE
-                export LIBGL_ALWAYS_SOFTWARE=1
+                # The launchers hide /dev/dri, so Mesa does not take Xclipse's sgpu for
+                # amdgpu and lands on the software winsys, where GALLIUM_DRIVER picks
+                # virpipe. LIBGL_ALWAYS_SOFTWARE is not set: EGL refuses it when the app
+                # selects a hardware device, and wineboot hung on explorer.exe.
+                unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_ALWAYS_SOFTWARE
                 export GALLIUM_DRIVER=virpipe
                 # virgl over ANGLE reports only GL 2.1 / GLSL 1.20; OrcaSlicer then failed
                 # to load its shaders. 4.3 core works there just like 3.3 (Xclipse 540,
