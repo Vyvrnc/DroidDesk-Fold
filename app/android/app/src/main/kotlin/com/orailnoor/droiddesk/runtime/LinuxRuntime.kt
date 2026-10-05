@@ -29,7 +29,7 @@ class LinuxRuntime(private val context: Context) {
         // without kopper (the kopper path flickers without DRI3).
         private const val MESA_KGSL_VERSION = "26.2.3-2"
         // Bump when debian-setup gains something existing installs need (rerun at session start).
-        private const val DEBIAN_SETUP_VERSION = 6
+        private const val DEBIAN_SETUP_VERSION = 7
         private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
 
         /**
@@ -603,6 +603,9 @@ class LinuxRuntime(private val context: Context) {
                 # tablet) and is what Blender and FreeCAD want.
                 export MESA_GL_VERSION_OVERRIDE=4.3
                 export MESA_GLSL_VERSION_OVERRIDE=430
+                # virgl advertises S3TC, ANGLE on a mobile GPU has no BCn: textures the
+                # driver compresses (OrcaSlicer's labels and view cube) failed with 0x502.
+                export MESA_EXTENSION_OVERRIDE="-GL_EXT_texture_compression_s3tc -GL_S3_s3tc -GL_EXT_texture_compression_dxt1 -GL_ANGLE_texture_compression_dxt3 -GL_ANGLE_texture_compression_dxt5"
             fi
             droiddesk_mesa=/opt/mesa-kgsl
             droiddesk_lib=${'$'}droiddesk_mesa/lib/aarch64-linux-gnu
