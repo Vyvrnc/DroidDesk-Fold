@@ -196,6 +196,11 @@ class TerminalActivity : Activity() {
                 restart()
                 return true
             }
+            // Special keys never reach onCodePoint: clear sticky Ctrl/Alt once the view has
+            // encoded this key with them.
+            if ((ctrlOn || altOn) && e.unicodeChar == 0) {
+                terminalView.post { ctrlOn = false; altOn = false; updateModifiers() }
+            }
             return false
         }
 
@@ -207,6 +212,11 @@ class TerminalActivity : Activity() {
         override fun readFnKey() = false
 
         override fun onCodePoint(codePoint: Int, ctrlDown: Boolean, session: TerminalSession): Boolean {
+            // IMEs send Enter as text ("\n"), not as a key event.
+            if (!session.isRunning && (codePoint == '\n'.code || codePoint == '\r'.code)) {
+                runOnUiThread { restart() }
+                return true
+            }
             if (ctrlOn || altOn) {
                 ctrlOn = false
                 altOn = false
@@ -225,8 +235,15 @@ class TerminalActivity : Activity() {
         override fun logStackTrace(tag: String, e: Exception) { Log.e(tag, "error", e) }
     }
 
-    fun onSessionText() = terminalView.onScreenUpdated()
-    fun onSessionTitle(title: String?) { if (!title.isNullOrBlank()) this.title = title }
+    fun terminalCurrentSession(): TerminalSession? = terminalView.currentSession
+
+    fun onSessionText(session: TerminalSession) {
+        if (terminalView.currentSession === session) terminalView.onScreenUpdated()
+    }
+
+    fun onSessionTitle(session: TerminalSession) {
+        if (terminalView.currentSession === session && !session.title.isNullOrBlank()) title = session.title
+    }
 
     companion object {
         const val EXTRA_PROFILE = "profile"
@@ -278,11 +295,11 @@ object TerminalSessions {
     class SessionClient : TerminalSessionClient {
         @Volatile var activity: TerminalActivity? = null
 
-        override fun onTextChanged(changedSession: TerminalSession) { activity?.onSessionText() }
-        override fun onTitleChanged(changedSession: TerminalSession) { activity?.onSessionTitle(changedSession.title) }
+        override fun onTextChanged(changedSession: TerminalSession) { activity?.onSessionText(changedSession) }
+        override fun onTitleChanged(changedSession: TerminalSession) { activity?.onSessionTitle(changedSession) }
         override fun onSessionFinished(finishedSession: TerminalSession) {
             // The emulator shows the exit status; Enter (or any extra key) starts it again.
-            activity?.onSessionText()
+            activity?.onSessionText(finishedSession)
         }
 
         override fun onCopyTextToClipboard(session: TerminalSession, text: String) {
@@ -299,8 +316,10 @@ object TerminalSessions {
         }
 
         override fun onBell(session: TerminalSession) {}
-        override fun onColorsChanged(session: TerminalSession) { activity?.onSessionText() }
-        override fun onTerminalCursorStateChange(state: Boolean) { activity?.onSessionText() }
+        override fun onColorsChanged(session: TerminalSession) { activity?.onSessionText(session) }
+        override fun onTerminalCursorStateChange(state: Boolean) {
+            activity?.let { it.terminalCurrentSession()?.let(it::onSessionText) }
+        }
         override fun getTerminalCursorStyle(): Int? = null
         override fun logError(tag: String, message: String) { Log.e(tag, message) }
         override fun logWarn(tag: String, message: String) { Log.w(tag, message) }
