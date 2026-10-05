@@ -29,7 +29,7 @@ class LinuxRuntime(private val context: Context) {
         // without kopper (the kopper path flickers without DRI3).
         private const val MESA_KGSL_VERSION = "26.2.3-2"
         // Bump when debian-setup gains something existing installs need (rerun at session start).
-        private const val DEBIAN_SETUP_VERSION = 5
+        private const val DEBIAN_SETUP_VERSION = 6
         private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
 
         /**
@@ -599,9 +599,10 @@ class LinuxRuntime(private val context: Context) {
                 export LIBGL_ALWAYS_SOFTWARE=1
                 export GALLIUM_DRIVER=virpipe
                 # virgl over ANGLE reports only GL 2.1 / GLSL 1.20; OrcaSlicer then failed
-                # to load its shaders. 3.3 core works there (Xclipse 540, tablet).
-                export MESA_GL_VERSION_OVERRIDE=3.3
-                export MESA_GLSL_VERSION_OVERRIDE=330
+                # to load its shaders. 4.3 core works there just like 3.3 (Xclipse 540,
+                # tablet) and is what Blender and FreeCAD want.
+                export MESA_GL_VERSION_OVERRIDE=4.3
+                export MESA_GLSL_VERSION_OVERRIDE=430
             fi
             droiddesk_mesa=/opt/mesa-kgsl
             droiddesk_lib=${'$'}droiddesk_mesa/lib/aarch64-linux-gnu
