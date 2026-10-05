@@ -542,6 +542,15 @@ class MainActivity : FlutterActivity() {
                     }
                 }
 
+                "openTerminal" -> {
+                    // Real terminal (PTY) without XFCE: shell, debian, claude, codex.
+                    val intent = Intent(this@MainActivity, com.orailnoor.droiddesk.view.TerminalActivity::class.java).apply {
+                        putExtra(com.orailnoor.droiddesk.view.TerminalActivity.EXTRA_PROFILE, call.argument<String>("profile") ?: "shell")
+                    }
+                    startActivity(intent)
+                    result.success(true)
+                }
+
                 "launchDesktopActivity" -> {
                     val rooted = chrootRuntime.hasRoot()
                     val intent = Intent(this@MainActivity, com.orailnoor.droiddesk.view.DesktopActivity::class.java).apply {

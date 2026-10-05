@@ -65,6 +65,12 @@
             android:taskAffinity=""
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode" />
 
+        <activity
+            android:name=".view.TerminalActivity"
+            android:theme="@android:style/Theme.Material.NoActionBar"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|density|uiMode" />
+
         <!-- The native X server must have a different Linux process and FD table than LorieView. -->
         <service
             android:name=".x11.X11ServerService"

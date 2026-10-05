@@ -342,6 +342,16 @@ class _AppCatalogScreenState extends State<AppCatalogScreen>
           Color(0xFFD97757),
           optional: true,
         ),
+      if (!state.hasRoot)
+        const _FeaturedApp(
+          'codex',
+          'Codex',
+          'OpenAI Codex CLI, installed into Debian with npm. Home screen: Codex; '
+              'sign in with codex login on first start.',
+          Icons.code_rounded,
+          Color(0xFF10A37F),
+          optional: true,
+        ),
     ];
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 18, 20, 32),

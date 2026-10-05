@@ -75,4 +75,6 @@ dependencies {
     implementation("org.tukaani:xz:1.12")
     // USB serial adapters (FTDI, CP210x, CH34x, PL2303, CDC-ACM) for droiddesk-serial; MIT.
     implementation("com.github.mik3y:usb-serial-for-android:3.11.0")
+    // In-app terminal (TerminalActivity): Termux's terminal emulator and view, Apache-2.0.
+    implementation("com.github.termux.termux-app:terminal-view:v0.118.1")
 }

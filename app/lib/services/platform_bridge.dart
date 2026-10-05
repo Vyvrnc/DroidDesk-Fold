@@ -139,6 +139,11 @@ class DroidDeskPlatform {
     return Map<String, bool>.from(result);
   }
 
+  /// Real terminal (PTY) in the app: profile shell, debian, claude or codex.
+  static Future<bool> openTerminal(String profile) async {
+    return await _channel.invokeMethod<bool>('openTerminal', {'profile': profile}) ?? false;
+  }
+
   static Future<bool> installOptionalApp(String appId) async {
     return await _channel.invokeMethod<bool>('installOptionalApp', {
           'appId': appId,

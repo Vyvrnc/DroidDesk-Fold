@@ -171,7 +171,40 @@ class LinuxRuntime(private val context: Context) {
         "imagemagick" to (File(binDir, "magick").exists() || File(binDir, "convert").exists()),
         "proot_debian" to isMinimalDebianInstalled(),
         "claude_code" to isClaudeCodeInstalled(),
+        "codex" to isCodexInstalled(),
     )
+
+    /** Codex CLI from npm in Debian (global prefix /usr/local). */
+    private fun isCodexInstalled(): Boolean = java.nio.file.Files.exists(
+        File(debianRootfs(baseDir), "usr/local/bin/codex").toPath(),
+        java.nio.file.LinkOption.NOFOLLOW_LINKS,
+    )
+
+    /** Node.js + npm from Debian, then the Codex CLI from npm. Sign-in: "codex login" in the terminal. */
+    private fun installCodex(onProgress: ((Double, String) -> Unit)?): Boolean {
+        if (!isMinimalDebianInstalled()) {
+            onProgress?.invoke(0.2, "Installing Debian for Codex...")
+            if (!installMinimalDebian(onProgress)) return false
+        }
+        val waitUntil = System.currentTimeMillis() + 10 * 60 * 1000
+        while (debianSetupRunning && System.currentTimeMillis() < waitUntil) {
+            onProgress?.invoke(0.6, "Waiting for Debian setup to finish...")
+            Thread.sleep(2000)
+        }
+        onProgress?.invoke(0.7, "Installing Node.js and Codex in Debian...")
+        val run = File(binDir, "debian-run").absolutePath
+        val output = executeCommand(
+            "\"$run\" bash -c 'export DEBIAN_FRONTEND=noninteractive; " +
+                "command -v npm >/dev/null || (apt-get update -qq && apt-get install -y -qq nodejs npm); " +
+                "npm install -g @openai/codex'",
+        )
+        if (!isCodexInstalled()) {
+            Log.w(TAG, "Codex installation failed: ${output.takeLast(2000)}")
+            return false
+        }
+        onProgress?.invoke(0.95, "Codex installed; sign in with codex login")
+        return true
+    }
 
     /** Claude Code's native installer puts it in Debian root's ~/.local/bin (claude-debian runs it). */
     private fun isClaudeCodeInstalled(): Boolean =
@@ -351,6 +384,27 @@ class LinuxRuntime(private val context: Context) {
             """.trimIndent() + "\n",
         )
         claudeLauncher.setExecutable(true, false)
+
+        // Codex CLI (npm, Node in Debian), started like claude-debian.
+        val codexLauncher = File(binDir, "codex-debian")
+        codexLauncher.writeText(
+            """
+            #!${File(binDir, "bash").absolutePath}
+            export DISPLAY="${'$'}{DISPLAY:-:0}"
+            export TMPDIR="${tmpDir.absolutePath}"
+            mkdir -p "${tmpDir.absolutePath}/proot"
+            exec "${File(binDir, "proot-distro").absolutePath}" login debian \
+                --bind "${tmpDir.absolutePath}:/tmp" \
+                --bind /storage:/storage \
+                --env DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/dbus-session" \
+                --env PROOT_TMP_DIR="${tmpDir.absolutePath}/proot" \
+                --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
+                --env PROOT_LOADER_32="${File(prefixDir, "libexec/proot/loader32").absolutePath}" -- \
+                env DISPLAY="${'$'}DISPLAY" TERM="${'$'}{TERM:-xterm-256color}" \
+                bash -lc 'cd ~/projekty/Claude 2>/dev/null || cd ~; exec codex "${'$'}@"' codex "${'$'}@"
+            """.trimIndent() + "\n",
+        )
+        codexLauncher.setExecutable(true, false)
 
         // Runs one Debian command from the Termux side, e.g. from a menu entry.
         val runLauncher = File(binDir, "debian-run")
@@ -1989,6 +2043,9 @@ class LinuxRuntime(private val context: Context) {
 
     // ── Environment Configuration ──
 
+    /** The session environment for the in-app terminal (TerminalActivity). */
+    fun terminalEnvironment(): Map<String, String> = getTermuxEnv()
+
     private fun getTermuxEnv(): Map<String, String> {
         val env = mutableMapOf<String, String>()
 
@@ -2742,6 +2799,7 @@ class LinuxRuntime(private val context: Context) {
             }
             "proot_debian" -> installMinimalDebian(onProgress)
             "claude_code" -> installClaudeCode(onProgress)
+            "codex" -> installCodex(onProgress)
             else -> false
         }
 

@@ -236,10 +236,38 @@ class HomeScreen extends StatelessWidget {
                             'Open a Linux shell in the ${state.hasRoot ? 'Ubuntu chroot' : 'native Termux'} environment',
                         color: DroidTheme.secondary,
                         onTap: () {
-                          state.useNativeTerminal();
-                          _showTerminal(context, state);
+                          if (state.hasRoot) {
+                            state.useNativeTerminal();
+                            _showTerminal(context, state);
+                          } else {
+                            DroidDeskPlatform.openTerminal('shell');
+                          }
                         },
                       ),
+
+                      if (!state.hasRoot &&
+                          state.optionalApps['claude_code'] == true) ...[
+                        const SizedBox(height: 10),
+                        _ActionCard(
+                          icon: Icons.auto_awesome_rounded,
+                          title: 'Claude Code',
+                          subtitle: 'Claude Code in a terminal, without the desktop',
+                          color: const Color(0xFFD97757),
+                          onTap: () => DroidDeskPlatform.openTerminal('claude'),
+                        ),
+                      ],
+
+                      if (!state.hasRoot &&
+                          state.optionalApps['codex'] == true) ...[
+                        const SizedBox(height: 10),
+                        _ActionCard(
+                          icon: Icons.code_rounded,
+                          title: 'Codex',
+                          subtitle: 'OpenAI Codex CLI in a terminal, without the desktop',
+                          color: const Color(0xFF10A37F),
+                          onTap: () => DroidDeskPlatform.openTerminal('codex'),
+                        ),
+                      ],
 
                       if (!state.hasRoot &&
                           state.optionalApps['proot_debian'] == true) ...[
@@ -250,7 +278,7 @@ class HomeScreen extends StatelessWidget {
                           subtitle:
                               'Open the optional minimal PRoot compatibility environment',
                           color: const Color(0xFFD70A53),
-                          onTap: () => _showDebianTerminal(context, state),
+                          onTap: () => DroidDeskPlatform.openTerminal('debian'),
                         ),
                       ],
 
