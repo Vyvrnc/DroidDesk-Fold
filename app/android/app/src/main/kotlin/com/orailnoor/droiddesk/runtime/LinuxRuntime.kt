@@ -146,6 +146,51 @@ class LinuxRuntime(private val context: Context) {
         return sessionProcess?.isAlive == true
     }
 
+    /** The desktop session ended (crash, logout, killed) without stopSession(). */
+    fun desktopEndedUnexpectedly(): Boolean {
+        val process = sessionProcess ?: return false
+        return !process.isAlive
+    }
+
+    /**
+     * Starts the desktop again without the X server, so windows of running apps stay.
+     * XFCE's own processes are killed first: when xfce4-session dies its children
+     * (xfwm4, the panel, xfdesktop) carry on under init, and a new session could not
+     * take over the window manager.
+     */
+    fun restartDesktop(desktopEnv: String = "xfce4") {
+        Log.i(TAG, "Restarting the desktop")
+        sessionProcess?.let {
+            it.destroyForcibly()
+            it.waitFor()
+        }
+        sessionProcess = null
+        killDesktopShell()
+        startSession(desktopEnv, "x11")
+    }
+
+    private fun killDesktopShell() {
+        val names = listOf(
+            "xfce4-session", "xfwm4", "xfce4-panel", "xfdesktop", "xfsettingsd",
+            "xfce4-notifyd", "xfce4-power-manager",
+        )
+        runCatching {
+            ProcessBuilder(File(binDir, "bash").absolutePath, "-c",
+                names.joinToString("; ") { "pkill -x '$it'" } + "; sleep 0.5; " +
+                    names.joinToString("; ") { "pkill -9 -x '$it'" } + "; true")
+                .directory(homeDir)
+                .redirectErrorStream(true)
+                .also { builder ->
+                    builder.environment().clear()
+                    builder.environment().putAll(getTermuxEnv())
+                }
+                .start()
+                .let { process ->
+                    if (!process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) process.destroyForcibly()
+                }
+        }.onFailure { Log.w(TAG, "Killing the desktop processes failed: ${it.message}") }
+    }
+
     fun getInstalledDE(): String {
         val marker = File(prefixDir, DE_MARKER)
         if (marker.exists()) return marker.readText().trim().ifEmpty { "xfce4" }
@@ -3441,6 +3486,7 @@ class LinuxRuntime(private val context: Context) {
             it.waitFor()
         }
         sessionProcess = null
+        killDesktopShell()
         dbusProcess?.destroyForcibly()
         dbusProcess = null
         virglServer?.destroyForcibly()

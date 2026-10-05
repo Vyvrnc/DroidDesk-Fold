@@ -1,6 +1,7 @@
 package com.orailnoor.droiddesk.view
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -130,8 +131,67 @@ class DesktopActivity : Activity() {
         }
     }
 
+    // xfce4-session can end on its own (crash, logout, a killed process). The X server
+    // keeps showing the last frame then and the app looked frozen, so offer a restart.
+    private var desktopEndedDialog: AlertDialog? = null
+    private var desktopRestarting = false
+    private val desktopWatchdog = object : Runnable {
+        override fun run() {
+            if (isFinishing || isDestroyed) return
+            if (sessionMode != "chroot" && !desktopRestarting && desktopEndedDialog == null &&
+                linuxRuntime.desktopEndedUnexpectedly()
+            ) {
+                Log.w(TAG, "Desktop session ended unexpectedly")
+                showDesktopEndedDialog()
+            }
+            loadingMessageHandler.postDelayed(this, DESKTOP_WATCHDOG_MS)
+        }
+    }
+
+    private fun showDesktopEndedDialog() {
+        desktopEndedDialog = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Plocha skončila")
+            .setMessage("XFCE se ukončilo (pád, odhlášení nebo zabitý proces). Okna aplikací, které ještě běží, zůstanou.")
+            .setCancelable(false)
+            .setPositiveButton("Spustit znovu") { _, _ ->
+                desktopEndedDialog = null
+                restartDesktop()
+            }
+            .setNegativeButton("Zavřít") { _, _ ->
+                desktopEndedDialog = null
+                finish()
+            }
+            .show()
+    }
+
+    private fun restartDesktop() {
+        if (desktopRestarting) return
+        desktopRestarting = true
+        Toast.makeText(this, "Plocha se restartuje…", Toast.LENGTH_SHORT).show()
+        Thread({
+            val ready = try {
+                linuxRuntime.restartDesktop(desktopEnv)
+                linuxRuntime.waitForDesktopReady(desktopEnv)
+            } catch (error: Throwable) {
+                Log.e(TAG, "Desktop restart failed", error)
+                false
+            }
+            runOnUiThread {
+                desktopRestarting = false
+                if (!isFinishing && !isDestroyed) {
+                    Toast.makeText(
+                        this,
+                        if (ready) "Plocha běží" else "Plocha nenaběhla, zkus to znovu",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }, "LinuxDesktopRestart").start()
+    }
+
     companion object {
         private const val TAG = "DesktopActivity"
+        private const val DESKTOP_WATCHDOG_MS = 3_000L
         private const val WATCHDOG_TICK_MS = 20_000L
         // Long enough for a cold session start (waitForDesktopReady allows 45 s).
         private const val WATCHDOG_MAX_TICKS = 5
@@ -415,6 +475,18 @@ class DesktopActivity : Activity() {
                 applyDisplayProfile()
             }
         }
+        val restartButton = controlButton("Restart plochy").apply {
+            contentDescription = "Restart only the desktop, app windows stay"
+            visibility = if (sessionMode == "chroot") View.GONE else View.VISIBLE
+            setOnClickListener {
+                AlertDialog.Builder(this@DesktopActivity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                    .setTitle("Restartovat plochu?")
+                    .setMessage("Panel, plocha a správce oken se spustí znovu. Okna aplikací zůstanou.")
+                    .setPositiveButton("Restartovat") { _, _ -> restartDesktop() }
+                    .setNegativeButton("Zrušit", null)
+                    .show()
+            }
+        }
         val hideButton = controlButton("−").apply {
             contentDescription = "Hide desktop controls"
             setOnClickListener { setControlsCollapsed(true) }
@@ -467,6 +539,9 @@ class DesktopActivity : Activity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT, (42 * density).toInt(),
             ))
             addView(captureButton, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, (42 * density).toInt(),
+            ))
+            addView(restartButton, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, (42 * density).toInt(),
             ))
             addView(hideButton, LinearLayout.LayoutParams(
@@ -779,6 +854,8 @@ class DesktopActivity : Activity() {
             loadingMessageHandler.removeCallbacks(loadingEstimateTicker)
             loadingMessageHandler.removeCallbacks(connectWatchdog)
             if (!ready) Log.w(TAG, "Revealing desktop after readiness timeout")
+            loadingMessageHandler.removeCallbacks(desktopWatchdog)
+            loadingMessageHandler.postDelayed(desktopWatchdog, DESKTOP_WATCHDOG_MS)
             Log.i(TAG, "Desktop revealed ready=$ready")
             loadingOverlay?.animate()
                 ?.alpha(0f)
@@ -804,6 +881,9 @@ class DesktopActivity : Activity() {
         loadingMessageHandler.removeCallbacks(loadingMessageTicker)
         loadingMessageHandler.removeCallbacks(loadingEstimateTicker)
         loadingMessageHandler.removeCallbacks(connectWatchdog)
+        loadingMessageHandler.removeCallbacks(desktopWatchdog)
+        desktopEndedDialog?.dismiss()
+        desktopEndedDialog = null
         surfaceCallback?.let { callback -> lorieView?.holder?.removeCallback(callback) }
         surfaceCallback = null
         inputController?.dispose()
