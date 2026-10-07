@@ -5,6 +5,7 @@ subnets through it from droiddesk-net run / the PAC file. Works through droiddes
 """
 import importlib.util
 import os
+import subprocess
 import sys
 
 import gi
@@ -14,6 +15,8 @@ gi.require_version("Gdk", "3.0")
 from gi.repository import GLib, Gtk  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ETH = os.path.join(HERE, "droiddesk-eth")
+ETH_SOCKET = os.path.join(os.environ.get("TMPDIR", "/tmp"), "droiddesk-eth.sock")
 spec = importlib.util.spec_from_file_location("droiddesk_net", os.path.join(HERE, "droiddesk-net.py"))
 net = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(net)
@@ -65,6 +68,19 @@ class NetWindow:
         self.message = Gtk.Label(xalign=0, wrap=True, selectable=True)
         box.pack_start(self.message, False, False, 0)
 
+        # The second mode: the adapter leaves Android and belongs to Linux (droiddesk-eth).
+        box.pack_start(self.heading("Diagnostika Ethernetu (převzetí do Linuxu)"), False, False, 0)
+        eth = Gtk.Box(spacing=8)
+        self.eth_state = Gtk.Label(xalign=0, wrap=True, hexpand=True, selectable=True)
+        self.eth_take = Gtk.Button(label="Převzít do Linuxu")
+        self.eth_take.connect("clicked", self.eth_start)
+        self.eth_back = Gtk.Button(label="Vrátit Androidu")
+        self.eth_back.connect("clicked", self.eth_stop)
+        eth.pack_start(self.eth_state, True, True, 0)
+        eth.pack_start(self.eth_take, False, False, 0)
+        eth.pack_start(self.eth_back, False, False, 0)
+        box.pack_start(eth, False, False, 0)
+
         hint = Gtk.Label(xalign=0, wrap=True, selectable=True)
         hint.set_markup(
             "<small>Terminál: <tt>droiddesk-net run curl -k https://10.227.13.10</tt> · "
@@ -94,7 +110,34 @@ class NetWindow:
     def show_error(self, text):
         self.message.set_markup(f'<span foreground="#c62828">{GLib.markup_escape_text(text)}</span>' if text else "")
 
+    def refresh_eth(self):
+        # Asks the daemon only when its socket exists: the wrapper would download the
+        # program on first use.
+        running = os.path.exists(ETH_SOCKET) and subprocess.run(
+            [ETH, "status"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5).returncode == 0
+        self.eth_state.set_text(
+            "Adaptér patří Linuxu, Android teď Ethernet nemá. Příkazy: droiddesk-eth arpscan, watch, capture, ip add…"
+            if running else
+            "Celý adaptér pro Linux: odposlech (tcpdump), ARP scan, DHCP, adresa v cizí podsíti. Android mezitím Ethernet nemá.")
+        self.eth_take.set_sensitive(not running)
+        self.eth_back.set_sensitive(running)
+
+    def eth_start(self, _button):
+        # In a terminal: the first start downloads the program and the phone asks for USB access.
+        subprocess.Popen(["xfce4-terminal", "--title=Ethernet diagnostika", "-x", "bash", "-c",
+                          f"'{ETH}' start && '{ETH}' status; echo; "
+                          "echo 'Příkazy: droiddesk-eth --help (arpscan, watch, capture, ip add, dhcp, run…)'; exec bash"])
+
+    def eth_stop(self, _button):
+        result = subprocess.run([ETH, "stop"], capture_output=True, text=True, timeout=15)
+        self.show_error(result.stderr.strip() if result.returncode else "")
+        self.refresh_eth()
+
     def refresh(self):
+        try:
+            self.refresh_eth()
+        except (OSError, subprocess.SubprocessError):
+            pass
         result, error = call(net.read_status)
         if error:
             self.show_error(error)
