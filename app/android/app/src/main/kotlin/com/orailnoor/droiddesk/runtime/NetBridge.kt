@@ -216,7 +216,7 @@ object NetBridge {
             enabled.associateBy(::portOf) + (ROUTER_PORT to "")
         proxies.keys.filter { it !in wanted }.forEach { port -> proxies.remove(port)?.let { runCatching { it.close() } } }
         for ((port, iface) in wanted) {
-            if (port in proxies) continue
+            if (proxies.containsKey(port)) continue
             try {
                 val listener = ServerSocket(port, 50, InetAddress.getByName("127.0.0.1"))
                 proxies[port] = listener
