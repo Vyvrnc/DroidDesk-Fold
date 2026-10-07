@@ -475,18 +475,6 @@ class DesktopActivity : Activity() {
                 applyDisplayProfile()
             }
         }
-        val restartButton = controlButton("Restart plochy").apply {
-            contentDescription = "Restart only the desktop, app windows stay"
-            visibility = if (sessionMode == "chroot") View.GONE else View.VISIBLE
-            setOnClickListener {
-                AlertDialog.Builder(this@DesktopActivity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                    .setTitle("Restartovat plochu?")
-                    .setMessage("Panel, plocha a správce oken se spustí znovu. Okna aplikací zůstanou.")
-                    .setPositiveButton("Restartovat") { _, _ -> restartDesktop() }
-                    .setNegativeButton("Zrušit", null)
-                    .show()
-            }
-        }
         val hideButton = controlButton("−").apply {
             contentDescription = "Hide desktop controls"
             setOnClickListener { setControlsCollapsed(true) }
@@ -539,9 +527,6 @@ class DesktopActivity : Activity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT, (42 * density).toInt(),
             ))
             addView(captureButton, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, (42 * density).toInt(),
-            ))
-            addView(restartButton, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, (42 * density).toInt(),
             ))
             addView(hideButton, LinearLayout.LayoutParams(

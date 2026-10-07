@@ -136,6 +136,7 @@ class MainActivity : FlutterActivity() {
                     result.success(mapOf(
                         "isBootstrapped" to if (rooted) chrootRuntime.isRootfsReady() else linuxRuntime.isBootstrapped(),
                         "isRunning" to if (rooted) chrootRuntime.isRunning() else linuxRuntime.isRunning(),
+                        "desktopEnded" to (!rooted && linuxRuntime.desktopEndedUnexpectedly()),
                         "hasRoot" to rooted,
                         "distro" to if (rooted) "ubuntu-chroot" else "termux-native",
                         "installedDE" to if (rooted) {
@@ -560,6 +561,25 @@ class MainActivity : FlutterActivity() {
                     }
                     startActivity(intent)
                     result.success(true)
+                }
+
+                "restartDesktop" -> {
+                    // Only XFCE: the X server and the apps' windows stay. Then shows the desktop.
+                    thread(name = "restart-desktop") {
+                        val de = linuxRuntime.getInstalledDE()
+                        val ok = runCatching { linuxRuntime.restartDesktop(de) }
+                            .onFailure { Log.e(TAG, "Desktop restart failed", it) }.isSuccess
+                        runOnUiThread {
+                            if (ok) {
+                                startActivity(Intent(this@MainActivity, com.orailnoor.droiddesk.view.DesktopActivity::class.java).apply {
+                                    putExtra("startSession", false)
+                                    putExtra("mode", "termux")
+                                    putExtra("de", de)
+                                })
+                            }
+                            result.success(ok)
+                        }
+                    }
                 }
 
                 "stopLinux" -> {

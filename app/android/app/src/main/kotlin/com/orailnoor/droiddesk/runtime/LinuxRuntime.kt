@@ -29,7 +29,7 @@ class LinuxRuntime(private val context: Context) {
         // without kopper (the kopper path flickers without DRI3).
         private const val MESA_KGSL_VERSION = "26.2.3-2"
         // Bump when debian-setup gains something existing installs need (rerun at session start).
-        private const val DEBIAN_SETUP_VERSION = 9
+        private const val DEBIAN_SETUP_VERSION = 10
         private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
 
         /**
@@ -607,7 +607,7 @@ class LinuxRuntime(private val context: Context) {
             set -e
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
-            apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates dbus-x11 xz-utils pulseaudio-utils libnotify-bin tmux
+            apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates dbus-x11 xz-utils pulseaudio-utils libnotify-bin tmux proxychains4
 
             if [ -f "/usr/share/zoneinfo/$timeZone" ]; then
                 ln -sf "/usr/share/zoneinfo/$timeZone" /etc/localtime
@@ -1021,6 +1021,42 @@ class LinuxRuntime(private val context: Context) {
                     )
                     serialCommand.setExecutable(true, false)
                 }
+                // Networks Android does not route to (Ethernet dock in a closed VLAN) through NetBridge.
+                val netClient = File(binDir, "droiddesk-net.py")
+                context.assets.open("droiddesk/droiddesk-net.py").use { input ->
+                    netClient.outputStream().use(input::copyTo)
+                }
+                File(binDir, "droiddesk-net").let { netCommand ->
+                    netCommand.writeText(
+                        "#!${File(binDir, "bash").absolutePath}\n" +
+                            "exec \"${File(binDir, "python3").absolutePath}\" \"${netClient.absolutePath}\" \"${'$'}@\"\n",
+                    )
+                    netCommand.setExecutable(true, false)
+                }
+                val netWindow = File(binDir, "droiddesk-net-window.py")
+                context.assets.open("droiddesk/droiddesk-net-window.py").use { input ->
+                    netWindow.outputStream().use(input::copyTo)
+                }
+                val netWindowCommand = File(binDir, "droiddesk-net-window")
+                netWindowCommand.writeText(
+                    "#!${File(binDir, "bash").absolutePath}\n" +
+                        "export GI_TYPELIB_PATH=\"${prefixDir.absolutePath}/lib/girepository-1.0\"\n" +
+                        "exec \"${File(binDir, "python3").absolutePath}\" \"${netWindow.absolutePath}\" \"${'$'}@\"\n",
+                )
+                netWindowCommand.setExecutable(true, false)
+                File(homeDir, ".local/share/applications").mkdirs()
+                File(homeDir, ".local/share/applications/droiddesk-net.desktop").writeText(
+                    """
+                    [Desktop Entry]
+                    Type=Application
+                    Name=Sítě
+                    Comment=Ethernet a další sítě pro Linux (i bez internetu, vedle mobilních dat)
+                    Exec=${netWindowCommand.absolutePath}
+                    Icon=network-wired
+                    Categories=System;Network;
+                    Terminal=false
+                    """.trimIndent() + "\n",
+                )
                 // In Debian too, written on every start (debian-setup runs once, at install).
                 val debianBin = File(debianRootfs(baseDir), "usr/local/bin")
                 if (debianBin.isDirectory) {
@@ -1032,6 +1068,22 @@ class LinuxRuntime(private val context: Context) {
                                 "DROIDDESK_DEBIAN_TMP=\"${tmpDir.absolutePath}\" " +
                                 "LD_LIBRARY_PATH=\"${File(prefixDir, "lib").absolutePath}\" " +
                                 "exec \"${File(binDir, "python3").absolutePath}\" \"${serialClient.absolutePath}\" \"${'$'}@\"\n",
+                        )
+                        wrapper.setExecutable(true, false)
+                    }
+                    File(debianBin, "droiddesk-net").let { wrapper ->
+                        wrapper.writeText(
+                                "#!/bin/sh\n" +
+                                "# droiddesk-net: Linux access to networks Android does not route to (the app's Python, Termux side).\n" +
+                                "if [ \"${'$'}1\" = run ]; then\n" +
+                                "    shift\n" +
+                                "    command -v proxychains4 >/dev/null || { echo \"droiddesk-net: proxychains4 chybí (apt install proxychains4)\" >&2; exit 1; }\n" +
+                                "    conf=/tmp/droiddesk-net-proxychains.conf\n" +
+                                "    printf 'strict_chain\\nquiet_mode\\nproxy_dns\\nremote_dns_subnet 224\\ntcp_read_time_out 15000\\ntcp_connect_time_out 10000\\nlocalnet 127.0.0.0/255.0.0.0\\n[ProxyList]\\nsocks5 127.0.0.1 1080\\n' > \"${'$'}conf\"\n" +
+                                "    exec proxychains4 -q -f \"${'$'}conf\" \"${'$'}@\"\n" +
+                                "fi\n" +
+                                "LD_LIBRARY_PATH=\"${File(prefixDir, "lib").absolutePath}\" " +
+                                "exec \"${File(binDir, "python3").absolutePath}\" \"${netClient.absolutePath}\" \"${'$'}@\"\n",
                         )
                         wrapper.setExecutable(true, false)
                     }
@@ -3219,6 +3271,10 @@ class LinuxRuntime(private val context: Context) {
         if (isRunning()) {
             Log.w(TAG, "Session already running")
             return
+        }
+        if (desktopEndedUnexpectedly()) {
+            sessionProcess = null
+            killDesktopShell()
         }
 
         if (!isBootstrapped()) {

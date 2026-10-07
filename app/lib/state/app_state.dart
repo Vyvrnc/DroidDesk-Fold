@@ -13,6 +13,7 @@ class AppState extends ChangeNotifier {
   // ── Setup State ──
   bool _isBootstrapped = false;
   bool _isRunning = false;
+  bool _desktopEnded = false;
   bool _hasRoot = false;
   String _installedDistro = '';
   String _installedDE = '';
@@ -58,6 +59,7 @@ class AppState extends ChangeNotifier {
   bool get isDarkMode => DroidTheme.isDark;
   bool get isBootstrapped => _isBootstrapped;
   bool get isRunning => _isRunning;
+  bool get desktopEnded => _desktopEnded;
   bool get hasRoot => _hasRoot;
   String get installedDistro => _installedDistro;
   String get installedDE => _installedDE;
@@ -216,6 +218,7 @@ class AppState extends ChangeNotifier {
       final status = await DroidDeskPlatform.getRuntimeStatus();
       _isBootstrapped = status['isBootstrapped'] == true;
       _isRunning = status['isRunning'] == true;
+      _desktopEnded = status['desktopEnded'] == true;
       _hasRoot = status['hasRoot'] == true;
       _installedDistro = status['distro']?.toString() ?? '';
       _installedDE = status['installedDE']?.toString() ?? '';
@@ -454,6 +457,18 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       _errorMessage = 'Failed to launch desktop activity: $e';
       notifyListeners();
+    }
+  }
+
+  Future<bool> restartDesktop() async {
+    try {
+      final ok = await DroidDeskPlatform.restartDesktop();
+      await refreshStatus();
+      return ok;
+    } catch (e) {
+      _errorMessage = 'Failed to restart the desktop: $e';
+      notifyListeners();
+      return false;
     }
   }
 

@@ -190,6 +190,32 @@ class HomeScreen extends StatelessWidget {
                           ),
                         ),
 
+                      // ── Restart only the desktop (XFCE), apps stay ──
+                      if (!state.hasRoot &&
+                          (state.isRunning || state.desktopEnded))
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: _ActionCard(
+                            icon: Icons.restart_alt_rounded,
+                            title: 'Restartovat plochu',
+                            subtitle: state.desktopEnded
+                                ? 'Plocha skončila. Spustí znovu XFCE, okna aplikací zůstanou'
+                                : 'Panel, plocha a správce oken znovu, okna aplikací zůstanou',
+                            color: DroidTheme.secondary,
+                            onTap: () async {
+                              final ok = await state.restartDesktop();
+                              if (!ok && context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Plochu se nepodařilo restartovat'),
+                                    backgroundColor: DroidTheme.error,
+                                  ),
+                                );
+                              }
+                            },
+                          ),
+                        ),
+
                       _ActionCard(
                         icon: state.isRunning
                             ? Icons.stop_circle_rounded
