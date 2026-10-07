@@ -29,7 +29,7 @@ import kotlin.concurrent.thread
  * Protocol, one line per request on the abstract socket "droiddesk.usb":
  *   list              -> one tab-separated line per device, then an empty line
  *                        name, vid, pid, mass storage (1/0), manufacturer, product, held (1/0),
- *                        serial ports (0 = not a supported USB serial adapter)
+ *                        serial ports (0 = not a supported USB serial adapter), Ethernet mode
  *   flash <name> <lun|-> <path>  (stable path, libaums like EtchDroid) writes a
  *                     raw, .xz or .gz image and verifies it by reading it back;
  *   read <name> <lun|-> <path>   copies the whole device into a file. "-" picks
@@ -45,6 +45,7 @@ import kotlin.concurrent.thread
  *   watch             -> stays open and streams "attached\t<list line>", "detached\t<name>",
  *                        "held\t<name>" and "released\t<name>"
  *   serial <name> <port> -> a USB serial adapter's port as a framed byte stream (UsbSerial)
+ *   eth <name>        -> takes a USB Ethernet adapter from Android, raw frames both ways (UsbEth)
  *   open <name>       -> (raw, experimental) asks for permission if needed, claims the mass storage
  *                        interface and answers "ok <interface> <ep in> <ep out>"
  *                        with the fd attached, or "err <reason>". The device stays
@@ -131,7 +132,10 @@ object UsbBridge {
         }
     }
 
-    /** The tab-separated device line of "list" (name, vid, pid, storage, maker, product, held, serial ports). */
+    /**
+     * The tab-separated device line of "list" (name, vid, pid, storage, maker, product, held,
+     * serial ports, Ethernet mode: "ecm" when droiddesk-eth can take it over, else empty).
+     */
     private fun describe(device: UsbDevice): String = listOf(
         device.deviceName,
         "%04x".format(device.vendorId),
@@ -141,6 +145,7 @@ object UsbBridge {
         clean(runCatching { device.productName }.getOrNull()),
         if (held.containsKey(device.deviceName)) "1" else "0",
         UsbSerial.ports(device).toString(),
+        UsbEth.mode(device),
     ).joinToString("\t")
 
     /**
@@ -349,6 +354,21 @@ object UsbBridge {
                             requestPermission(context, usb, device)
                         } -> output.write("err permission denied\n".toByteArray())
                         else -> UsbSerial.serve(usb, device, index, client)
+                    }
+                }
+                request.startsWith("eth ") -> {
+                    // Ethernet adapter for droiddesk-eth: frames until the client closes.
+                    val name = request.removePrefix("eth ").trim()
+                    val device = usb.deviceList[name]
+                    when {
+                        device == null -> output.write("err no such device $name\n".toByteArray())
+                        held.containsKey(name) -> output.write("err $name is held as a disk\n".toByteArray())
+                        !usb.hasPermission(device) && !run {
+                            output.write("permission\n".toByteArray())
+                            output.flush()
+                            requestPermission(context, usb, device)
+                        } -> output.write("err permission denied\n".toByteArray())
+                        else -> UsbEth.serve(usb, device, client)
                     }
                 }
                 request.startsWith("open ") -> {
