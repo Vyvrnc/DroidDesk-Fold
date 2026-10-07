@@ -190,6 +190,20 @@ class HomeScreen extends StatelessWidget {
                           ),
                         ),
 
+                      // ── Stop only the desktop: terminals and Claude Code keep running ──
+                      if (!state.hasRoot && state.isRunning)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: _ActionCard(
+                            icon: Icons.desktop_access_disabled_rounded,
+                            title: 'Zastavit plochu',
+                            subtitle:
+                                'Vypne XFCE a šetří výkon, terminál a Claude běží dál',
+                            color: DroidTheme.secondary,
+                            onTap: () => state.stopDesktop(),
+                          ),
+                        ),
+
                       // ── Restart only the desktop (XFCE), apps stay ──
                       if (!state.hasRoot &&
                           (state.isRunning || state.desktopEnded))
@@ -251,6 +265,20 @@ class HomeScreen extends StatelessWidget {
                           }
                         },
                       ),
+
+                      if (!state.hasRoot &&
+                          !state.isRunning &&
+                          state.serverRunning) ...[
+                        const SizedBox(height: 10),
+                        _ActionCard(
+                          icon: Icons.stop_circle_rounded,
+                          title: 'Stop Server',
+                          subtitle:
+                              'Plocha neběží; vypne celé Linux prostředí včetně terminálů',
+                          color: DroidTheme.error,
+                          onTap: () => state.stopLinux(),
+                        ),
+                      ],
 
                       const SizedBox(height: 10),
 

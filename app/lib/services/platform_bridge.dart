@@ -288,6 +288,10 @@ class DroidDeskPlatform {
         false;
   }
 
+  static Future<void> stopDesktop() async {
+    await _channel.invokeMethod('stopDesktop');
+  }
+
   static Future<bool> restartDesktop() async {
     return await _channel.invokeMethod<bool>('restartDesktop') ?? false;
   }

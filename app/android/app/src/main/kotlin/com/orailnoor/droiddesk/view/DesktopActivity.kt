@@ -1,7 +1,6 @@
 package com.orailnoor.droiddesk.view
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -131,62 +130,22 @@ class DesktopActivity : Activity() {
         }
     }
 
-    // xfce4-session can end on its own (crash, logout, a killed process). The X server
-    // keeps showing the last frame then and the app looked frozen, so offer a restart.
-    private var desktopEndedDialog: AlertDialog? = null
-    private var desktopRestarting = false
+    // When the desktop ends (crash, logout, stopped from the home screen) the X server keeps
+    // showing the last frame and the app looked frozen. Go back to the home screen, which
+    // offers to start it again.
     private val desktopWatchdog = object : Runnable {
         override fun run() {
             if (isFinishing || isDestroyed) return
-            if (sessionMode != "chroot" && !desktopRestarting && desktopEndedDialog == null &&
-                linuxRuntime.desktopEndedUnexpectedly()
-            ) {
-                Log.w(TAG, "Desktop session ended unexpectedly")
-                showDesktopEndedDialog()
+            if (sessionMode != "chroot" && !linuxRuntime.isRunning()) {
+                if (linuxRuntime.desktopEndedUnexpectedly()) {
+                    Log.w(TAG, "Desktop session ended unexpectedly")
+                    Toast.makeText(this@DesktopActivity, "Plocha skončila, spustíš ji z hlavní obrazovky", Toast.LENGTH_LONG).show()
+                }
+                finish()
+                return
             }
             loadingMessageHandler.postDelayed(this, DESKTOP_WATCHDOG_MS)
         }
-    }
-
-    private fun showDesktopEndedDialog() {
-        desktopEndedDialog = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Plocha skončila")
-            .setMessage("XFCE se ukončilo (pád, odhlášení nebo zabitý proces). Okna aplikací, které ještě běží, zůstanou.")
-            .setCancelable(false)
-            .setPositiveButton("Spustit znovu") { _, _ ->
-                desktopEndedDialog = null
-                restartDesktop()
-            }
-            .setNegativeButton("Zavřít") { _, _ ->
-                desktopEndedDialog = null
-                finish()
-            }
-            .show()
-    }
-
-    private fun restartDesktop() {
-        if (desktopRestarting) return
-        desktopRestarting = true
-        Toast.makeText(this, "Plocha se restartuje…", Toast.LENGTH_SHORT).show()
-        Thread({
-            val ready = try {
-                linuxRuntime.restartDesktop(desktopEnv)
-                linuxRuntime.waitForDesktopReady(desktopEnv)
-            } catch (error: Throwable) {
-                Log.e(TAG, "Desktop restart failed", error)
-                false
-            }
-            runOnUiThread {
-                desktopRestarting = false
-                if (!isFinishing && !isDestroyed) {
-                    Toast.makeText(
-                        this,
-                        if (ready) "Plocha běží" else "Plocha nenaběhla, zkus to znovu",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                }
-            }
-        }, "LinuxDesktopRestart").start()
     }
 
     companion object {
@@ -867,8 +826,6 @@ class DesktopActivity : Activity() {
         loadingMessageHandler.removeCallbacks(loadingEstimateTicker)
         loadingMessageHandler.removeCallbacks(connectWatchdog)
         loadingMessageHandler.removeCallbacks(desktopWatchdog)
-        desktopEndedDialog?.dismiss()
-        desktopEndedDialog = null
         surfaceCallback?.let { callback -> lorieView?.holder?.removeCallback(callback) }
         surfaceCallback = null
         inputController?.dispose()

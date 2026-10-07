@@ -137,6 +137,7 @@ class MainActivity : FlutterActivity() {
                         "isBootstrapped" to if (rooted) chrootRuntime.isRootfsReady() else linuxRuntime.isBootstrapped(),
                         "isRunning" to if (rooted) chrootRuntime.isRunning() else linuxRuntime.isRunning(),
                         "desktopEnded" to (!rooted && linuxRuntime.desktopEndedUnexpectedly()),
+                        "serverRunning" to com.orailnoor.droiddesk.service.DroidDeskService.running,
                         "hasRoot" to rooted,
                         "distro" to if (rooted) "ubuntu-chroot" else "termux-native",
                         "installedDE" to if (rooted) {
@@ -561,6 +562,14 @@ class MainActivity : FlutterActivity() {
                     }
                     startActivity(intent)
                     result.success(true)
+                }
+
+                "stopDesktop" -> {
+                    // Only XFCE; the service, terminals and tmux (Claude Code) keep running.
+                    thread(name = "stop-desktop") {
+                        linuxRuntime.stopDesktop()
+                        runOnUiThread { result.success(true) }
+                    }
                 }
 
                 "restartDesktop" -> {

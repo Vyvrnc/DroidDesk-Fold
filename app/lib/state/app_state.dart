@@ -14,6 +14,8 @@ class AppState extends ChangeNotifier {
   bool _isBootstrapped = false;
   bool _isRunning = false;
   bool _desktopEnded = false;
+  bool _serverRunning = false;
+  AppLifecycleListener? _lifecycle;
   bool _hasRoot = false;
   String _installedDistro = '';
   String _installedDE = '';
@@ -60,6 +62,7 @@ class AppState extends ChangeNotifier {
   bool get isBootstrapped => _isBootstrapped;
   bool get isRunning => _isRunning;
   bool get desktopEnded => _desktopEnded;
+  bool get serverRunning => _serverRunning;
   bool get hasRoot => _hasRoot;
   String get installedDistro => _installedDistro;
   String get installedDE => _installedDE;
@@ -99,6 +102,8 @@ class AppState extends ChangeNotifier {
 
   Future<void> initialize() async {
     await _loadThemeMode();
+    // Back from the desktop or a terminal: the desktop may have been stopped or ended.
+    _lifecycle ??= AppLifecycleListener(onResume: refreshStatus);
 
     // Set up progress callbacks
     DroidDeskPlatform.onDownloadProgress = (progress, status) {
@@ -219,6 +224,7 @@ class AppState extends ChangeNotifier {
       _isBootstrapped = status['isBootstrapped'] == true;
       _isRunning = status['isRunning'] == true;
       _desktopEnded = status['desktopEnded'] == true;
+      _serverRunning = status['serverRunning'] == true;
       _hasRoot = status['hasRoot'] == true;
       _installedDistro = status['distro']?.toString() ?? '';
       _installedDE = status['installedDE']?.toString() ?? '';
@@ -456,6 +462,16 @@ class AppState extends ChangeNotifier {
       await DroidDeskPlatform.launchDesktopActivity();
     } catch (e) {
       _errorMessage = 'Failed to launch desktop activity: $e';
+      notifyListeners();
+    }
+  }
+
+  Future<void> stopDesktop() async {
+    try {
+      await DroidDeskPlatform.stopDesktop();
+      await refreshStatus();
+    } catch (e) {
+      _errorMessage = 'Failed to stop the desktop: $e';
       notifyListeners();
     }
   }

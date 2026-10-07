@@ -46,6 +46,10 @@ class DroidDeskService : Service() {
         // network still gets Android's DNS (see writeDebianResolvConf).
         @Volatile private var lastLinkProperties: LinkProperties? = null
 
+        /** True between onCreate and onDestroy: Linux runs, with or without the desktop. */
+        @Volatile var running = false
+            private set
+
         /** Rewrites the Debian resolv.conf from the last known network, if any. */
         fun applyDebianDns(context: Context) {
             // Debian can be installed before the service ever ran; ask Android directly then.
@@ -132,6 +136,7 @@ class DroidDeskService : Service() {
         AndroidAppBridge.start(this)
         UsbBridge.start(this)
         NetBridge.start(this)
+        running = true
         createNotificationChannel()
         acquireWakeLock()
         x11Bound = bindService(
@@ -165,6 +170,7 @@ class DroidDeskService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        running = false
         unregisterReceiver(batteryReceiver)
         runCatching {
             getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkCallback)

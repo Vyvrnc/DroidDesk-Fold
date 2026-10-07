@@ -169,6 +169,20 @@ class LinuxRuntime(private val context: Context) {
         startSession(desktopEnv, "x11")
     }
 
+    /**
+     * Ends XFCE but keeps the rest: the X server, terminals, tmux sessions (Claude Code)
+     * and the service. Windows of apps still open stay on the X server without a desktop.
+     */
+    fun stopDesktop() {
+        Log.i(TAG, "Stopping the desktop only")
+        sessionProcess?.let {
+            it.destroyForcibly()
+            it.waitFor()
+        }
+        sessionProcess = null
+        killDesktopShell()
+    }
+
     private fun killDesktopShell() {
         val names = listOf(
             "xfce4-session", "xfwm4", "xfce4-panel", "xfdesktop", "xfsettingsd",
