@@ -48,3 +48,40 @@ Java_com_orailnoor_droiddesk_runtime_BotScsiDevice_nativeBulk(JNIEnv *env, jclas
     (*env)->ReleaseByteArrayElements(env, buffer, data, (endpoint & 0x80) ? 0 : JNI_ABORT);
     return result;
 }
+
+// Ethernet takeover (UsbEth). Android's releaseInterface hands the interface straight back to
+// the kernel driver, and usbfs refuses SETCONFIGURATION while any interface is bound (EBUSY),
+// so the configuration switch needs the raw ioctls.
+
+// Detaches (connect = 0) or re-probes (connect = 1) the kernel driver of one interface.
+// Returns 0 or -errno (-ENODATA: no driver was bound).
+JNIEXPORT jint JNICALL
+Java_com_orailnoor_droiddesk_runtime_UsbEth_nativeDriver(JNIEnv *env, jclass cls, jint fd, jint interface,
+                                                        jboolean connect) {
+    (void) env;
+    (void) cls;
+    struct usbdevfs_ioctl command = {
+        .ifno = interface,
+        .ioctl_code = connect ? USBDEVFS_CONNECT : USBDEVFS_DISCONNECT,
+        .data = 0,
+    };
+    return ioctl(fd, USBDEVFS_IOCTL, &command) < 0 ? -errno : 0;
+}
+
+// Releases a claimed interface without letting the kernel driver bind again.
+JNIEXPORT jint JNICALL
+Java_com_orailnoor_droiddesk_runtime_UsbEth_nativeRelease(JNIEnv *env, jclass cls, jint fd, jint interface) {
+    (void) env;
+    (void) cls;
+    unsigned int number = (unsigned int) interface;
+    return ioctl(fd, USBDEVFS_RELEASEINTERFACE, &number) < 0 ? -errno : 0;
+}
+
+// USBDEVFS_SETCONFIGURATION by bConfigurationValue. Returns 0 or -errno.
+JNIEXPORT jint JNICALL
+Java_com_orailnoor_droiddesk_runtime_UsbEth_nativeSetConfiguration(JNIEnv *env, jclass cls, jint fd, jint value) {
+    (void) env;
+    (void) cls;
+    int configuration = value;
+    return ioctl(fd, USBDEVFS_SETCONFIGURATION, &configuration) < 0 ? -errno : 0;
+}

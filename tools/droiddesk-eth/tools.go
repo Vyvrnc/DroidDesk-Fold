@@ -204,9 +204,24 @@ func (d *daemon) runDHCP(w *lineWriter) {
 	if secs := ack.optUint32(51); secs > 0 {
 		lease.Expires = time.Now().Add(time.Duration(secs) * time.Second)
 	}
+	// A new lease replaces the previous one: the old address may belong to another device
+	// by now, and with equal prefixes the older address would stay the source.
+	d.leaseMu.Lock()
+	previous := d.lease
+	d.leaseMu.Unlock()
+	if previous != nil && previous.Addr.Addr() != lease.Addr.Addr() {
+		if err := d.ns.delAddress(previous.Addr); err != nil {
+			log.Printf("dhcp: stará adresa %s: %v", previous.Addr, err)
+		}
+	}
 	if err := d.ns.addAddress(lease.Addr); err != nil && !strings.Contains(err.Error(), "už je") {
 		w.line("err %s", err)
 		return
+	}
+	if previous != nil && previous.Router.IsValid() {
+		if _, gw := d.ns.snapshot(); gw == previous.Router {
+			d.ns.setGateway(netip.Addr{})
+		}
 	}
 	if _, gw := d.ns.snapshot(); !gw.IsValid() && lease.Router.IsValid() {
 		if err := d.ns.setGateway(lease.Router); err != nil {
@@ -373,16 +388,34 @@ func (d *daemon) forward(conn net.Conn, reader *bufio.Reader, w *lineWriter, pro
 			return
 		}
 		w.line("ok %d", ln.Addr().(*net.TCPAddr).Port)
+		var mu sync.Mutex
+		active := map[net.Conn]struct{}{}
+		track := func(c net.Conn, add bool) {
+			mu.Lock()
+			defer mu.Unlock()
+			if add {
+				active[c] = struct{}{}
+			} else {
+				delete(active, c)
+			}
+		}
 		go func() {
 			<-clientGone
 			ln.Close()
+			mu.Lock()
+			for c := range active {
+				c.Close()
+			}
+			mu.Unlock()
 		}()
 		for {
 			local, err := ln.Accept()
 			if err != nil {
 				return
 			}
+			track(local, true)
 			go func() {
+				defer track(local, false)
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				remote, err := d.ns.dialTCP(ctx, target)
 				cancel()
@@ -391,6 +424,8 @@ func (d *daemon) forward(conn net.Conn, reader *bufio.Reader, w *lineWriter, pro
 					local.Close()
 					return
 				}
+				track(remote, true)
+				defer track(remote, false)
 				relay(local, remote)
 			}()
 		}

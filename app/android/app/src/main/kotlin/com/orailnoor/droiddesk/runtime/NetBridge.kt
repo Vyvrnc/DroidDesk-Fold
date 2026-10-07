@@ -84,6 +84,8 @@ object NetBridge {
     private var callback: ConnectivityManager.NetworkCallback? = null
     private val networks = ConcurrentHashMap<Network, Info>()
     private val proxies = ConcurrentHashMap<Int, ServerSocket>()
+    private val live = ConcurrentHashMap.newKeySet<java.io.Closeable>()
+    private const val UDP_IDLE_MS = 120_000L
 
     fun start(context: Context) {
         if (server != null) return
@@ -111,6 +113,8 @@ object NetBridge {
         }
         proxies.values.forEach { runCatching { it.close() } }
         proxies.clear()
+        live.forEach { runCatching { it.close() } }
+        live.clear()
         appContext?.let { context ->
             callback?.let { runCatching { context.getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) } }
         }
@@ -188,10 +192,11 @@ object NetBridge {
     }
 
     private fun saveRules(rules: List<Rule>) {
-        prefs().edit().putString("rules", rules.joinToString("\n") { "${it.cidr} ${it.iface}" }).apply()
+        prefs().edit().putString("rules", rules.joinToString("\n") { "${it.cidr} ${it.iface}" }).commit()
     }
 
     /** Ethernet 1081, Wi-Fi 1082, anything else from 1083; kept per interface. */
+    @Synchronized
     private fun portOf(iface: String): Int {
         val prefs = prefs()
         prefs.getInt("port_$iface", 0).takeIf { it > 0 }?.let { return it }
@@ -202,7 +207,7 @@ object NetBridge {
             transport == "wifi" && 1082 !in used -> 1082
             else -> generateSequence(1083) { it + 1 }.first { it !in used }
         }
-        prefs.edit().putInt("port_$iface", port).apply()
+        prefs.edit().putInt("port_$iface", port).commit()
         return port
     }
 
@@ -221,7 +226,7 @@ object NetBridge {
                 val listener = ServerSocket(port, 50, InetAddress.getByName("127.0.0.1"))
                 proxies[port] = listener
                 thread(name = "net-socks-$port", isDaemon = true) {
-                    acceptLoop(listener) { client -> socks(client, iface.ifEmpty { null }) }
+                    acceptLoop(listener, live) { client -> socks(client, iface.ifEmpty { null }) }
                 }
                 Log.i(TAG, "SOCKS on 127.0.0.1:$port for ${iface.ifEmpty { "router" }}")
             } catch (error: Exception) {
@@ -230,13 +235,14 @@ object NetBridge {
         }
     }
 
-    private fun acceptLoop(listener: ServerSocket, handle: (Socket) -> Unit) {
+    private fun acceptLoop(listener: ServerSocket, tracked: MutableSet<java.io.Closeable>, handle: (Socket) -> Unit) {
         while (!listener.isClosed) {
             val client = try {
                 listener.accept()
             } catch (error: Exception) {
                 break
             }
+            tracked += client
             thread(name = "net-client", isDaemon = true) {
                 try {
                     handle(client)
@@ -244,7 +250,20 @@ object NetBridge {
                     Log.d(TAG, "Connection ended: ${error.message}")
                 } finally {
                     runCatching { client.close() }
+                    tracked -= client
                 }
+            }
+        }
+    }
+
+    /** Connects and relays; the upstream socket is tracked like the client. */
+    private fun relayTo(client: Socket, route: Route, address: InetAddress, port: Int, tracked: MutableSet<java.io.Closeable>) {
+        connect(route, address, port).use { upstream ->
+            tracked += upstream
+            try {
+                pipe(client, upstream)
+            } finally {
+                tracked -= upstream
             }
         }
     }
@@ -316,10 +335,15 @@ object NetBridge {
                 else -> 1
             })
         }
-        upstream.use {
-            reply(output, 0)
-            client.soTimeout = 0
-            pipe(client, upstream)
+        live += upstream
+        try {
+            upstream.use {
+                reply(output, 0)
+                client.soTimeout = 0
+                pipe(client, upstream)
+            }
+        } finally {
+            live -= upstream
         }
     }
 
@@ -368,6 +392,7 @@ object NetBridge {
                 runCatching { client.close() }
                 continue
             }
+            live += client
             thread(name = "net-bridge-client", isDaemon = true) {
                 try {
                     handle(client)
@@ -375,6 +400,7 @@ object NetBridge {
                     Log.d(TAG, "Network request ended: ${error.message}")
                 } finally {
                     runCatching { client.close() }
+                    live -= client
                 }
             }
         }
@@ -414,26 +440,29 @@ object NetBridge {
             }
             "enable", "disable" -> {
                 val iface = args.getOrNull(1) ?: return say("err usage: ${args[0]} <interface>")
-                val enabled = enabledIfaces().toMutableSet()
-                if (args[0] == "enable") enabled += iface else enabled -= iface
-                prefs().edit().putStringSet("enabled", enabled).apply()
-                if (args[0] == "enable") portOf(iface)
-                applyProxies()
+                synchronized(this) {
+                    val enabled = enabledIfaces().toMutableSet()
+                    if (args[0] == "enable") enabled += iface else enabled -= iface
+                    prefs().edit().putStringSet("enabled", enabled).commit()
+                    if (args[0] == "enable") portOf(iface)
+                    applyProxies()
+                }
                 say("ok")
             }
             "rule-add" -> {
                 val rule = args.getOrNull(2)?.let { parseRule(args[1], it) }
                     ?: return say("err usage: rule-add <a.b.c.d/prefix> <interface>")
-                saveRules(rules().filter { it.cidr != rule.cidr } + rule)
+                synchronized(this) { saveRules(rules().filter { it.cidr != rule.cidr } + rule) }
                 say("ok")
             }
             "rule-del" -> {
                 val cidr = args.getOrNull(1)?.let { parseRule(it, "-")?.cidr }
                     ?: return say("err usage: rule-del <a.b.c.d/prefix>")
-                val rules = rules()
-                if (rules.none { it.cidr == cidr }) return say("err no rule for $cidr")
-                saveRules(rules.filter { it.cidr != cidr })
-                say("ok")
+                val removed = synchronized(this) {
+                    val rules = rules()
+                    rules.any { it.cidr == cidr }.also { if (it) saveRules(rules.filter { rule -> rule.cidr != cidr }) }
+                }
+                say(if (removed) "ok" else "err no rule for $cidr")
             }
             "ping" -> {
                 val iface = args.getOrNull(1)
@@ -525,43 +554,20 @@ object NetBridge {
         val route = routeFor(iface, address)
         if (route is Route.Unreachable) return say("err ${route.reason}")
         val loopback = InetAddress.getByName("127.0.0.1")
-        val closers = mutableListOf<java.io.Closeable>()
+        val closers = ConcurrentHashMap.newKeySet<java.io.Closeable>()
         try {
             if (protocol == "tcp") {
                 val listener = ServerSocket(localPort, 50, loopback)
                 closers += listener
                 thread(name = "net-forward-tcp", isDaemon = true) {
-                    acceptLoop(listener) { local -> connect(route, address, port).use { pipe(local, it) } }
+                    acceptLoop(listener, closers) { local -> relayTo(local, route, address, port, closers) }
                 }
                 say("ok ${listener.localPort}")
             } else {
                 val local = DatagramSocket(InetSocketAddress(loopback, localPort))
-                val remote = DatagramSocket()
                 closers += local
-                closers += remote
-                if (route is Route.Via) route.network.bindSocket(remote)
-                remote.connect(address, port)
-                val peer = java.util.concurrent.atomic.AtomicReference<InetSocketAddress?>(null)
-                thread(name = "net-forward-udp-out", isDaemon = true) {
-                    val buffer = ByteArray(65_535)
-                    runCatching {
-                        while (true) {
-                            val packet = DatagramPacket(buffer, buffer.size)
-                            local.receive(packet)
-                            peer.set(packet.socketAddress as InetSocketAddress)
-                            remote.send(DatagramPacket(packet.data, packet.offset, packet.length))
-                        }
-                    }
-                }
-                thread(name = "net-forward-udp-in", isDaemon = true) {
-                    val buffer = ByteArray(65_535)
-                    runCatching {
-                        while (true) {
-                            val packet = DatagramPacket(buffer, buffer.size)
-                            remote.receive(packet)
-                            peer.get()?.let { local.send(DatagramPacket(packet.data, packet.offset, packet.length, it)) }
-                        }
-                    }
+                thread(name = "net-forward-udp", isDaemon = true) {
+                    forwardUdp(local, route, address, port, closers)
                 }
                 say("ok ${local.localPort}")
             }
@@ -571,6 +577,63 @@ object NetBridge {
             runCatching { say("err ${error.message}") }
         } finally {
             closers.forEach { runCatching { it.close() } }
+        }
+    }
+
+    private class UdpSession(val remote: DatagramSocket, @Volatile var lastUsed: Long)
+
+    /**
+     * One upstream socket per local client, so each answer goes back to whoever asked;
+     * sessions idle for two minutes are closed.
+     */
+    private fun forwardUdp(local: DatagramSocket, route: Route, address: InetAddress, port: Int,
+                           closers: MutableSet<java.io.Closeable>) {
+        val sessions = ConcurrentHashMap<InetSocketAddress, UdpSession>()
+        local.soTimeout = 30_000
+        val buffer = ByteArray(65_535)
+        try {
+            while (!local.isClosed) {
+                val packet = DatagramPacket(buffer, buffer.size)
+                val received = try {
+                    local.receive(packet)
+                    true
+                } catch (timeout: SocketTimeoutException) {
+                    false
+                }
+                val now = System.currentTimeMillis()
+                sessions.entries.filter { now - it.value.lastUsed > UDP_IDLE_MS }.forEach { (key, session) ->
+                    sessions.remove(key)
+                    runCatching { session.remote.close() }
+                    closers -= session.remote
+                }
+                if (!received) continue
+                val peer = packet.socketAddress as InetSocketAddress
+                val session = sessions.getOrPut(peer) {
+                    val remote = DatagramSocket()
+                    if (route is Route.Via) route.network.bindSocket(remote)
+                    remote.connect(address, port)
+                    closers += remote
+                    UdpSession(remote, now).also { created ->
+                        thread(name = "net-forward-udp-in", isDaemon = true) {
+                            val incoming = ByteArray(65_535)
+                            runCatching {
+                                while (true) {
+                                    val answer = DatagramPacket(incoming, incoming.size)
+                                    created.remote.receive(answer)
+                                    created.lastUsed = System.currentTimeMillis()
+                                    local.send(DatagramPacket(answer.data, answer.offset, answer.length, peer))
+                                }
+                            }
+                        }
+                    }
+                }
+                session.lastUsed = now
+                session.remote.send(DatagramPacket(packet.data, packet.offset, packet.length))
+            }
+        } catch (error: Exception) {
+            Log.d(TAG, "UDP forward ended: ${error.message}")
+        } finally {
+            sessions.values.forEach { runCatching { it.remote.close() } }
         }
     }
 }

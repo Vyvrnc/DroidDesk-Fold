@@ -29,8 +29,8 @@ class LinuxRuntime(private val context: Context) {
         // without kopper (the kopper path flickers without DRI3).
         private const val MESA_KGSL_VERSION = "26.2.3-2"
         // tools/droiddesk-eth, published as release droiddesk-eth-<version>.
-        private const val DROIDDESK_ETH_VERSION = "1"
-        private const val DROIDDESK_ETH_SHA256 = "c6ff48cb5929024f78a8941b638b30e6ff71c1af95032e843eecfdabebc873b6"
+        private const val DROIDDESK_ETH_VERSION = "2"
+        private const val DROIDDESK_ETH_SHA256 = "daf82991ecc5189b14e12b4a344ad32f0a9d72914a7e1f96a66ea851186511c0"
         // Bump when debian-setup gains something existing installs need (rerun at session start).
         private const val DEBIAN_SETUP_VERSION = 10
         private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
@@ -169,7 +169,8 @@ class LinuxRuntime(private val context: Context) {
         }
         sessionProcess = null
         killDesktopShell()
-        startSession(desktopEnv, "x11")
+        // Apps that outlive the restart keep their session bus and audio.
+        startSession(desktopEnv, "x11", keepServices = true)
     }
 
     /**
@@ -511,12 +512,12 @@ class LinuxRuntime(private val context: Context) {
             log="${tmpDir.absolutePath}/droiddesk-tmux-${'$'}name.log"
             # proot-distro kills the proot when its first process exits (--kill-on-exit), and the
             # tmux server with it, so a detached host keeps a proot of its own while the session
-            # lives. The app's uid goes along: the server runs as proot's fake root, clients
+            # lives, with a tmux server of its own (-L): ending one session leaves the others. The app's uid goes along: the server runs as proot's fake root, clients
             # connect with the real uid and tmux turns them away without server-access.
             setsid nohup "${binDir.absolutePath}/debian-run" bash -c '
                 name=${'$'}1 uid=${'$'}2; shift 2
                 command -v tmux >/dev/null || { echo "tmux is missing: apt-get install tmux"; exit 1; }
-                tmux has-session -t "=${'$'}name" 2>/dev/null && exit 0
+                tmux -L "droiddesk-${'$'}name" has-session -t "=${'$'}name" 2>/dev/null && exit 0
                 conf=${'$'}HOME/.config/droiddesk/tmux.conf
                 mkdir -p "${'$'}{conf%/*}"
                 {
@@ -528,12 +529,12 @@ class LinuxRuntime(private val context: Context) {
                     user=${'$'}(getent passwd "${'$'}uid" | cut -d: -f1)
                     [ -n "${'$'}user" ] && echo "server-access -a ${'$'}user"
                 } > "${'$'}conf"
-                tmux -f "${'$'}conf" new-session -d -s "${'$'}name" "${'$'}@" || exit 0
-                while tmux has-session -t "=${'$'}name" 2>/dev/null; do sleep 5; done
+                tmux -L "droiddesk-${'$'}name" -f "${'$'}conf" new-session -d -s "${'$'}name" "${'$'}@" || exit 0
+                while tmux -L "droiddesk-${'$'}name" has-session -t "=${'$'}name" 2>/dev/null; do sleep 5; done
             ' droiddesk-tmux-host "${'$'}name" "${'$'}(id -u)" "${'$'}@" > "${'$'}log" 2>&1 < /dev/null &
             exec "${binDir.absolutePath}/debian-run" bash -c '
                 for i in ${'$'}(seq 150); do
-                    tmux has-session -t "=${'$'}1" 2>/dev/null && exec tmux attach -t "=${'$'}1"
+                    tmux -L "droiddesk-${'$'}1" has-session -t "=${'$'}1" 2>/dev/null && exec tmux -L "droiddesk-${'$'}1" attach -t "=${'$'}1"
                     sleep 0.2
                 done
                 echo "tmux session ${'$'}1 did not start, see ${'$'}2" >&2
@@ -1064,12 +1065,13 @@ class LinuxRuntime(private val context: Context) {
                             "if [ ! -x \"${'$'}bin\" ]; then\n" +
                             "    mkdir -p \"${'$'}dir\"\n" +
                             "    echo \"droiddesk-eth: stahuji program (verze ${'$'}ver, 5 MB)…\" >&2\n" +
-                            "    if curl -fsSL -o \"${'$'}bin.part\" \"$droiddeskEthUrl\" &&\n" +
-                            "        echo \"$DROIDDESK_ETH_SHA256  ${'$'}bin.part\" | sha256sum -c - >/dev/null 2>&1; then\n" +
-                            "        chmod 755 \"${'$'}bin.part\" && mv \"${'$'}bin.part\" \"${'$'}bin\"\n" +
-                            "        for old in \"${'$'}dir\"/droiddesk-eth-*; do [ \"${'$'}old\" = \"${'$'}bin\" ] || rm -f \"${'$'}old\"; done\n" +
+                            "    part=\"${'$'}bin.part.${'$'}${'$'}\"\n" +
+                            "    if curl -fsSL -o \"${'$'}part\" \"$droiddeskEthUrl\" &&\n" +
+                            "        echo \"$DROIDDESK_ETH_SHA256  ${'$'}part\" | sha256sum -c - >/dev/null 2>&1; then\n" +
+                            "        chmod 755 \"${'$'}part\" && mv -f \"${'$'}part\" \"${'$'}bin\"\n" +
+                            "        for old in \"${'$'}dir\"/droiddesk-eth-[0-9]*; do case \"${'$'}old\" in \"${'$'}bin\"|*.part.*) ;; *) rm -f \"${'$'}old\" ;; esac; done\n" +
                             "    else\n" +
-                            "        rm -f \"${'$'}bin.part\"\n" +
+                            "        rm -f \"${'$'}part\"\n" +
                             "        echo \"droiddesk-eth: stažení se nepovedlo (potřebuje internet jen poprvé)\" >&2\n" +
                             "        exit 1\n" +
                             "    fi\n" +
@@ -1126,12 +1128,13 @@ class LinuxRuntime(private val context: Context) {
                                 "if [ ! -x \"${'$'}bin\" ]; then\n" +
                                 "    mkdir -p \"${'$'}dir\"\n" +
                                 "    echo \"droiddesk-eth: stahuji program (verze ${'$'}ver, 5 MB)…\" >&2\n" +
-                                "    if curl -fsSL -o \"${'$'}bin.part\" \"$droiddeskEthUrl\" &&\n" +
-                                "        echo \"$DROIDDESK_ETH_SHA256  ${'$'}bin.part\" | sha256sum -c - >/dev/null 2>&1; then\n" +
-                                "        chmod 755 \"${'$'}bin.part\" && mv \"${'$'}bin.part\" \"${'$'}bin\"\n" +
-                                "        for old in \"${'$'}dir\"/droiddesk-eth-*; do [ \"${'$'}old\" = \"${'$'}bin\" ] || rm -f \"${'$'}old\"; done\n" +
+                                "    part=\"${'$'}bin.part.${'$'}${'$'}\"\n" +
+                            "    if curl -fsSL -o \"${'$'}part\" \"$droiddeskEthUrl\" &&\n" +
+                                "        echo \"$DROIDDESK_ETH_SHA256  ${'$'}part\" | sha256sum -c - >/dev/null 2>&1; then\n" +
+                                "        chmod 755 \"${'$'}part\" && mv -f \"${'$'}part\" \"${'$'}bin\"\n" +
+                                "        for old in \"${'$'}dir\"/droiddesk-eth-[0-9]*; do case \"${'$'}old\" in \"${'$'}bin\"|*.part.*) ;; *) rm -f \"${'$'}old\" ;; esac; done\n" +
                                 "    else\n" +
-                                "        rm -f \"${'$'}bin.part\"\n" +
+                                "        rm -f \"${'$'}part\"\n" +
                                 "        echo \"droiddesk-eth: stažení se nepovedlo (potřebuje internet jen poprvé)\" >&2\n" +
                                 "        exit 1\n" +
                                 "    fi\n" +
@@ -3337,7 +3340,13 @@ class LinuxRuntime(private val context: Context) {
 
     // ── Session Management ──
 
-    fun startSession(desktopEnv: String = "xfce4", mode: String = "x11", width: Int = 1920, height: Int = 1080) {
+    fun startSession(
+        desktopEnv: String = "xfce4",
+        mode: String = "x11",
+        width: Int = 1920,
+        height: Int = 1080,
+        keepServices: Boolean = false,
+    ) {
         val selectedDesktop = normalizedDesktop(desktopEnv)
         extractBootstrapIfNeeded(context)
 
@@ -3405,7 +3414,9 @@ class LinuxRuntime(private val context: Context) {
         // --fork: a forked daemon can outlive the Android activity and leave an
         // orphaned bus behind after its socket is replaced.
         val dbusSocket = File(tmpDir, "dbus-session")
-        try {
+        val reuseBus = keepServices && dbusProcess?.isAlive == true && dbusSocket.exists()
+        if (reuseBus) Log.i(TAG, "Keeping the session dbus-daemon")
+        if (!reuseBus) try {
             dbusProcess?.destroyForcibly()
             if (dbusSocket.exists()) dbusSocket.delete()
             val dbusConfig = File(tmpDir, "dbus-session.conf")
@@ -3506,7 +3517,12 @@ class LinuxRuntime(private val context: Context) {
             # A daemon left over from a previous session can stop answering:
             # "pulseaudio -k" then fails and every pactl call hangs, which kept
             # XFCE from starting (black screen with a cursor). Kill it outright
-            # and never let pactl block the desktop.
+            # and never let pactl block the desktop. A desktop restart keeps a daemon that
+            # answers, so playing apps are not cut off.
+            if [ "${if (keepServices) "1" else "0"}" = "1" ] &&
+                timeout 2 pactl list short sinks 2>/dev/null | grep -q AAudio_sink; then
+                echo "DIAG: keeping PulseAudio"
+            else
             timeout 2 pulseaudio -k >/dev/null 2>&1 || true
             pkill -9 -x pulseaudio >/dev/null 2>&1 || true
             if [ "${if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) "1" else "0"}" = "1" ]; then
@@ -3528,6 +3544,7 @@ class LinuxRuntime(private val context: Context) {
                 fi
             else
                 pulseaudio --start --exit-idle-time=-1 --load="module-native-protocol-tcp listen=127.0.0.1 auth-ip-acl=127.0.0.1" >/dev/null 2>&1 || true
+            fi
             fi
             # The TCP module is for Debian programs: proot-distro sets
             # PULSE_SERVER=127.0.0.1 there. Termux programs keep the native socket.

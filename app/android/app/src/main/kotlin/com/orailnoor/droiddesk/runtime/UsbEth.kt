@@ -40,6 +40,30 @@ object UsbEth {
 
     private val open = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
+    private val nativeAvailable: Boolean = runCatching { System.loadLibrary("droiddesk_usb") }.isSuccess
+
+    // usb_jni.c: Android's releaseInterface lets the kernel driver bind again at once, and
+    // usbfs refuses a configuration change while any interface is bound.
+    @JvmStatic private external fun nativeDriver(fd: Int, iface: Int, connect: Boolean): Int
+    @JvmStatic private external fun nativeRelease(fd: Int, iface: Int): Int
+    @JvmStatic private external fun nativeSetConfiguration(fd: Int, value: Int): Int
+
+    /** Every interface number of the device, over all its configurations. */
+    private fun interfaceNumbers(device: UsbDevice): Set<Int> =
+        (0 until device.configurationCount).flatMap { c ->
+            val config = device.getConfiguration(c)
+            (0 until config.interfaceCount).map { config.getInterface(it).id }
+        }.toSet()
+
+    /** Detaches every kernel driver, then switches; false when usbfs refuses. */
+    private fun switchConfiguration(connection: UsbDeviceConnection, device: UsbDevice, value: Int): Boolean {
+        val fd = connection.fileDescriptor
+        interfaceNumbers(device).forEach { nativeDriver(fd, it, false) }
+        val result = nativeSetConfiguration(fd, value)
+        if (result != 0) Log.w(TAG, "SETCONFIGURATION $value failed: errno ${-result}")
+        return result == 0
+    }
+
     private class Cdc(
         val config: UsbConfiguration,
         val comm: UsbInterface,
@@ -91,22 +115,13 @@ object UsbEth {
         val firstConfig = device.getConfiguration(0)
         var switched = false
         try {
-            if (cdc.config.id != firstConfig.id || device.configurationCount > 1) {
-                // The kernel driver (r8152) holds the vendor configuration. Claiming with
-                // force detaches it; the claims must be released again before the
-                // configuration can change (usbfs answers EBUSY to any claimed interface).
-                for (c in 0 until device.configurationCount) {
-                    val config = device.getConfiguration(c)
-                    for (i in 0 until config.interfaceCount) {
-                        val intf = config.getInterface(i)
-                        if (connection.claimInterface(intf, true)) connection.releaseInterface(intf)
-                    }
-                }
-                if (!connection.setConfiguration(cdc.config)) {
+            if (cdc.config.id != firstConfig.id) {
+                // The kernel driver (r8152) holds the vendor configuration.
+                if (!nativeAvailable || !switchConfiguration(connection, device, cdc.config.id)) {
                     output.write("err could not switch the adapter to CDC-ECM\n".toByteArray())
                     return
                 }
-                switched = cdc.config.id != firstConfig.id
+                switched = true
             }
             if (!connection.claimInterface(cdc.comm, true) || !connection.claimInterface(cdc.dataIdle, true)) {
                 output.write("err could not claim the adapter's interfaces\n".toByteArray())
@@ -127,11 +142,19 @@ object UsbEth {
             Log.w(TAG, "Ethernet takeover ended", error)
             runCatching { output.write("err ${error.message}\n".toByteArray()) }
         } finally {
-            runCatching { connection.releaseInterface(cdc.data) }
-            runCatching { connection.releaseInterface(cdc.comm) }
-            // Back to the vendor configuration: the kernel driver binds again and Android
-            // gets its Ethernet back. Otherwise unplugging the adapter does it.
-            if (switched) runCatching { connection.setConfiguration(firstConfig) }
+            if (switched) {
+                // Back to the vendor configuration: the kernel probes its driver for it and
+                // Android gets its Ethernet back. Otherwise unplugging the adapter does it.
+                val fd = connection.fileDescriptor
+                nativeRelease(fd, cdc.data.id)
+                nativeRelease(fd, cdc.comm.id)
+                if (!switchConfiguration(connection, device, firstConfig.id)) {
+                    Log.w(TAG, "Could not give ${device.deviceName} back; unplug it to reset")
+                }
+            } else {
+                runCatching { connection.releaseInterface(cdc.data) }
+                runCatching { connection.releaseInterface(cdc.comm) }
+            }
             connection.close()
             open.remove(device.deviceName)
             Log.i(TAG, "Gave ${device.deviceName} back to Android")
