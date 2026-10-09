@@ -71,10 +71,10 @@ def devices():
             line = line.rstrip("\n")
             if not line:
                 break
-            name, vid, pid, storage, maker, product, held, serial = (line.split("\t") + [""] * 8)[:8]
+            name, vid, pid, storage, maker, product, held, serial, eth = (line.split("\t") + [""] * 9)[:9]
             found.append({"name": name, "vid": vid, "pid": pid, "storage": storage == "1",
                           "maker": maker, "product": product, "held": held == "1",
-                          "serial": int(serial) if serial.isdigit() else 0})
+                          "serial": int(serial) if serial.isdigit() else 0, "eth": eth})
     return found
 
 
@@ -1728,7 +1728,8 @@ def main(argv):
         if not found:
             print("Žádné USB zařízení.")
         for dev in found:
-            mark = "[drženo] " if dev["held"] else ("[paměť]  " if dev["storage"] else "         ")
+            mark = ("[drženo] " if dev["held"] else "[paměť]  " if dev["storage"]
+                    else "[síť]    " if dev["eth"] else "         ")
             print(mark + describe(dev))
         return 0
     if command == "eject":

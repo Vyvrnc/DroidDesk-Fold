@@ -206,6 +206,9 @@ class DesktopActivity : Activity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
+        // A modifier released while another window had the focus never reaches X; a stuck
+        // Ctrl turned every click into a right click (DeX, Fold).
+        releaseModifiers()
         if (hasFocus) enableImmersiveMode()
         if (hasFocus) startClipboardSync() else clipboardSync?.stop()
         updateDexKeyCapture(hasFocus)
@@ -272,7 +275,25 @@ class DesktopActivity : Activity() {
 
     override fun onPause() {
         clipboardSync?.stop()
+        releaseModifiers()
         super.onPause()
+    }
+
+    /** Key-up for every modifier, including the latched Ctrl of the extra keys row. */
+    private fun releaseModifiers() {
+        val view = lorieView ?: return
+        for (code in intArrayOf(
+            KeyEvent.KEYCODE_CTRL_LEFT, KeyEvent.KEYCODE_CTRL_RIGHT,
+            KeyEvent.KEYCODE_SHIFT_LEFT, KeyEvent.KEYCODE_SHIFT_RIGHT,
+            KeyEvent.KEYCODE_ALT_LEFT, KeyEvent.KEYCODE_ALT_RIGHT,
+            KeyEvent.KEYCODE_META_LEFT, KeyEvent.KEYCODE_META_RIGHT,
+        )) {
+            view.sendKeyEvent(0, code, false)
+        }
+        if (ctrlLatched) {
+            ctrlLatched = false
+            ctrlButtonRef?.backgroundTintList = ColorStateList.valueOf(Color.argb(220, 28, 38, 52))
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -535,6 +556,7 @@ class DesktopActivity : Activity() {
     }
 
     private var ctrlLatched = false
+    private var ctrlButtonRef: Button? = null
 
     /**
      * Esc, Tab, a latching Ctrl, arrows (repeating while held), Home and End,
@@ -596,6 +618,7 @@ class DesktopActivity : Activity() {
                 lorieView?.requestFocus()
             }
         }
+        ctrlButtonRef = ctrlButton
         val height = (40 * density).toInt()
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
