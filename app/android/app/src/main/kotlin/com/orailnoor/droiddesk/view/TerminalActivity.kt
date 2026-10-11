@@ -20,6 +20,8 @@ import android.widget.Button
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import com.orailnoor.droiddesk.runtime.LinuxRuntime
+import com.orailnoor.droiddesk.runtime.NetBridge
+import com.orailnoor.droiddesk.runtime.UsbBridge
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import com.termux.view.TerminalView
@@ -269,6 +271,9 @@ object TerminalSessions {
         val runtime = LinuxRuntime(context.applicationContext)
         // droiddesk-usb/-serial/-net/-eth of this app version, also without a desktop start.
         runCatching { runtime.writeDeviceTools() }.onFailure { Log.w(TAG, "Device tools: ${it.message}") }
+        // Their bridges too: without the desktop DroidDeskService (which starts them) is not running.
+        UsbBridge.start(context.applicationContext)
+        NetBridge.start(context.applicationContext)
         val env = runtime.terminalEnvironment()
         val prefix = env["PREFIX"] ?: File(context.filesDir, "usr").absolutePath
         val home = env["HOME"] ?: File(context.filesDir, "home").absolutePath
@@ -288,6 +293,10 @@ object TerminalSessions {
         Log.i(TAG, "Terminal session $profile: $shell")
         return session
     }
+
+    /** True while a terminal profile still runs (the USB and network bridges stay for it). */
+    @Synchronized
+    fun anyRunning(): Boolean = sessions.values.any { it.isRunning }
 
     @Synchronized
     fun forget(profile: String) {

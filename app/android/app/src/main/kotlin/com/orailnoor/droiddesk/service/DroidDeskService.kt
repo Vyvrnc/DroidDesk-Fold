@@ -26,6 +26,7 @@ import com.orailnoor.droiddesk.runtime.AndroidAppBridge
 import com.orailnoor.droiddesk.runtime.LinuxRuntime
 import com.orailnoor.droiddesk.runtime.NetBridge
 import com.orailnoor.droiddesk.runtime.UsbBridge
+import com.orailnoor.droiddesk.view.TerminalSessions
 import com.orailnoor.droiddesk.x11.X11ServerService
 import java.io.File
 
@@ -180,8 +181,11 @@ class DroidDeskService : Service() {
             x11Bound = false
         }
         AndroidAppBridge.stop()
-        UsbBridge.stop()
-        NetBridge.stop()
+        // A terminal (Claude Code without the desktop) keeps using droiddesk-usb/-eth/-net.
+        if (!TerminalSessions.anyRunning()) {
+            UsbBridge.stop()
+            NetBridge.stop()
+        }
         releaseWakeLock()
         super.onDestroy()
     }

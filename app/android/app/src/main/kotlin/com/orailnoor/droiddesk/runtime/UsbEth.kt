@@ -121,8 +121,9 @@ object UsbEth {
             return
         }
         // The configuration the kernel chose: r8152 selects the vendor one, while Linux itself
-        // prefers a standard class, so an ASIX AX88179B runs CDC-NCM (cdc_ncm), not its vendor
-        // configuration 1. Giving the adapter back restores exactly this one.
+        // prefers a standard class: an ASIX AX88179B runs configuration 2, CDC-NCM (cdc_ncm), not
+        // its vendor configuration 1 (seen on a Galaxy Tab S10 FE). Giving the adapter back
+        // restores exactly this one.
         val original = activeConfiguration(connection) ?: device.getConfiguration(0).id
         if (nativeAvailable) {
             val fd = connection.fileDescriptor
