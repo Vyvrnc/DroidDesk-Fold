@@ -85,3 +85,13 @@ Java_com_orailnoor_droiddesk_runtime_UsbEth_nativeSetConfiguration(JNIEnv *env, 
     int configuration = value;
     return ioctl(fd, USBDEVFS_SETCONFIGURATION, &configuration) < 0 ? -errno : 0;
 }
+
+// Name of the kernel driver bound to one interface (USBDEVFS_GETDRIVER), or null when none.
+JNIEXPORT jstring JNICALL
+Java_com_orailnoor_droiddesk_runtime_UsbEth_nativeGetDriver(JNIEnv *env, jclass cls, jint fd, jint interface) {
+    (void) cls;
+    struct usbdevfs_getdriver driver = {.interface = (unsigned int) interface};
+    if (ioctl(fd, USBDEVFS_GETDRIVER, &driver) < 0) return NULL;
+    driver.driver[sizeof(driver.driver) - 1] = 0;
+    return (*env)->NewStringUTF(env, driver.driver);
+}

@@ -21,7 +21,8 @@ import kotlin.concurrent.thread
  * The adapter is driven as standard CDC-ECM. Realtek adapters (RTL8153, RTL8156) carry such a
  * configuration next to the vendor one the kernel's r8152 uses; switching to it detaches the
  * kernel driver, and switching back at the end lets it bind again, so Android's Ethernet
- * returns. Adapters with only a vendor protocol (ASIX AX88179) are not supported yet.
+ * returns. ASIX AX88179B has CDC-NCM and CDC-ECM configurations next to its vendor one; the old
+ * AX88179 has only the vendor protocol and is not supported yet.
  *
  * Request "eth <name>" on the bridge socket; the reply is "ok <mac> ecm" or "err <reason>",
  * then frames length(2, big endian) + Ethernet frame (no FCS) in both directions until the
@@ -47,6 +48,7 @@ object UsbEth {
     @JvmStatic private external fun nativeDriver(fd: Int, iface: Int, connect: Boolean): Int
     @JvmStatic private external fun nativeRelease(fd: Int, iface: Int): Int
     @JvmStatic private external fun nativeSetConfiguration(fd: Int, value: Int): Int
+    @JvmStatic private external fun nativeGetDriver(fd: Int, iface: Int): String?
 
     /** Every interface number of the device, over all its configurations. */
     private fun interfaceNumbers(device: UsbDevice): Set<Int> =
@@ -54,6 +56,12 @@ object UsbEth {
             val config = device.getConfiguration(c)
             (0 until config.interfaceCount).map { config.getInterface(it).id }
         }.toSet()
+
+    /** bConfigurationValue the device runs now (GET_CONFIGURATION), null when it does not answer. */
+    private fun activeConfiguration(connection: UsbDeviceConnection): Int? {
+        val buffer = ByteArray(1)
+        return if (connection.controlTransfer(0x80, 0x08, 0, 0, buffer, 1, 1000) == 1) buffer[0].toInt() and 0xFF else null
+    }
 
     /** Detaches every kernel driver, then switches; false when usbfs refuses. */
     private fun switchConfiguration(connection: UsbDeviceConnection, device: UsbDevice, value: Int): Boolean {
@@ -112,11 +120,19 @@ object UsbEth {
             output.write("err Android could not open the device\n".toByteArray())
             return
         }
-        val firstConfig = device.getConfiguration(0)
+        // The configuration the kernel chose: r8152 selects the vendor one, while Linux itself
+        // prefers a standard class, so an ASIX AX88179B runs CDC-NCM (cdc_ncm), not its vendor
+        // configuration 1. Giving the adapter back restores exactly this one.
+        val original = activeConfiguration(connection) ?: device.getConfiguration(0).id
+        if (nativeAvailable) {
+            val fd = connection.fileDescriptor
+            val drivers = interfaceNumbers(device).joinToString { "$it=${nativeGetDriver(fd, it) ?: "-"}" }
+            Log.i(TAG, "${device.deviceName}: configuration $original, drivers $drivers; CDC-ECM is ${cdc.config.id}")
+        }
         var switched = false
         try {
-            if (cdc.config.id != firstConfig.id) {
-                // The kernel driver (r8152) holds the vendor configuration.
+            if (cdc.config.id != original) {
+                // The kernel driver (r8152, cdc_ncm, ax88179_178a) holds another configuration.
                 if (!nativeAvailable || !switchConfiguration(connection, device, cdc.config.id)) {
                     output.write("err could not switch the adapter to CDC-ECM\n".toByteArray())
                     return
@@ -148,7 +164,7 @@ object UsbEth {
                 val fd = connection.fileDescriptor
                 nativeRelease(fd, cdc.data.id)
                 nativeRelease(fd, cdc.comm.id)
-                if (!switchConfiguration(connection, device, firstConfig.id)) {
+                if (!switchConfiguration(connection, device, original)) {
                     Log.w(TAG, "Could not give ${device.deviceName} back; unplug it to reset")
                 }
             } else {

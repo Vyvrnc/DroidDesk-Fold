@@ -267,6 +267,8 @@ object TerminalSessions {
     fun sessionFor(context: Context, profile: String): TerminalSession {
         sessions[profile]?.let { if (it.isRunning) return it }
         val runtime = LinuxRuntime(context.applicationContext)
+        // droiddesk-usb/-serial/-net/-eth of this app version, also without a desktop start.
+        runCatching { runtime.writeDeviceTools() }.onFailure { Log.w(TAG, "Device tools: ${it.message}") }
         val env = runtime.terminalEnvironment()
         val prefix = env["PREFIX"] ?: File(context.filesDir, "usr").absolutePath
         val home = env["HOME"] ?: File(context.filesDir, "home").absolutePath

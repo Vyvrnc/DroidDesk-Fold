@@ -973,6 +973,229 @@ class LinuxRuntime(private val context: Context) {
      * manager part runs once per home; the battery part repairs the dock
      * whenever genmon is installed but its plugin is missing.
      */
+    /**
+     * Command-line clients of UsbBridge and NetBridge (droiddesk-usb, -serial, -net, -eth) and the
+     * USB tray. Written at desktop start and when a terminal profile starts, so a terminal-only
+     * session (Claude Code without the desktop) has them after an update too.
+     */
+    fun writeDeviceTools() {
+        // USB flash drives and card readers through UsbBridge.
+        runCatching {
+            val usbClient = File(binDir, "droiddesk-usb.py")
+            context.assets.open("droiddesk/droiddesk-usb.py").use { input ->
+                usbClient.outputStream().use(input::copyTo)
+            }
+            File(binDir, "droiddesk-usb").let { usbCommand ->
+                usbCommand.writeText(
+                    "#!${File(binDir, "bash").absolutePath}\n" +
+                        "exec \"${File(binDir, "python3").absolutePath}\" \"${usbClient.absolutePath}\" \"${'$'}@\"\n",
+                )
+                usbCommand.setExecutable(true, false)
+            }
+            // Format and files: libdroiddesk_blk.so (LD_PRELOAD shim) and libdroiddesk_exfat.so
+            // (exFAT files) from the APK into $PREFIX/lib, as a new inode whenever they
+            // changed (running tools may still have the old one mapped).
+            for (name in listOf("libdroiddesk_blk.so", "libdroiddesk_exfat.so", "libdroiddesk_ntfs.so")) {
+                val source = File(context.applicationInfo.nativeLibraryDir, name)
+                val target = File(prefixDir, "lib/$name")
+                if (source.isFile && !(target.isFile && target.readBytes().contentEquals(source.readBytes()))) {
+                    val tmp = File(prefixDir, "lib/.$name.new")
+                    source.copyTo(tmp, overwrite = true)
+                    if (!tmp.renameTo(target)) error("rename to ${target.path} failed")
+                }
+            }
+            // WebDAV for Thunar (dav:// through gvfs), started per held disk by the tray.
+            val davServer = File(binDir, "droiddesk-usb-dav.py")
+            context.assets.open("droiddesk/droiddesk-usb-dav.py").use { input ->
+                davServer.outputStream().use(input::copyTo)
+            }
+            File(binDir, "droiddesk-usb-dav").let { davCommand ->
+                davCommand.writeText(
+                    "#!${File(binDir, "bash").absolutePath}\n" +
+                        "exec \"${File(binDir, "python3").absolutePath}\" \"${davServer.absolutePath}\" \"${'$'}@\"\n",
+                )
+                davCommand.setExecutable(true, false)
+            }
+            // USB serial adapters as a pty (/tmp/ttyUSB0) through UsbBridge "serial".
+            val serialClient = File(binDir, "droiddesk-serial.py")
+            context.assets.open("droiddesk/droiddesk-serial.py").use { input ->
+                serialClient.outputStream().use(input::copyTo)
+            }
+            File(binDir, "droiddesk-serial").let { serialCommand ->
+                serialCommand.writeText(
+                    "#!${File(binDir, "bash").absolutePath}\n" +
+                        "exec \"${File(binDir, "python3").absolutePath}\" \"${serialClient.absolutePath}\" \"${'$'}@\"\n",
+                )
+                serialCommand.setExecutable(true, false)
+            }
+            // Networks Android does not route to (Ethernet dock in a closed VLAN) through NetBridge.
+            val netClient = File(binDir, "droiddesk-net.py")
+            context.assets.open("droiddesk/droiddesk-net.py").use { input ->
+                netClient.outputStream().use(input::copyTo)
+            }
+            File(binDir, "droiddesk-net").let { netCommand ->
+                netCommand.writeText(
+                    "#!${File(binDir, "bash").absolutePath}\n" +
+                        "exec \"${File(binDir, "python3").absolutePath}\" \"${netClient.absolutePath}\" \"${'$'}@\"\n",
+                )
+                netCommand.setExecutable(true, false)
+            }
+            // droiddesk-eth (Ethernet adapter taken over for diagnostics): a static Go binary from
+            // the GitHub release, fetched on first use (tools/droiddesk-eth, pinned by sha256).
+            // The daemon belongs on the Termux side: in Debian proot it would end with the shell.
+            val droiddeskEthUrl = "https://github.com/Vyvrnc/DroidDesk-Fold/releases/download/" +
+                "droiddesk-eth-$DROIDDESK_ETH_VERSION/droiddesk-eth-$DROIDDESK_ETH_VERSION-arm64"
+            File(binDir, "droiddesk-eth").let { ethCommand ->
+                ethCommand.writeText(
+                    "#!${File(binDir, "bash").absolutePath}\n" +
+                        "ver=$DROIDDESK_ETH_VERSION\n" +
+                        "dir=\"${prefixDir.absolutePath}/libexec/droiddesk-eth\"\n" +
+                        "bin=\"${'$'}dir/droiddesk-eth-${'$'}ver\"\n" +
+                        "if [ ! -x \"${'$'}bin\" ]; then\n" +
+                        "    mkdir -p \"${'$'}dir\"\n" +
+                        "    echo \"droiddesk-eth: stahuji program (verze ${'$'}ver, 5 MB)…\" >&2\n" +
+                        "    part=\"${'$'}bin.part.${'$'}${'$'}\"\n" +
+                        // Explicit CA bundle: Termux curl has /data/data/com.termux compiled in, which only
+                        // the socket hook maps (not when the wrapper is called from Debian proot).
+                        "    if curl -fsSL --cacert \"${File(prefixDir, "etc/tls/cert.pem").absolutePath}\" -o \"${'$'}part\" \"$droiddeskEthUrl\" &&\n" +
+                        "        echo \"$DROIDDESK_ETH_SHA256  ${'$'}part\" | sha256sum -c - >/dev/null 2>&1; then\n" +
+                        "        chmod 755 \"${'$'}part\" && mv -f \"${'$'}part\" \"${'$'}bin\"\n" +
+                        "        for old in \"${'$'}dir\"/droiddesk-eth-[0-9]*; do case \"${'$'}old\" in \"${'$'}bin\"|*.part.*) ;; *) rm -f \"${'$'}old\" ;; esac; done\n" +
+                        "    else\n" +
+                        "        rm -f \"${'$'}part\"\n" +
+                        "        echo \"droiddesk-eth: stažení se nepovedlo (potřebuje internet jen poprvé)\" >&2\n" +
+                        "        exit 1\n" +
+                        "    fi\n" +
+                        "fi\n" +
+                        "exec \"${'$'}bin\" \"${'$'}@\"\n",
+                )
+                ethCommand.setExecutable(true, false)
+            }
+            val netWindow = File(binDir, "droiddesk-net-window.py")
+            context.assets.open("droiddesk/droiddesk-net-window.py").use { input ->
+                netWindow.outputStream().use(input::copyTo)
+            }
+            val netWindowCommand = File(binDir, "droiddesk-net-window")
+            netWindowCommand.writeText(
+                "#!${File(binDir, "bash").absolutePath}\n" +
+                    "export GI_TYPELIB_PATH=\"${prefixDir.absolutePath}/lib/girepository-1.0\"\n" +
+                    "exec \"${File(binDir, "python3").absolutePath}\" \"${netWindow.absolutePath}\" \"${'$'}@\"\n",
+            )
+            netWindowCommand.setExecutable(true, false)
+            File(homeDir, ".local/share/applications").mkdirs()
+            File(homeDir, ".local/share/applications/droiddesk-net.desktop").writeText(
+                """
+                [Desktop Entry]
+                Type=Application
+                Name=Sítě
+                Comment=Ethernet a další sítě pro Linux (i bez internetu, vedle mobilních dat)
+                Exec=${netWindowCommand.absolutePath}
+                Icon=network-wired
+                Categories=System;Network;
+                Terminal=false
+                """.trimIndent() + "\n",
+            )
+            // In Debian too, written on every start (debian-setup runs once, at install).
+            val debianBin = File(debianRootfs(baseDir), "usr/local/bin")
+            if (debianBin.isDirectory) {
+                File(debianBin, "droiddesk-serial").let { wrapper ->
+                    wrapper.writeText(
+                        "#!/bin/sh\n" +
+                            "# droiddesk-serial: USB serial adapters as /tmp/ttyUSB0 (the app's Python, Termux side).\n" +
+                            "DROIDDESK_DEBIAN_ROOT=\"${debianRootfs(baseDir).absolutePath}\" " +
+                            "DROIDDESK_DEBIAN_TMP=\"${tmpDir.absolutePath}\" " +
+                            "LD_LIBRARY_PATH=\"${File(prefixDir, "lib").absolutePath}\" " +
+                            "exec \"${File(binDir, "python3").absolutePath}\" \"${serialClient.absolutePath}\" \"${'$'}@\"\n",
+                    )
+                    wrapper.setExecutable(true, false)
+                }
+                File(debianBin, "droiddesk-eth").let { wrapper ->
+                    wrapper.writeText(
+                        "#!/bin/sh\n" +
+                            "# droiddesk-eth: the Ethernet adapter taken over for diagnostics (same binary as Termux).\n" +
+                            "ver=$DROIDDESK_ETH_VERSION\n" +
+                            "dir=\"${prefixDir.absolutePath}/libexec/droiddesk-eth\"\n" +
+                            "bin=\"${'$'}dir/droiddesk-eth-${'$'}ver\"\n" +
+                            "if [ ! -x \"${'$'}bin\" ]; then\n" +
+                            "    mkdir -p \"${'$'}dir\"\n" +
+                            "    echo \"droiddesk-eth: stahuji program (verze ${'$'}ver, 5 MB)…\" >&2\n" +
+                            "    part=\"${'$'}bin.part.${'$'}${'$'}\"\n" +
+                        "    if curl -fsSL -o \"${'$'}part\" \"$droiddeskEthUrl\" &&\n" +
+                            "        echo \"$DROIDDESK_ETH_SHA256  ${'$'}part\" | sha256sum -c - >/dev/null 2>&1; then\n" +
+                            "        chmod 755 \"${'$'}part\" && mv -f \"${'$'}part\" \"${'$'}bin\"\n" +
+                            "        for old in \"${'$'}dir\"/droiddesk-eth-[0-9]*; do case \"${'$'}old\" in \"${'$'}bin\"|*.part.*) ;; *) rm -f \"${'$'}old\" ;; esac; done\n" +
+                            "    else\n" +
+                            "        rm -f \"${'$'}part\"\n" +
+                            "        echo \"droiddesk-eth: stažení se nepovedlo (potřebuje internet jen poprvé)\" >&2\n" +
+                            "        exit 1\n" +
+                            "    fi\n" +
+                            "fi\n" +
+                            "if [ \"${'$'}1\" = start ]; then\n" +
+                            "    echo \"droiddesk-eth: v Debianu démon skončí se shellem; trvale ho spusť z terminálu plochy nebo z okna Sítě\" >&2\n" +
+                            "fi\n" +
+                            "export TMPDIR=/tmp\n" +
+                            "exec \"${'$'}bin\" \"${'$'}@\"\n",
+                    )
+                    wrapper.setExecutable(true, false)
+                }
+                File(debianBin, "droiddesk-net").let { wrapper ->
+                    wrapper.writeText(
+                            "#!/bin/sh\n" +
+                            "# droiddesk-net: Linux access to networks Android does not route to (the app's Python, Termux side).\n" +
+                            "if [ \"${'$'}1\" = run ]; then\n" +
+                            "    shift\n" +
+                            "    command -v proxychains4 >/dev/null || { echo \"droiddesk-net: proxychains4 chybí (apt install proxychains4)\" >&2; exit 1; }\n" +
+                            "    conf=/tmp/droiddesk-net-proxychains.conf\n" +
+                            "    printf 'strict_chain\\nquiet_mode\\nproxy_dns\\nremote_dns_subnet 224\\ntcp_read_time_out 15000\\ntcp_connect_time_out 10000\\nlocalnet 127.0.0.0/255.0.0.0\\n[ProxyList]\\nsocks5 127.0.0.1 1080\\n' > \"${'$'}conf\"\n" +
+                            "    exec proxychains4 -q -f \"${'$'}conf\" \"${'$'}@\"\n" +
+                            "fi\n" +
+                            "LD_LIBRARY_PATH=\"${File(prefixDir, "lib").absolutePath}\" " +
+                            "exec \"${File(binDir, "python3").absolutePath}\" \"${netClient.absolutePath}\" \"${'$'}@\"\n",
+                    )
+                    wrapper.setExecutable(true, false)
+                }
+            }
+            // "Claude Code" menu entry when it is installed in Debian (also from a terminal).
+            isClaudeCodeInstalled()
+            // "USB": icon in the dock's systray and a window (GTK 3 through pygobject).
+            val trayClient = File(binDir, "droiddesk-usb-tray.py")
+            context.assets.open("droiddesk/droiddesk-usb-tray.py").use { input ->
+                trayClient.outputStream().use(input::copyTo)
+            }
+            val trayCommand = File(binDir, "droiddesk-usb-tray")
+            trayCommand.writeText(
+                "#!${File(binDir, "bash").absolutePath}\n" +
+                    // Also when started outside the session environment (older sessions).
+                    "export GI_TYPELIB_PATH=\"${prefixDir.absolutePath}/lib/girepository-1.0\"\n" +
+                    "exec \"${File(binDir, "python3").absolutePath}\" \"${trayClient.absolutePath}\" \"${'$'}@\"\n",
+            )
+            trayCommand.setExecutable(true, false)
+            File(homeDir, ".local/share/applications").mkdirs()
+            File(homeDir, ".local/share/applications/droiddesk-usb.desktop").writeText(
+                """
+                [Desktop Entry]
+                Type=Application
+                Name=USB
+                Comment=Flash drives, card readers and USB serial adapters
+                Exec=${trayCommand.absolutePath} --window
+                Icon=drive-removable-media
+                Categories=System;Utility;
+                Terminal=false
+                """.trimIndent() + "\n",
+            )
+            File(homeDir, ".config/autostart").mkdirs()
+            File(homeDir, ".config/autostart/droiddesk-usb-tray.desktop").writeText(
+                """
+                [Desktop Entry]
+                Type=Application
+                Name=USB (ikona v panelu)
+                Exec=${trayCommand.absolutePath}
+                NoDisplay=true
+                """.trimIndent() + "\n",
+            )
+        }.onFailure { Log.w(TAG, "Failed to install droiddesk-usb: ${it.message}") }
+    }
+
     private fun writeXfceTweaks() {
         try {
             val batteryScript = File(binDir, "droiddesk-battery")
@@ -990,219 +1213,7 @@ class LinuxRuntime(private val context: Context) {
             )
             batteryScript.setExecutable(true, false)
 
-            // USB flash drives and card readers through UsbBridge.
-            runCatching {
-                val usbClient = File(binDir, "droiddesk-usb.py")
-                context.assets.open("droiddesk/droiddesk-usb.py").use { input ->
-                    usbClient.outputStream().use(input::copyTo)
-                }
-                File(binDir, "droiddesk-usb").let { usbCommand ->
-                    usbCommand.writeText(
-                        "#!${File(binDir, "bash").absolutePath}\n" +
-                            "exec \"${File(binDir, "python3").absolutePath}\" \"${usbClient.absolutePath}\" \"${'$'}@\"\n",
-                    )
-                    usbCommand.setExecutable(true, false)
-                }
-                // Format and files: libdroiddesk_blk.so (LD_PRELOAD shim) and libdroiddesk_exfat.so
-                // (exFAT files) from the APK into $PREFIX/lib, as a new inode whenever they
-                // changed (running tools may still have the old one mapped).
-                for (name in listOf("libdroiddesk_blk.so", "libdroiddesk_exfat.so", "libdroiddesk_ntfs.so")) {
-                    val source = File(context.applicationInfo.nativeLibraryDir, name)
-                    val target = File(prefixDir, "lib/$name")
-                    if (source.isFile && !(target.isFile && target.readBytes().contentEquals(source.readBytes()))) {
-                        val tmp = File(prefixDir, "lib/.$name.new")
-                        source.copyTo(tmp, overwrite = true)
-                        if (!tmp.renameTo(target)) error("rename to ${target.path} failed")
-                    }
-                }
-                // WebDAV for Thunar (dav:// through gvfs), started per held disk by the tray.
-                val davServer = File(binDir, "droiddesk-usb-dav.py")
-                context.assets.open("droiddesk/droiddesk-usb-dav.py").use { input ->
-                    davServer.outputStream().use(input::copyTo)
-                }
-                File(binDir, "droiddesk-usb-dav").let { davCommand ->
-                    davCommand.writeText(
-                        "#!${File(binDir, "bash").absolutePath}\n" +
-                            "exec \"${File(binDir, "python3").absolutePath}\" \"${davServer.absolutePath}\" \"${'$'}@\"\n",
-                    )
-                    davCommand.setExecutable(true, false)
-                }
-                // USB serial adapters as a pty (/tmp/ttyUSB0) through UsbBridge "serial".
-                val serialClient = File(binDir, "droiddesk-serial.py")
-                context.assets.open("droiddesk/droiddesk-serial.py").use { input ->
-                    serialClient.outputStream().use(input::copyTo)
-                }
-                File(binDir, "droiddesk-serial").let { serialCommand ->
-                    serialCommand.writeText(
-                        "#!${File(binDir, "bash").absolutePath}\n" +
-                            "exec \"${File(binDir, "python3").absolutePath}\" \"${serialClient.absolutePath}\" \"${'$'}@\"\n",
-                    )
-                    serialCommand.setExecutable(true, false)
-                }
-                // Networks Android does not route to (Ethernet dock in a closed VLAN) through NetBridge.
-                val netClient = File(binDir, "droiddesk-net.py")
-                context.assets.open("droiddesk/droiddesk-net.py").use { input ->
-                    netClient.outputStream().use(input::copyTo)
-                }
-                File(binDir, "droiddesk-net").let { netCommand ->
-                    netCommand.writeText(
-                        "#!${File(binDir, "bash").absolutePath}\n" +
-                            "exec \"${File(binDir, "python3").absolutePath}\" \"${netClient.absolutePath}\" \"${'$'}@\"\n",
-                    )
-                    netCommand.setExecutable(true, false)
-                }
-                // droiddesk-eth (Ethernet adapter taken over for diagnostics): a static Go binary from
-                // the GitHub release, fetched on first use (tools/droiddesk-eth, pinned by sha256).
-                // The daemon belongs on the Termux side: in Debian proot it would end with the shell.
-                val droiddeskEthUrl = "https://github.com/Vyvrnc/DroidDesk-Fold/releases/download/" +
-                    "droiddesk-eth-$DROIDDESK_ETH_VERSION/droiddesk-eth-$DROIDDESK_ETH_VERSION-arm64"
-                File(binDir, "droiddesk-eth").let { ethCommand ->
-                    ethCommand.writeText(
-                        "#!${File(binDir, "bash").absolutePath}\n" +
-                            "ver=$DROIDDESK_ETH_VERSION\n" +
-                            "dir=\"${prefixDir.absolutePath}/libexec/droiddesk-eth\"\n" +
-                            "bin=\"${'$'}dir/droiddesk-eth-${'$'}ver\"\n" +
-                            "if [ ! -x \"${'$'}bin\" ]; then\n" +
-                            "    mkdir -p \"${'$'}dir\"\n" +
-                            "    echo \"droiddesk-eth: stahuji program (verze ${'$'}ver, 5 MB)…\" >&2\n" +
-                            "    part=\"${'$'}bin.part.${'$'}${'$'}\"\n" +
-                            "    if curl -fsSL -o \"${'$'}part\" \"$droiddeskEthUrl\" &&\n" +
-                            "        echo \"$DROIDDESK_ETH_SHA256  ${'$'}part\" | sha256sum -c - >/dev/null 2>&1; then\n" +
-                            "        chmod 755 \"${'$'}part\" && mv -f \"${'$'}part\" \"${'$'}bin\"\n" +
-                            "        for old in \"${'$'}dir\"/droiddesk-eth-[0-9]*; do case \"${'$'}old\" in \"${'$'}bin\"|*.part.*) ;; *) rm -f \"${'$'}old\" ;; esac; done\n" +
-                            "    else\n" +
-                            "        rm -f \"${'$'}part\"\n" +
-                            "        echo \"droiddesk-eth: stažení se nepovedlo (potřebuje internet jen poprvé)\" >&2\n" +
-                            "        exit 1\n" +
-                            "    fi\n" +
-                            "fi\n" +
-                            "exec \"${'$'}bin\" \"${'$'}@\"\n",
-                    )
-                    ethCommand.setExecutable(true, false)
-                }
-                val netWindow = File(binDir, "droiddesk-net-window.py")
-                context.assets.open("droiddesk/droiddesk-net-window.py").use { input ->
-                    netWindow.outputStream().use(input::copyTo)
-                }
-                val netWindowCommand = File(binDir, "droiddesk-net-window")
-                netWindowCommand.writeText(
-                    "#!${File(binDir, "bash").absolutePath}\n" +
-                        "export GI_TYPELIB_PATH=\"${prefixDir.absolutePath}/lib/girepository-1.0\"\n" +
-                        "exec \"${File(binDir, "python3").absolutePath}\" \"${netWindow.absolutePath}\" \"${'$'}@\"\n",
-                )
-                netWindowCommand.setExecutable(true, false)
-                File(homeDir, ".local/share/applications").mkdirs()
-                File(homeDir, ".local/share/applications/droiddesk-net.desktop").writeText(
-                    """
-                    [Desktop Entry]
-                    Type=Application
-                    Name=Sítě
-                    Comment=Ethernet a další sítě pro Linux (i bez internetu, vedle mobilních dat)
-                    Exec=${netWindowCommand.absolutePath}
-                    Icon=network-wired
-                    Categories=System;Network;
-                    Terminal=false
-                    """.trimIndent() + "\n",
-                )
-                // In Debian too, written on every start (debian-setup runs once, at install).
-                val debianBin = File(debianRootfs(baseDir), "usr/local/bin")
-                if (debianBin.isDirectory) {
-                    File(debianBin, "droiddesk-serial").let { wrapper ->
-                        wrapper.writeText(
-                            "#!/bin/sh\n" +
-                                "# droiddesk-serial: USB serial adapters as /tmp/ttyUSB0 (the app's Python, Termux side).\n" +
-                                "DROIDDESK_DEBIAN_ROOT=\"${debianRootfs(baseDir).absolutePath}\" " +
-                                "DROIDDESK_DEBIAN_TMP=\"${tmpDir.absolutePath}\" " +
-                                "LD_LIBRARY_PATH=\"${File(prefixDir, "lib").absolutePath}\" " +
-                                "exec \"${File(binDir, "python3").absolutePath}\" \"${serialClient.absolutePath}\" \"${'$'}@\"\n",
-                        )
-                        wrapper.setExecutable(true, false)
-                    }
-                    File(debianBin, "droiddesk-eth").let { wrapper ->
-                        wrapper.writeText(
-                            "#!/bin/sh\n" +
-                                "# droiddesk-eth: the Ethernet adapter taken over for diagnostics (same binary as Termux).\n" +
-                                "ver=$DROIDDESK_ETH_VERSION\n" +
-                                "dir=\"${prefixDir.absolutePath}/libexec/droiddesk-eth\"\n" +
-                                "bin=\"${'$'}dir/droiddesk-eth-${'$'}ver\"\n" +
-                                "if [ ! -x \"${'$'}bin\" ]; then\n" +
-                                "    mkdir -p \"${'$'}dir\"\n" +
-                                "    echo \"droiddesk-eth: stahuji program (verze ${'$'}ver, 5 MB)…\" >&2\n" +
-                                "    part=\"${'$'}bin.part.${'$'}${'$'}\"\n" +
-                            "    if curl -fsSL -o \"${'$'}part\" \"$droiddeskEthUrl\" &&\n" +
-                                "        echo \"$DROIDDESK_ETH_SHA256  ${'$'}part\" | sha256sum -c - >/dev/null 2>&1; then\n" +
-                                "        chmod 755 \"${'$'}part\" && mv -f \"${'$'}part\" \"${'$'}bin\"\n" +
-                                "        for old in \"${'$'}dir\"/droiddesk-eth-[0-9]*; do case \"${'$'}old\" in \"${'$'}bin\"|*.part.*) ;; *) rm -f \"${'$'}old\" ;; esac; done\n" +
-                                "    else\n" +
-                                "        rm -f \"${'$'}part\"\n" +
-                                "        echo \"droiddesk-eth: stažení se nepovedlo (potřebuje internet jen poprvé)\" >&2\n" +
-                                "        exit 1\n" +
-                                "    fi\n" +
-                                "fi\n" +
-                                "if [ \"${'$'}1\" = start ]; then\n" +
-                                "    echo \"droiddesk-eth: v Debianu démon skončí se shellem; trvale ho spusť z terminálu plochy nebo z okna Sítě\" >&2\n" +
-                                "fi\n" +
-                                "export TMPDIR=/tmp\n" +
-                                "exec \"${'$'}bin\" \"${'$'}@\"\n",
-                        )
-                        wrapper.setExecutable(true, false)
-                    }
-                    File(debianBin, "droiddesk-net").let { wrapper ->
-                        wrapper.writeText(
-                                "#!/bin/sh\n" +
-                                "# droiddesk-net: Linux access to networks Android does not route to (the app's Python, Termux side).\n" +
-                                "if [ \"${'$'}1\" = run ]; then\n" +
-                                "    shift\n" +
-                                "    command -v proxychains4 >/dev/null || { echo \"droiddesk-net: proxychains4 chybí (apt install proxychains4)\" >&2; exit 1; }\n" +
-                                "    conf=/tmp/droiddesk-net-proxychains.conf\n" +
-                                "    printf 'strict_chain\\nquiet_mode\\nproxy_dns\\nremote_dns_subnet 224\\ntcp_read_time_out 15000\\ntcp_connect_time_out 10000\\nlocalnet 127.0.0.0/255.0.0.0\\n[ProxyList]\\nsocks5 127.0.0.1 1080\\n' > \"${'$'}conf\"\n" +
-                                "    exec proxychains4 -q -f \"${'$'}conf\" \"${'$'}@\"\n" +
-                                "fi\n" +
-                                "LD_LIBRARY_PATH=\"${File(prefixDir, "lib").absolutePath}\" " +
-                                "exec \"${File(binDir, "python3").absolutePath}\" \"${netClient.absolutePath}\" \"${'$'}@\"\n",
-                        )
-                        wrapper.setExecutable(true, false)
-                    }
-                }
-                // "Claude Code" menu entry when it is installed in Debian (also from a terminal).
-                isClaudeCodeInstalled()
-                // "USB": icon in the dock's systray and a window (GTK 3 through pygobject).
-                val trayClient = File(binDir, "droiddesk-usb-tray.py")
-                context.assets.open("droiddesk/droiddesk-usb-tray.py").use { input ->
-                    trayClient.outputStream().use(input::copyTo)
-                }
-                val trayCommand = File(binDir, "droiddesk-usb-tray")
-                trayCommand.writeText(
-                    "#!${File(binDir, "bash").absolutePath}\n" +
-                        // Also when started outside the session environment (older sessions).
-                        "export GI_TYPELIB_PATH=\"${prefixDir.absolutePath}/lib/girepository-1.0\"\n" +
-                        "exec \"${File(binDir, "python3").absolutePath}\" \"${trayClient.absolutePath}\" \"${'$'}@\"\n",
-                )
-                trayCommand.setExecutable(true, false)
-                File(homeDir, ".local/share/applications").mkdirs()
-                File(homeDir, ".local/share/applications/droiddesk-usb.desktop").writeText(
-                    """
-                    [Desktop Entry]
-                    Type=Application
-                    Name=USB
-                    Comment=Flash drives, card readers and USB serial adapters
-                    Exec=${trayCommand.absolutePath} --window
-                    Icon=drive-removable-media
-                    Categories=System;Utility;
-                    Terminal=false
-                    """.trimIndent() + "\n",
-                )
-                File(homeDir, ".config/autostart").mkdirs()
-                File(homeDir, ".config/autostart/droiddesk-usb-tray.desktop").writeText(
-                    """
-                    [Desktop Entry]
-                    Type=Application
-                    Name=USB (ikona v panelu)
-                    Exec=${trayCommand.absolutePath}
-                    NoDisplay=true
-                    """.trimIndent() + "\n",
-                )
-            }.onFailure { Log.w(TAG, "Failed to install droiddesk-usb: ${it.message}") }
+            writeDeviceTools()
 
             // Opens a file or URL in an Android app through AndroidAppBridge.
             val bridgeClient = File(homeDir, ".local/bin/droiddesk-launch-android-app.py")
