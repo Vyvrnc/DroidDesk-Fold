@@ -528,6 +528,8 @@ class LinuxRuntime(private val context: Context) {
                     # On: a touch swipe scrolls tmux history; off sends arrow keys, which page
                     # through Claude Code's prompt history instead.
                     echo "set -g mouse on"
+                    # A selection in tmux goes to the Android clipboard (OSC 52).
+                    echo "set -g set-clipboard on"
                     user=${'$'}(getent passwd "${'$'}uid" | cut -d: -f1)
                     [ -n "${'$'}user" ] && echo "server-access -a ${'$'}user"
                     # This file is rewritten at every server start; own settings go here.
