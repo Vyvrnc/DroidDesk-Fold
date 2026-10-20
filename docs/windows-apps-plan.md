@@ -149,6 +149,13 @@ to be checked in Phase 0 or at implementation.
   335 MB; notepad x64 18.8 s, PuTTY w64 35.0 s; RSS of Wine processes ~1.0–1.1 GB; 7-Zip x64
   9539 MIPS (56 %, about the same as FEX). **32-bit x86 fails** (`syswow64\notepad.exe` cannot be
   opened, PuTTY w32 c0000135): WoW64 Wine needs Box64 built with `-DBOX32=ON` (not tried yet).
+- **Phase 0c, Box64 v0.4.4 with `-DBOX32=ON`**: the 32-bit path works. New prefix: `wineboot -i`
+  307 s, 629 MB; notepad x86 19.0 s, PuTTY w32 24.4 s, w64 21.0 s; RSS ~1.5–1.6 GB. 7-Zip
+  x64 15367 / x86 12363 MIPS (90 % / 73 % of native) on an idle phone, not comparable with the
+  earlier runs (other load); to be repeated back to back with all variants. ⚠️ `make install`
+  outside DESTDIR overwrites `/etc/box64.box64rc` (conffile of Debian's box64 package) and adds
+  `/etc/binfmt.d/*` and `/usr/lib/box64-i386-linux-gnu`; `tools/box64/build.sh` stages instead
+  and now builds with BOX32.
 - Conclusion after 0b: B is the default for 2D utilities (2–5× faster start, ~6× less memory, x86
   and x64 out of the box). A stays only as an x64 fallback for apps that break under FEX, and only
   if BOX32 makes the 32-bit path work. Serial COM still untested (no adapter at hand).

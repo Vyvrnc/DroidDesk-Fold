@@ -40,7 +40,7 @@ cd box64
 [ \"\$(git rev-parse HEAD)\" = $BOX64_COMMIT ] || { echo 'box64 tag moved' >&2; exit 1; }
 
 cmake -S . -B build -DCMAKE_INSTALL_PREFIX=$PREFIX -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-    -DARM64=1 -DBAD_SIGNAL=ON -DARM_DYNAREC=ON
+    -DARM64=1 -DBOX32=ON -DBAD_SIGNAL=ON -DARM_DYNAREC=ON
 make -C build -j\$(nproc)
 DESTDIR=/tmp/stage make -C build install
 
