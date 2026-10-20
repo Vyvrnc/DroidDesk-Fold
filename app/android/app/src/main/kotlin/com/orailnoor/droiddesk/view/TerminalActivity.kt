@@ -31,7 +31,7 @@ import java.io.File
 /**
  * A real terminal (PTY) inside the app, without XFCE: Termux's terminal-emulator and
  * terminal-view (Apache-2.0). Profiles: "shell" (Termux bash), "debian" (start-debian),
- * "claude" (claude-debian), "codex" (codex-debian). Sessions outlive the activity
+ * "claude" (claude-tmux), "codex" (codex-debian). Sessions outlive the activity
  * (TerminalSessions), so leaving and coming back keeps Claude Code running.
  */
 class TerminalActivity : Activity() {
@@ -280,7 +280,8 @@ object TerminalSessions {
         val bin = "$prefix/bin"
         val (command, args) = when (profile) {
             "debian" -> "$bin/start-debian" to arrayOf("start-debian")
-            "claude" -> "$bin/claude-debian" to arrayOf("claude-debian")
+            // In tmux, so XFCE's "Claude Code" (and claude-tmux anywhere) attaches to the same session.
+            "claude" -> "$bin/claude-tmux" to arrayOf("claude-tmux")
             "codex" -> "$bin/codex-debian" to arrayOf("codex-debian")
             else -> "$bin/bash" to arrayOf("-bash")
         }

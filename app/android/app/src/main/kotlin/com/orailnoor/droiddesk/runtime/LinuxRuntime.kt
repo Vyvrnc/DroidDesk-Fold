@@ -278,7 +278,7 @@ class LinuxRuntime(private val context: Context) {
             java.nio.file.LinkOption.NOFOLLOW_LINKS,
         ).also { if (it) writeClaudeMenuEntry() }
 
-    /** "Claude Code" in the XFCE menu: a terminal with claude-debian (in ~/projekty/Claude when it exists). */
+    /** "Claude Code" in the XFCE menu: a terminal attached to the claude-tmux session (the app's terminal uses the same one). */
     private fun writeClaudeMenuEntry() {
         runCatching {
             val entry = File(homeDir, ".local/share/applications/claude-code.desktop")
@@ -287,7 +287,7 @@ class LinuxRuntime(private val context: Context) {
                 Type=Application
                 Name=Claude Code
                 Comment=Claude Code (Anthropic) v Debianu
-                Exec=xfce4-terminal --title "Claude Code" -x ${File(binDir, "claude-debian").absolutePath}
+                Exec=xfce4-terminal --title "Claude Code" -x ${File(binDir, "claude-tmux").absolutePath}
                 Icon=utilities-terminal
                 Categories=Development;
                 Terminal=false
