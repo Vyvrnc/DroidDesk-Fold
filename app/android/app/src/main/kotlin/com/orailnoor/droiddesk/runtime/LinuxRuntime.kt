@@ -34,6 +34,8 @@ class LinuxRuntime(private val context: Context) {
         // Bump when debian-setup gains something existing installs need (rerun at session start).
         private const val DEBIAN_SETUP_VERSION = 11
         private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
+        // Craft app ids (table in assets/droiddesk/craft-install.sh); also guards the shell command.
+        private val CRAFT_ID = Regex("[a-z]{1,20}craft")
 
         /**
          * Host path of the Debian rootfs. proot-distro 5.4+ uses
@@ -267,6 +269,86 @@ class LinuxRuntime(private val context: Context) {
         }
         onProgress?.invoke(0.95, "Codex installed; sign in with codex login")
         return true
+    }
+
+    /**
+     * Installed Craft apps (storytold's Rust/wgpu desktop apps, assets/droiddesk/craft-install.sh):
+     * id → release tag. An app counts when its version file and /usr/bin/<id> are both in Debian.
+     */
+    fun getCraftApps(): Map<String, String> {
+        val rootfs = debianRootfs(baseDir)
+        val versions = File(rootfs, "etc/droiddesk/craft").listFiles { file -> file.name.endsWith(".version") }
+            ?: return emptyMap()
+        return versions.mapNotNull { file ->
+            val id = file.name.removeSuffix(".version")
+            val binary = File(rootfs, "usr/bin/$id").toPath()
+            if (!CRAFT_ID.matches(id) ||
+                !java.nio.file.Files.exists(binary, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            ) return@mapNotNull null
+            id to runCatching { file.readText().trim() }.getOrDefault("")
+        }.toMap()
+    }
+
+    /**
+     * Install (= update to the latest release) or uninstall one Craft app. Debian comes first, as for
+     * Codex; the script is copied from the APK into the rootfs each time, so it updates with the app
+     * without touching DEBIAN_SETUP_VERSION. Its "[n/N]" lines drive the progress, its
+     * "CHYBA:" line becomes the failure status.
+     */
+    fun runCraftApp(appId: String, action: String, onProgress: ((Double, String) -> Unit)?): Boolean {
+        if (!CRAFT_ID.matches(appId) || action !in setOf("install", "uninstall")) return false
+        if (getInstalledDE().isEmpty()) return false
+        if (!isMinimalDebianInstalled()) {
+            if (action != "install") return true
+            onProgress?.invoke(0.05, "Installing Debian for $appId...")
+            if (!installMinimalDebian(onProgress)) return false
+        }
+        val waitUntil = System.currentTimeMillis() + 10 * 60 * 1000
+        while (debianSetupRunning && System.currentTimeMillis() < waitUntil) {
+            onProgress?.invoke(0.08, "Waiting for Debian setup to finish...")
+            Thread.sleep(2000)
+        }
+        val script = File(debianRootfs(baseDir), "usr/local/share/droiddesk/craft-install.sh")
+        val copied = runCatching {
+            script.parentFile?.mkdirs()
+            val tmp = File(script.parentFile, ".craft-install.sh.new")
+            context.assets.open("droiddesk/craft-install.sh").use { input -> tmp.outputStream().use(input::copyTo) }
+            tmp.setExecutable(true, false)
+            if (!tmp.renameTo(script)) error("rename failed")
+        }.onFailure { Log.w(TAG, "Copying craft-install.sh failed: ${it.message}") }.isSuccess
+        if (!copied) return false
+
+        onProgress?.invoke(0.1, if (action == "install") "Installing $appId..." else "Removing $appId...")
+        val pending = StringBuilder()
+        var failure: String? = null
+        val stepLine = Regex("""craft-install: \[(\d+)/(\d+)] (.*)""")
+        val run = File(binDir, "debian-run").absolutePath
+        val output = executeCommand(
+            "\"$run\" bash /usr/local/share/droiddesk/craft-install.sh $action $appId",
+        ) { chunk ->
+            pending.append(chunk)
+            while (true) {
+                val end = pending.indexOf("\n")
+                if (end < 0) break
+                val line = pending.substring(0, end).trim()
+                pending.delete(0, end + 1)
+                stepLine.find(line)?.let { match ->
+                    val step = match.groupValues[1].toDouble()
+                    val total = match.groupValues[2].toDouble().coerceAtLeast(1.0)
+                    onProgress?.invoke(0.1 + 0.85 * (step - 1) / total, match.groupValues[3])
+                }
+                if (line.contains("craft-install: CHYBA:")) failure = line.substringAfter("CHYBA:").trim()
+            }
+        }
+        val version = getCraftApps()[appId]
+        val ok = if (action == "install") version != null && !output.startsWith("Error:") else version == null
+        if (ok) {
+            onProgress?.invoke(1.0, if (action == "install") "$appId $version installed" else "$appId removed")
+        } else {
+            Log.w(TAG, "craft-install $action $appId failed: ${output.takeLast(2000)}")
+            onProgress?.invoke(-1.0, failure ?: "Operation failed. Review the log and retry.")
+        }
+        return ok
     }
 
     /** Claude Code's native installer puts it in Debian root's ~/.local/bin (claude-debian runs it). */

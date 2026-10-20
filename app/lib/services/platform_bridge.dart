@@ -151,6 +151,21 @@ class DroidDeskPlatform {
         false;
   }
 
+  /// Installed Craft apps (Debian): app id → release tag.
+  static Future<Map<String, String>> getCraftApps() async {
+    final result = await _channel.invokeMethod('getCraftApps');
+    return Map<String, String>.from(result ?? const {});
+  }
+
+  /// [action] is "install" (also updates to the latest release) or "uninstall".
+  static Future<bool> craftApp(String appId, String action) async {
+    return await _channel.invokeMethod<bool>('craftApp', {
+          'appId': appId,
+          'action': action,
+        }) ??
+        false;
+  }
+
   // ── Native package store ──
 
   static Future<List<Map<String, dynamic>>> searchNativePackages(

@@ -348,6 +348,44 @@ class MainActivity : FlutterActivity() {
                     }
                 }
 
+                // Craft apps (Debian, proot runtime only): id → installed release tag.
+                "getCraftApps" -> {
+                    thread(name = "craft-status") {
+                        val apps = if (chrootRuntime.hasRoot()) emptyMap() else linuxRuntime.getCraftApps()
+                        runOnUiThread { result.success(apps) }
+                    }
+                }
+
+                "craftApp" -> {
+                    val appId = call.argument<String>("appId") ?: ""
+                    val action = call.argument<String>("action") ?: ""
+                    thread(name = "craft-$action") {
+                        val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+                        val logSink: (String) -> Unit = { chunk ->
+                            runOnUiThread { channel.invokeMethod("onTerminalOutput", mapOf("text" to chunk)) }
+                        }
+                        val progressSink: (Double, String) -> Unit = { progress, status ->
+                            runOnUiThread {
+                                channel.invokeMethod(
+                                    "onOptionalInstallProgress",
+                                    mapOf("progress" to progress, "status" to status),
+                                )
+                            }
+                        }
+                        val ok = if (chrootRuntime.hasRoot()) {
+                            false
+                        } else {
+                            linuxRuntime.setInstallLogSink(logSink)
+                            try {
+                                linuxRuntime.runCraftApp(appId, action, progressSink)
+                            } finally {
+                                linuxRuntime.setInstallLogSink(null)
+                            }
+                        }
+                        runOnUiThread { result.success(ok) }
+                    }
+                }
+
                 // ── Native package store ──
                 "searchNativePackages" -> {
                     val query = call.argument<String>("query") ?: ""

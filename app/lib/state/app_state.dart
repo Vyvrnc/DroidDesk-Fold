@@ -38,6 +38,7 @@ class AppState extends ChangeNotifier {
   double _optionalInstallProgress = 0.0;
   String _optionalInstallStatus = '';
   String _optionalInstallLog = '';
+  Map<String, String> _craftApps = {};
   bool _isProotTerminal = false;
 
   // Terminal history
@@ -85,6 +86,7 @@ class AppState extends ChangeNotifier {
   double get optionalInstallProgress => _optionalInstallProgress;
   String get optionalInstallStatus => _optionalInstallStatus;
   String get optionalInstallLog => _optionalInstallLog;
+  Map<String, String> get craftApps => _craftApps;
   bool get isProotTerminal => _isProotTerminal;
 
   bool get isSetupComplete => _isBootstrapped && _installedDE.isNotEmpty;
@@ -425,6 +427,40 @@ class AppState extends ChangeNotifier {
       final installed = await DroidDeskPlatform.installOptionalApp(appId);
       await refreshOptionalApps();
       return installed;
+    } finally {
+      _installingOptionalApp = null;
+      notifyListeners();
+    }
+  }
+
+  // ── Craft apps (storytold, Debian) ──
+
+  Future<void> refreshCraftApps() async {
+    try {
+      _craftApps = await DroidDeskPlatform.getCraftApps();
+      notifyListeners();
+    } catch (_) {
+      // Status only; the catalog still offers the install.
+    }
+  }
+
+  /// Install (or update to the latest release) or uninstall one Craft app. Uses the optional-app
+  /// progress panel; on failure [optionalInstallStatus] holds the script's message.
+  Future<bool> runCraftApp(String appId, String action) async {
+    if (_installingOptionalApp != null) return false;
+    _installingOptionalApp = 'craft:$appId';
+    _optionalInstallProgress = 0.0;
+    _optionalInstallStatus = action == 'uninstall' ? 'Preparing removal...' : 'Preparing installation...';
+    _optionalInstallLog = '';
+    notifyListeners();
+
+    try {
+      final ok = await DroidDeskPlatform.craftApp(appId, action);
+      await refreshCraftApps();
+      if (action == 'install') await refreshOptionalApps();
+      return ok;
+    } catch (_) {
+      return false;
     } finally {
       _installingOptionalApp = null;
       notifyListeners();

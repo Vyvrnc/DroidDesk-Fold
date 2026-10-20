@@ -81,6 +81,41 @@ class _AppCatalogScreenState extends State<AppCatalogScreen>
     ),
   ];
 
+  // Craft apps (storytold, Apache-2.0/MIT; SolidCraft by Tangency Labs): Rust/wgpu desktop apps,
+  // installed into Debian by assets/droiddesk/craft-install.sh from the latest GitHub release.
+  static const _craft = [
+    _FeaturedApp('photocraft', 'PhotoCraft',
+        'Edit photos and layered PSD documents.', Icons.photo_filter_rounded, Color(0xFF31A8FF)),
+    _FeaturedApp('lightcraft', 'LightCraft',
+        'Organise photos and develop raw files.', Icons.camera_rounded, Color(0xFF4FC3F7)),
+    _FeaturedApp('filmcraft', 'FilmCraft',
+        'Edit video, color and sound.', Icons.movie_creation_rounded, Color(0xFF9B7BFF)),
+    _FeaturedApp('wordcraft', 'WordCraft',
+        'Word processor for .docx, .odt and .rtf.', Icons.article_rounded, Color(0xFF2B7CD3)),
+    _FeaturedApp('gridcraft', 'GridCraft',
+        'Spreadsheets for .xlsx, .ods and .csv.', Icons.grid_on_rounded, Color(0xFF21A366)),
+    _FeaturedApp('deckcraft', 'DeckCraft',
+        'Presentations for .pptx.', Icons.slideshow_rounded, Color(0xFFD35230)),
+    _FeaturedApp('pdfcraft', 'PdfCraft',
+        'Read, organize, combine, split and secure PDFs.', Icons.picture_as_pdf_rounded,
+        Color(0xFFE5252A)),
+    _FeaturedApp('vectorcraft', 'VectorCraft',
+        'Vector illustrations, SVG and PDF.', Icons.draw_rounded, Color(0xFFFF9A00)),
+    _FeaturedApp('designcraft', 'DesignCraft',
+        'Lay out magazines, books and print documents.', Icons.auto_stories_rounded,
+        Color(0xFFFF3366)),
+    _FeaturedApp('effectcraft', 'EffectCraft',
+        'Motion graphics and visual effects.', Icons.animation_rounded, Color(0xFFB388FF)),
+    _FeaturedApp('soundcraft', 'SoundCraft',
+        'Record, edit and mix audio and MIDI.', Icons.graphic_eq_rounded, Color(0xFF00BFA5)),
+    _FeaturedApp('figcraft', 'FigCraft',
+        'Design and prototype user interfaces.', Icons.design_services_rounded, Color(0xFFA259FF)),
+    _FeaturedApp('cadcraft', 'CADCraft',
+        '2D drafting; opens DXF and DWG.', Icons.architecture_rounded, Color(0xFF607D8B)),
+    _FeaturedApp('solidcraft', 'SolidCraft',
+        'Parametric 3D CAD (Tangency Labs).', Icons.view_in_ar_rounded, Color(0xFF26A69A)),
+  ];
+
   late final TabController _tabs;
   final _searchController = TextEditingController();
   Timer? _searchDebounce;
@@ -111,6 +146,9 @@ class _AppCatalogScreenState extends State<AppCatalogScreen>
     DroidDeskPlatform.onPackageOperationLog = _onLog;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<AppState>().refreshOptionalApps();
+      if (!context.read<AppState>().hasRoot) {
+        context.read<AppState>().refreshCraftApps();
+      }
       _loadInstalled();
       _search('');
     });
@@ -225,6 +263,51 @@ class _AppCatalogScreenState extends State<AppCatalogScreen>
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(ok ? '${app.name} installed' : '${app.name} installation failed'),
+        backgroundColor: ok ? DroidTheme.success : DroidTheme.error,
+      ),
+    );
+  }
+
+  Future<void> _runCraft(_FeaturedApp app, String action) async {
+    if (action == 'uninstall') {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text('Remove ${app.name}?'),
+          content: const Text(
+            'Your documents stay. Shared fonts and the sound setting stay installed.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Remove'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+    }
+    final state = context.read<AppState>();
+    final before = state.craftApps[app.packageName];
+    final ok = await state.runCraftApp(app.packageName, action);
+    if (!mounted) return;
+    final version = state.craftApps[app.packageName] ?? '';
+    final message = !ok
+        ? '${app.name}: ${state.optionalInstallStatus}'
+        : action == 'uninstall'
+        ? '${app.name} removed'
+        : before == null
+        ? '${app.name} $version installed. Menu: ${app.name} (Debian)'
+        : before == version
+        ? '${app.name} $version is the latest release'
+        : '${app.name} updated to $version';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
         backgroundColor: ok ? DroidTheme.success : DroidTheme.error,
       ),
     );
@@ -377,7 +460,102 @@ class _AppCatalogScreenState extends State<AppCatalogScreen>
           ),
           const SizedBox(height: 10),
         ],
+        if (!state.hasRoot) ...[
+          const SizedBox(height: 14),
+          Text('Craft apps', style: DroidTheme.headingMd),
+          const SizedBox(height: 5),
+          Text(
+            'Open-source desktop apps by storytold (Rust, GPU accelerated), installed into Debian '
+            'from the latest GitHub release with a verified checksum. Update fetches a newer one.',
+            style: DroidTheme.bodyMd,
+          ),
+          const SizedBox(height: 18),
+          for (final app in _craft) ...[
+            _craftCard(app, state),
+            const SizedBox(height: 10),
+          ],
+        ],
       ],
+    );
+  }
+
+  Widget _craftCard(_FeaturedApp app, AppState state) {
+    final version = state.craftApps[app.packageName];
+    final installed = version != null;
+    final running = state.installingOptionalApp;
+    final busy = _activePackage != null || running != null;
+    final active = running == 'craft:${app.packageName}';
+    return Container(
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: DroidTheme.cardBg,
+        borderRadius: BorderRadius.circular(DroidTheme.radiusMd),
+        border: Border.all(
+          color: installed
+              ? DroidTheme.success.withValues(alpha: .4)
+              : DroidTheme.surfaceBorder,
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(
+              color: app.color.withValues(alpha: .14),
+              borderRadius: BorderRadius.circular(13),
+            ),
+            child: Icon(app.icon, color: app.color),
+          ),
+          const SizedBox(width: 13),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(app.name, style: DroidTheme.headingSm),
+                const SizedBox(height: 3),
+                Text(
+                  app.description,
+                  style: DroidTheme.bodySm,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  [
+                    if (version != null && version.isNotEmpty) version,
+                    'GUI app · Debian',
+                  ].join(' · '),
+                  style: DroidTheme.monoSm,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          if (active)
+            const SizedBox(
+              width: 25,
+              height: 25,
+              child: CircularProgressIndicator(strokeWidth: 2.5),
+            )
+          else if (installed) ...[
+            IconButton(
+              onPressed: busy ? null : () => _runCraft(app, 'install'),
+              icon: const Icon(Icons.system_update_alt_rounded),
+              tooltip: 'Update to the latest release',
+            ),
+            IconButton(
+              onPressed: busy ? null : () => _runCraft(app, 'uninstall'),
+              icon: const Icon(Icons.delete_outline_rounded),
+              tooltip: 'Remove',
+            ),
+          ] else
+            FilledButton(
+              onPressed: busy ? null : () => _runCraft(app, 'install'),
+              child: const Text('Install'),
+            ),
+        ],
+      ),
     );
   }
 
