@@ -249,7 +249,7 @@ Fold 7 (Android 16) and Tab S10 FE page size **[u]** — first command of Phase 
   Script = Mesa's pattern: download to `/tmp`, `sha256sum -c`, unpack to
   `/opt/droiddesk-wine/<x>.new`, swap, keep `.old` until success, write `.droiddesk-version`.
 - Updates: debian-setup gains "if `/etc/droiddesk/wine.conf` exists and a pinned version differs,
-  rerun wine-install.sh for the installed backends" (bump `DEBIAN_SETUP_VERSION` to 11 once).
+  rerun wine-install.sh for the installed backends" (bump `DEBIAN_SETUP_VERSION` once; 11 is taken by xclip, fold.65).
   Wine updates the prefix itself on the next start after a version change.
 - Uninstall (catalog "Odinstalovat"): `droiddesk-wine uninstall` removes `/opt/droiddesk-wine`,
   purges `hangover-*`, our .desktop files and MIME defaults; **prefixes are kept** (user data,

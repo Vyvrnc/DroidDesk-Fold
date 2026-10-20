@@ -32,7 +32,7 @@ class LinuxRuntime(private val context: Context) {
         private const val DROIDDESK_ETH_VERSION = "2"
         private const val DROIDDESK_ETH_SHA256 = "daf82991ecc5189b14e12b4a344ad32f0a9d72914a7e1f96a66ea851186511c0"
         // Bump when debian-setup gains something existing installs need (rerun at session start).
-        private const val DEBIAN_SETUP_VERSION = 10
+        private const val DEBIAN_SETUP_VERSION = 11
         private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
 
         /**
@@ -530,6 +530,13 @@ class LinuxRuntime(private val context: Context) {
                     echo "set -g mouse on"
                     # A selection in tmux goes to the Android clipboard (OSC 52).
                     echo "set -g set-clipboard on"
+                    # xfce4-terminal has no OSC 52: copy through xclip, and keep the selection
+                    # (the default copy-pipe-and-cancel dropped it at once). Esc ends copy mode.
+                    for t in copy-mode copy-mode-vi; do
+                        echo "bind -T ${'$'}t MouseDragEnd1Pane send-keys -X copy-pipe-no-clear \"xclip -selection clipboard -i >/dev/null 2>&1\""
+                        echo "bind -T ${'$'}t Escape send-keys -X cancel"
+                        echo "bind -T ${'$'}t MouseDown1Pane select-pane \\; send-keys -X clear-selection"
+                    done
                     user=${'$'}(getent passwd "${'$'}uid" | cut -d: -f1)
                     [ -n "${'$'}user" ] && echo "server-access -a ${'$'}user"
                     # This file is rewritten at every server start; own settings go here.
@@ -631,7 +638,7 @@ class LinuxRuntime(private val context: Context) {
             set -e
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
-            apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates dbus-x11 xz-utils pulseaudio-utils libnotify-bin tmux proxychains4
+            apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates dbus-x11 xz-utils pulseaudio-utils libnotify-bin tmux proxychains4 xclip
 
             if [ -f "/usr/share/zoneinfo/$timeZone" ]; then
                 ln -sf "/usr/share/zoneinfo/$timeZone" /etc/localtime
