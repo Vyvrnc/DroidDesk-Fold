@@ -525,9 +525,13 @@ class LinuxRuntime(private val context: Context) {
                     echo "set -s escape-time 10"
                     echo "set -g history-limit 50000"
                     echo "set -s extended-keys on"
-                    echo "set -g mouse off"
+                    # On: a touch swipe scrolls tmux history; off sends arrow keys, which page
+                    # through Claude Code's prompt history instead.
+                    echo "set -g mouse on"
                     user=${'$'}(getent passwd "${'$'}uid" | cut -d: -f1)
                     [ -n "${'$'}user" ] && echo "server-access -a ${'$'}user"
+                    # This file is rewritten at every server start; own settings go here.
+                    echo "source-file -q ~/.config/droiddesk/tmux.local.conf"
                 } > "${'$'}conf"
                 tmux -L "droiddesk-${'$'}name" -f "${'$'}conf" new-session -d -s "${'$'}name" "${'$'}@" || exit 0
                 while tmux -L "droiddesk-${'$'}name" has-session -t "=${'$'}name" 2>/dev/null; do sleep 5; done
