@@ -15,11 +15,15 @@ IMAGE=ghcr.io/cirruslabs/flutter:stable
 [ -f "$KEY_DIR/debug.keystore" ] || { echo "missing $KEY_DIR/debug.keystore" >&2; exit 1; }
 mkdir -p "$WORK_DIR"
 
-git archive --format=tar HEAD app > "$WORK_DIR/src.tar"
+# autocrlf=false: with core.autocrlf=true (Git for Windows) git archive writes CRLF, and the
+# scripts the app copies into Linux then fail ("set: pipefail: invalid option name").
+git -c core.autocrlf=false archive --format=tar HEAD app > "$WORK_DIR/src.tar"
 cat > "$WORK_DIR/build.sh" <<'EOF'
 set -e
 mkdir -p /work && cd /work && tar xf /out/src.tar
 cd /work/app
+crlf=$(grep -rlI $'\r' android/app/src/main/assets/droiddesk || true)
+[ -z "$crlf" ] || { echo "CRLF in APK assets: $crlf" >&2; exit 1; }
 yes | sdkmanager --licenses >/dev/null 2>&1 || true
 sdkmanager "cmake;3.22.1" >/dev/null
 flutter pub get
