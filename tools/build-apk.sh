@@ -15,6 +15,11 @@ IMAGE=ghcr.io/cirruslabs/flutter:stable
 [ -f "$KEY_DIR/debug.keystore" ] || { echo "missing $KEY_DIR/debug.keystore" >&2; exit 1; }
 mkdir -p "$WORK_DIR"
 
+# Launchers generated from Kotlin raw strings must parse (fold.65 shipped a broken debian-tmux).
+# Checks the working tree; the build itself uses HEAD, so commit first.
+PY=python3; "$PY" -c 1 2>/dev/null || PY=python
+"$PY" tools/check-launchers.py
+
 # autocrlf=false: with core.autocrlf=true (Git for Windows) git archive writes CRLF, and the
 # scripts the app copies into Linux then fail ("set: pipefail: invalid option name").
 git -c core.autocrlf=false archive --format=tar HEAD app > "$WORK_DIR/src.tar"
