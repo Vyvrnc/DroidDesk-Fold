@@ -608,7 +608,8 @@ class LinuxRuntime(private val context: Context) {
                     echo "set -g history-limit 50000"
                     echo "set -s extended-keys on"
                     # On: a touch swipe scrolls tmux history; off sends arrow keys, which page
-                    # through Claude Code's prompt history instead.
+                    # through the Claude Code prompt history instead. No apostrophes in this
+                    # block: it sits inside a single-quoted bash -c.
                     echo "set -g mouse on"
                     # A selection in tmux goes to the Android clipboard (OSC 52).
                     echo "set -g set-clipboard on"
