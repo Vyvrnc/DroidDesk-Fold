@@ -69,6 +69,9 @@ Priority 2:
   plus our `--load=module-aaudio-sink`. Drop sles when AAudio loads; watchdog restarts pulse when
   `pactl info` does not answer in ~3 s (see Stability 1). B2: 130 xruns on AAudio, bigger buffer on
   slow SoCs.
+- **B4** PulseAudio logs "main.c: Couldn't canonicalize binary path, cannot self execute." at every
+  start (realpath of /proc/self/exe fails as user 10, probably SELinux). Cosmetic, but pulse cannot
+  re-exec itself.
 - **A7** proot-distro binds `/data/data/<pkg>/cache` literally (`proot_distro/commands/login/
   proot_cmd.py`, `_add_termux_app_binds`), so proot warns "can't sanitize binding". Harmless;
   upstream fix: derive it from `TERMUX__PREFIX`.

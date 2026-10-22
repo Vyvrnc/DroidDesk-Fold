@@ -89,6 +89,11 @@ class DroidDeskService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
 
+    // PulseAudio watchdog: nothing restarted the daemon when it died or hung, and Debian apps
+    // stayed silent until the desktop was restarted. LinuxRuntime.ensurePulseAudio checks it
+    // only while the native desktop session runs (not in chroot mode).
+    private var pulseWatchdog: java.util.concurrent.ScheduledExecutorService? = null
+
     // The X server runs in its own :x11 process. Its only binding came from
     // DesktopActivity, so once the activity went away the process sank to a
     // plain started service and lmkd killed it first (LOW_MEMORY in exit-info),
@@ -149,6 +154,15 @@ class DroidDeskService : Service() {
         runCatching {
             getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(networkCallback)
         }
+        val runtime = LinuxRuntime(applicationContext)
+        pulseWatchdog = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { task ->
+            Thread(task, "pulse-watchdog").apply { isDaemon = true }
+        }.apply {
+            scheduleWithFixedDelay(
+                { runCatching { runtime.ensurePulseAudio() } },
+                20, 20, java.util.concurrent.TimeUnit.SECONDS,
+            )
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -172,6 +186,8 @@ class DroidDeskService : Service() {
 
     override fun onDestroy() {
         running = false
+        pulseWatchdog?.shutdownNow()
+        pulseWatchdog = null
         unregisterReceiver(batteryReceiver)
         runCatching {
             getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkCallback)
