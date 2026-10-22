@@ -1693,6 +1693,7 @@ class LinuxRuntime(private val context: Context) {
                 Acquire::Retries "3";
                 Acquire::http::Timeout "30";
                 Acquire::https::Timeout "30";
+                Acquire::https::CaInfo "${prefixDir.absolutePath}/etc/tls/cert.pem";
                 DPkg::Lock::Timeout "60";
                 """.trimIndent()
             )
@@ -2518,6 +2519,9 @@ class LinuxRuntime(private val context: Context) {
         env["GIO_EXTRA_MODULES"] = "${prefixDir.absolutePath}/lib/gio/modules"
         env["GVFS_MOUNTABLE_DIR"] = "${prefixDir.absolutePath}/share/gvfs/mounts"
 
+        // CA bundle by its real path, not the compiled-in com.termux one: without a working
+        // socket hook apt reported "No system certificates available" (ScreenMate One).
+        env["SSL_CERT_FILE"] = "${prefixDir.absolutePath}/etc/tls/cert.pem"
         env["DPKG_ADMINDIR"] = "${prefixDir.absolutePath}/var/lib/dpkg"
         env["APT_CONFIG"] = "${prefixDir.absolutePath}/etc/apt/apt.conf.d/99-droiddesk-paths.conf"
 
