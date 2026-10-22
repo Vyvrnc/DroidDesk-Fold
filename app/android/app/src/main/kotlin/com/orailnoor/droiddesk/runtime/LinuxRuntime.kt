@@ -2138,22 +2138,22 @@ class LinuxRuntime(private val context: Context) {
             # Written by DroidDesk at every app start from this Android user's real paths
             # (Termux's own profile names /data/data/com.termux, which does not exist here).
             for i in "$prefix/etc/profile.d"/*.sh; do
-            	if [ -r "${'$'}i" ]; then
-            		. "${'$'}i"
-            	fi
+                if [ -r "${'$'}i" ]; then
+                    . "${'$'}i"
+                fi
             done
             unset i
 
             # Source etc/bash.bashrc and ~/.bashrc also for interactive bash login shells:
             if [ "${'$'}BASH" ]; then
-            	if [[ "${'$'}-" == *"i"* ]]; then
-            		if [ -r "$prefix/etc/bash.bashrc" ]; then
-            			. "$prefix/etc/bash.bashrc"
-            		fi
-            		if [ -r "$home/.bashrc" ]; then
-            			. "$home/.bashrc"
-            		fi
-            	fi
+                if [[ "${'$'}-" == *"i"* ]]; then
+                    if [ -r "$prefix/etc/bash.bashrc" ]; then
+                        . "$prefix/etc/bash.bashrc"
+                    fi
+                    if [ -r "$home/.bashrc" ]; then
+                        . "$home/.bashrc"
+                    fi
+                fi
             fi
         """.trimIndent() + "\n"
         if (profile.isFile && profile.readText() == content) return
