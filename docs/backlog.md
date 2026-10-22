@@ -104,3 +104,18 @@ Priority 3, cars and small devices:
 - **G2** a lite profile: no Thunar daemon, xfdesktop, notifyd, gvfsd-trash/metadata, gpg-agent.
 - **G3** every `debian-tmux` session is its own proot + tmux server + a `sleep 5` loop.
 - **F1** check that the craft-install.sh copy works as user 10 (catalog not opened yet).
+  Done 2026-10-22: copied, no user-0 or com.termux paths, ALSA → pulse via /etc/asound.conf.
+
+Found after fold.69 on the ScreenMate (setup 12 verified A1, A4, A5, B1, B3, C2, E1, E2):
+- **F2** Craft menu entries go through `gpu-run`, which always sources gpu-env.sh (Turnip ICD
+  and zink for GL) regardless of `gpu-off` or a failed self-test. On Adreno 610 Vulkan initialises
+  (apiVersion 1.0.354) but GL through zink is broken, so GTK/webview dialogs in Craft apps may
+  fail. With gpu-off or a failed self-test: keep the Vulkan ICD only, GL stays on llvmpipe.
+- **F3** no Vulkan fallback in Debian (no `mesa-vulkan-drivers`/lavapipe, no
+  /usr/share/vulkan/icd.d): when Turnip fails, wgpu apps have no Vulkan at all. Install lavapipe
+  with the first Craft app, or test before installing. F4: wgpu on Vulkan 1.0 untested (no Craft
+  app installed on the ScreenMate yet; photocraft or pdfcraft is the smallest test).
+- **Self-test detail** `/usr/local/sbin/droiddesk-gpu-selftest` reports the last non-empty glxinfo
+  line ("name of display: :0") when there is no renderer; take the first
+  `error|fail|couldn` line instead.
+- A2, A3, A6 (sshd_config), A7, D1, D2, G1 still open as listed above.
