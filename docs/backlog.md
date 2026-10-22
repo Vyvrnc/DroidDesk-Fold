@@ -40,3 +40,53 @@ Agreed items not yet scheduled for a release. Windows apps have their own plan:
    foreground the app should not be cached. Check which service type and state it had at that time
    (`dumpsys activity services com.orailnoor.droiddesk`, `dataSync` 6 h limit on Android 15+) and
    keep the app out of the cached state while a session runs.
+
+## Other Android users and cars (ScreenMate One audit, 2026-10-22)
+
+Android Automotive 14 on a ScreenMate One (SM6225/SD680, Adreno 610, 7.5 GB RAM). The app runs
+only as user 10 (`/data/user/10/com.orailnoor.droiddesk`). Found read-only on the device by the
+phone session, checked over adb root. Done so far: fold.67 CA bundle path, fold.68 hook prefix from
+dladdr, 97d8a59 scrollable setup screen (D3). P = `$PREFIX`.
+
+Priority 1, affects every non-zero user (work profiles and Secure Folder on phones too):
+- **A1** `P/etc/profile` (written by the app) has literal `/data/data/com.termux/files/{usr/etc/profile.d,
+  usr/etc/bash.bashrc,home/.bashrc}`, so a login shell as user 10 skips profile.d, bash.bashrc and
+  ~/.bashrc. Generate it from `$PREFIX`/`$HOME`.
+- **A4** relocation rewrote `files/usr` only. `P/etc/profile.d/init-termux-properties.sh` then fails
+  (`mkdir /data/data: Permission denied`, `cp … /data/data/com.termux/files/home/.termux/`). Also
+  relocate `files/home` → `$HOME` and `/data/data/com.termux/cache` → the real cache dir.
+- **A5** `P/bin/droiddesk-relocate-shebangs`: old_prefix == new_prefix, because the relocation rewrote
+  the template too, so the script does nothing. Build old_prefix at run time
+  (`"/data/data/com.""termux/files/usr"`) or exclude the file from relocation. Check the Fold too.
+- **E2** `debian-tmux`: `server-access` only if `getent passwd $uid` succeeds (race with
+  `aid_u10_*` being added); fall back to the numeric uid or wait.
+- First app terminal after setup ran the Termux bootstrap second stage again (postinst of all
+  packages, py3compile errors). Probably related to A4.
+
+Priority 2:
+- **B1** PulseAudio deadlocked from the start (main thread in futex_wait, TCP 4713 backlog full,
+  pactl hangs). Suspect two sinks at once: `P/etc/pulse/default.pa:120 load-module module-sles-sink`
+  plus our `--load=module-aaudio-sink`. Drop sles when AAudio loads; watchdog restarts pulse when
+  `pactl info` does not answer in ~3 s (see Stability 1). B2: 130 xruns on AAudio, bigger buffer on
+  slow SoCs.
+- **A7** proot-distro binds `/data/data/<pkg>/cache` literally (`proot_distro/commands/login/
+  proot_cmd.py`, `_add_termux_app_binds`), so proot warns "can't sanitize binding". Harmless;
+  upstream fix: derive it from `TERMUX__PREFIX`.
+- **E1** `debian-tmux` overwrites its log (`> $log`) and the XFCE terminal (`-x`) closes on an attach
+  error, so failures leave nothing. Append with a timestamp and pause on error.
+- **A2/A3/A6** other com.termux literals: `P/etc/bash.bashrc` (command-not-found, bash-completion),
+  `P/etc/nanorc`, `P/bin/pkg` (apt cache dir), `termux-setup-storage`, `termux-reset`,
+  `termux-backup`, `termux-restore`, `termux-am` (socket), `termux-wake-lock/unlock`,
+  `P/etc/ssh/sshd_config` (Include, sftp Subsystem), `P/etc/ssh/ssh_config`, `profile.d/vte.csh`.
+  Widen the relocation patterns (home, cache, apps); wrap or disable the com.termux service tools.
+
+Priority 3, cars and small devices:
+- **D1** panel launchers Phone/SMS only with `FEATURE_TELEPHONY`; none on `FEATURE_AUTOMOTIVE`.
+- **D2** no battery genmon without a battery (it shows a fake "50 % ⚡"); hide the battery and
+  hotspot setting entries there.
+- **C1** `droiddesk-gpu status` should self-test the renderer (EGL/GL string) and report a llvmpipe
+  fallback; check that Turnip in Mesa 26.2 covers Adreno 610 (a6xx gen1).
+- **G1** `droiddesk-usb-tray.py` autostart (68 MB RSS, 5 s loop) only on USB_DEVICE_ATTACHED.
+- **G2** a lite profile: no Thunar daemon, xfdesktop, notifyd, gvfsd-trash/metadata, gpg-agent.
+- **G3** every `debian-tmux` session is its own proot + tmux server + a `sleep 5` loop.
+- **F1** check that the craft-install.sh copy works as user 10 (catalog not opened yet).
