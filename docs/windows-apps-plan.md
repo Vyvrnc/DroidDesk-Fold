@@ -22,7 +22,7 @@ to be checked in Phase 0 or at implementation.
   `tools/usb-blk-test/serial.sh`, glibc 2.41). Launchers written by `writeDebianLauncher()` in
   `LinuxRuntime.kt`: `start-debian` (login shell), `debian-run CMD…` (one command, XFCE session
   bus, `DISPLAY=:0`, binds `/tmp` → Termux tmp and `/storage`), `debian-setup` (idempotent root
-  setup, stamps `/etc/droiddesk/setup-version` with `DEBIAN_SETUP_VERSION`, currently 10; rerun in
+  setup, stamps `/etc/droiddesk/setup-version` with `DEBIAN_SETUP_VERSION`, currently 12; rerun in
   the background at session start while the stamp differs).
 - **Catalog item** = three places:
   1. `app/lib/screens/apps/app_catalog_screen.dart`: `_FeaturedApp('<id>', name, description,
@@ -249,7 +249,8 @@ Fold 7 (Android 16) and Tab S10 FE page size **[u]** — first command of Phase 
   Script = Mesa's pattern: download to `/tmp`, `sha256sum -c`, unpack to
   `/opt/droiddesk-wine/<x>.new`, swap, keep `.old` until success, write `.droiddesk-version`.
 - Updates: debian-setup gains "if `/etc/droiddesk/wine.conf` exists and a pinned version differs,
-  rerun wine-install.sh for the installed backends" (bump `DEBIAN_SETUP_VERSION` once; 11 is taken by xclip, fold.65).
+  rerun wine-install.sh for the installed backends" (bump `DEBIAN_SETUP_VERSION` once; 11 is taken by xclip, fold.65, and 12 by libxcb-keysyms1 and
+  the GPU self-test, fold.69, so Windows apps use 13).
   Wine updates the prefix itself on the next start after a version change.
 - Uninstall (catalog "Odinstalovat"): `droiddesk-wine uninstall` removes `/opt/droiddesk-wine`,
   purges `hangover-*`, our .desktop files and MIME defaults; **prefixes are kept** (user data,

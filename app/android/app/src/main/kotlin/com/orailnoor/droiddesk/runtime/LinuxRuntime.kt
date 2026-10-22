@@ -35,7 +35,8 @@ class LinuxRuntime(private val context: Context) {
         private const val DROIDDESK_ETH_VERSION = "2"
         private const val DROIDDESK_ETH_SHA256 = "daf82991ecc5189b14e12b4a344ad32f0a9d72914a7e1f96a66ea851186511c0"
         // Bump when debian-setup gains something existing installs need (rerun at session start).
-        private const val DEBIAN_SETUP_VERSION = 11
+        // 12: libxcb-keysyms1, Mesa library check, GPU self-test (fold.69).
+        private const val DEBIAN_SETUP_VERSION = 12
         private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
         // Craft app ids (table in assets/droiddesk/craft-install.sh); also guards the shell command.
         private val CRAFT_ID = Regex("[a-z]{1,20}craft")
@@ -755,7 +756,7 @@ class LinuxRuntime(private val context: Context) {
             set -e
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
-            apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates dbus-x11 xz-utils pulseaudio-utils libnotify-bin tmux proxychains4 xclip
+            apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates dbus-x11 xz-utils pulseaudio-utils libnotify-bin tmux proxychains4 xclip libxcb-keysyms1
 
             if [ -f "/usr/share/zoneinfo/$timeZone" ]; then
                 ln -sf "/usr/share/zoneinfo/$timeZone" /etc/localtime
@@ -887,6 +888,39 @@ class LinuxRuntime(private val context: Context) {
                 fi
                 rm -f /tmp/mesa-kgsl.tar.xz
             fi
+            # Libraries /opt/mesa-kgsl needs that Debian does not have yet. Turnip needs
+            # libxcb-keysyms.so.1; without it the Vulkan loader dropped the ICD, zink failed and
+            # no GL app ran under gpu-env (ScreenMate One). A missing lib.so.N is looked up as
+            # Debian names its package (libN, or lib-N after a digit); others are only logged.
+            if [ -e /dev/kgsl-3d0 ] && [ -d /opt/mesa-kgsl ]; then
+                droiddesk_missing=${'$'}(find /opt/mesa-kgsl -type f -name '*.so*' 2>/dev/null |
+                    while read -r droiddesk_so; do
+                        LD_LIBRARY_PATH=/opt/mesa-kgsl/lib/aarch64-linux-gnu ldd "${'$'}droiddesk_so" 2>/dev/null
+                    done | awk '/not found/ {print ${'$'}1}' | sort -u)
+                droiddesk_pkgs=
+                for droiddesk_lib in ${'$'}droiddesk_missing; do
+                    droiddesk_base=${'$'}{droiddesk_lib%%.so*}
+                    droiddesk_soversion=${'$'}{droiddesk_lib##*.so.}
+                    case "${'$'}droiddesk_base" in
+                        *[0-9]) droiddesk_pkg="${'$'}droiddesk_base-${'$'}droiddesk_soversion" ;;
+                        *) droiddesk_pkg="${'$'}droiddesk_base${'$'}droiddesk_soversion" ;;
+                    esac
+                    droiddesk_pkg=${'$'}(echo "${'$'}droiddesk_pkg" | tr A-Z a-z)
+                    if [ "${'$'}droiddesk_soversion" != "${'$'}droiddesk_lib" ] &&
+                        apt-cache show "${'$'}droiddesk_pkg" >/dev/null 2>&1; then
+                        droiddesk_pkgs="${'$'}droiddesk_pkgs ${'$'}droiddesk_pkg"
+                    else
+                        echo "Mesa (/opt/mesa-kgsl): ${'$'}droiddesk_lib missing, no Debian package found"
+                    fi
+                done
+                if [ -n "${'$'}droiddesk_pkgs" ]; then
+                    echo "Mesa (/opt/mesa-kgsl): installing${'$'}droiddesk_pkgs"
+                    apt-get install -y ${'$'}droiddesk_pkgs || echo "Mesa (/opt/mesa-kgsl): installing${'$'}droiddesk_pkgs failed"
+                fi
+                # glxinfo for the hardware OpenGL self-test (droiddesk-gpu-selftest).
+                command -v glxinfo >/dev/null 2>&1 || apt-get install -y mesa-utils ||
+                    echo "mesa-utils not installed, the GPU self-test waits for it"
+            fi
             mkdir -p /etc/droiddesk
             cat > /etc/droiddesk/gpu-env.sh <<'DROIDDESK_GPU_ENV'
             # Hardware OpenGL; sourced by droiddesk-gui.sh and gpu-run. Adreno: /opt/mesa-kgsl.
@@ -947,9 +981,9 @@ class LinuxRuntime(private val context: Context) {
             # Without Adreno (Mali, Xclipse) "on" also asks the app for its virgl server
             # (/etc/droiddesk/gpu-virgl), started with the next DroidDesk session.
             case "${'$'}1" in
-                on) rm -f /etc/droiddesk/gpu-off
+                on) rm -f /etc/droiddesk/gpu-off /etc/droiddesk/gpu-off-reason
                     [ -e /dev/kgsl-3d0 ] || { mkdir -p /etc/droiddesk && touch /etc/droiddesk/gpu-virgl; } ;;
-                off) mkdir -p /etc/droiddesk && touch /etc/droiddesk/gpu-off && rm -f /etc/droiddesk/gpu-virgl ;;
+                off) mkdir -p /etc/droiddesk && touch /etc/droiddesk/gpu-off && rm -f /etc/droiddesk/gpu-virgl /etc/droiddesk/gpu-off-reason ;;
                 status|"") ;;
                 *) echo "Usage: droiddesk-gpu on|off|status" >&2; exit 2 ;;
             esac
@@ -963,15 +997,74 @@ class LinuxRuntime(private val context: Context) {
                 fi
             elif [ ! -d /opt/mesa-kgsl ]; then
                 echo "Hardware OpenGL: not installed (run debian-setup)"
+            elif [ -f /etc/droiddesk/gpu-off ] && [ -s /etc/droiddesk/gpu-off-reason ]; then
+                echo "Hardware OpenGL: off (self-test failed: $(cat /etc/droiddesk/gpu-off-reason))"
             elif [ -f /etc/droiddesk/gpu-off ]; then
                 echo "Hardware OpenGL: off"
             else
                 echo "Hardware OpenGL: on"
             fi
+            # Result of the self-test the app runs once per Mesa build (droiddesk-gpu-selftest):
+            # "<mesa version> ok|fail <detail>".
+            if [ -e /dev/kgsl-3d0 ] && [ -s /etc/droiddesk/gpu-selftest ] && [ ! -s /etc/droiddesk/gpu-off-reason ]; then
+                read -r droiddesk_version droiddesk_result droiddesk_detail < /etc/droiddesk/gpu-selftest
+                if [ "${'$'}droiddesk_result" = fail ]; then
+                    echo "GPU self-test (Mesa ${'$'}droiddesk_version) failed: ${'$'}droiddesk_detail"
+                else
+                    echo "GPU self-test (Mesa ${'$'}droiddesk_version): ok, ${'$'}droiddesk_detail"
+                fi
+            fi
             [ -n "${'$'}1" ] && [ "${'$'}1" != status ] && echo "Applies to newly started shells and apps."
             exit 0
             DROIDDESK_GPU
             chmod 755 /usr/local/bin/droiddesk-gpu
+
+            # Hardware OpenGL self-test, run by the app once per Mesa build in /opt/mesa-kgsl
+            # (after setup or a Mesa update, not at every start). zink over Turnip needs more
+            # than KGSL and the files: on an Adreno 610 Turnip reports Vulkan 1.0 and zink
+            # cannot start (GLX: no RGB visual), while droiddesk-gpu said "on". A failure
+            # switches hardware OpenGL off with the reason, which droiddesk-gpu status shows.
+            # A gpu-off set by hand (no gpu-off-reason) is left alone either way, only the
+            # result is recorded. Exit 3: inconclusive (no X server, no glxinfo, timeout),
+            # nothing recorded, the app tries again at the next session start.
+            cat > /usr/local/sbin/droiddesk-gpu-selftest <<'DROIDDESK_GPU_SELFTEST'
+            #!/bin/sh
+            dir=/etc/droiddesk
+            version=${'$'}(cat /opt/mesa-kgsl/.droiddesk-version 2>/dev/null)
+            [ -e /dev/kgsl-3d0 ] && [ -n "${'$'}version" ] && [ -f "${'$'}dir/gpu-env.sh" ] || exit 0
+            command -v glxinfo >/dev/null 2>&1 || { echo "glxinfo missing (apt-get install mesa-utils)"; exit 3; }
+            i=0
+            while [ ! -S /tmp/.X11-unix/X0 ]; do
+                i=${'$'}((i + 1))
+                [ "${'$'}i" -le 60 ] || { echo "no X server on :0"; exit 3; }
+                sleep 1
+            done
+            model=${'$'}(cat /sys/class/kgsl/kgsl-3d0/gpu_model 2>/dev/null)
+            out=${'$'}( . "${'$'}dir/gpu-env.sh"; DISPLAY=:0 timeout 30 glxinfo -B 2>&1 )
+            status=${'$'}?
+            [ "${'$'}status" -eq 124 ] && { echo "glxinfo timed out"; exit 3; }
+            renderer=${'$'}(printf '%s\n' "${'$'}out" | sed -n 's/^OpenGL renderer string: //p' | head -n 1)
+            if [ "${'$'}status" -eq 0 ] && printf '%s' "${'$'}renderer" | grep -qi zink; then
+                echo "${'$'}version ok ${'$'}renderer" > "${'$'}dir/gpu-selftest"
+                # Only an off switched by an earlier self-test (older Mesa) goes back on.
+                if [ -f "${'$'}dir/gpu-off-reason" ]; then rm -f "${'$'}dir/gpu-off" "${'$'}dir/gpu-off-reason"; fi
+                echo "GPU self-test ok: ${'$'}renderer"
+                exit 0
+            fi
+            detail=${'$'}renderer
+            [ -n "${'$'}detail" ] || detail=${'$'}(printf '%s\n' "${'$'}out" | grep -v '^[[:space:]]*${'$'}' | tail -n 1)
+            reason="zink nefunkční${'$'}{model:+ (${'$'}model)}, používá se llvmpipe: ${'$'}{detail:-glxinfo skončil kódem ${'$'}status}"
+            echo "${'$'}version fail ${'$'}reason" > "${'$'}dir/gpu-selftest"
+            if [ -f "${'$'}dir/gpu-off" ] && [ ! -f "${'$'}dir/gpu-off-reason" ]; then
+                echo "GPU self-test failed (${'$'}reason); hardware OpenGL was already switched off by hand, left as it is"
+            else
+                touch "${'$'}dir/gpu-off"
+                echo "${'$'}reason" > "${'$'}dir/gpu-off-reason"
+                echo "GPU self-test failed, hardware OpenGL off: ${'$'}reason"
+            fi
+            exit 0
+            DROIDDESK_GPU_SELFTEST
+            chmod 755 /usr/local/sbin/droiddesk-gpu-selftest
 
             # droiddesk-open from Debian: translate the container path to the host
             # path, then hand it to the Termux-side bridge client.
@@ -3096,7 +3189,15 @@ class LinuxRuntime(private val context: Context) {
     private fun refreshDebianSetupInBackground() {
         if (debianSetupRunning || debianRootfsMarkers().none(File::exists)) return
         val stamp = File(debianRootfs(baseDir), "etc/droiddesk/setup-version")
-        if (stamp.isFile && stamp.readText().trim() == DEBIAN_SETUP_VERSION.toString()) return
+        if (stamp.isFile && stamp.readText().trim() == DEBIAN_SETUP_VERSION.toString()) {
+            if (gpuSelfTestNeeded()) {
+                debianSetupRunning = true
+                Thread({
+                    try { runGpuSelfTest() } finally { debianSetupRunning = false }
+                }, "gpu-selftest").apply { isDaemon = true }.start()
+            }
+            return
+        }
         val setup = File(binDir, "debian-setup")
         if (!setup.canExecute()) writeDebianLauncher()
         debianSetupRunning = true
@@ -3111,12 +3212,54 @@ class LinuxRuntime(private val context: Context) {
                     .start()
                 val code = process.waitFor()
                 Log.i(TAG, "Background debian-setup finished with $code (log ${log.path})")
+                if (code == 0 && gpuSelfTestNeeded()) runGpuSelfTest()
             } catch (error: Exception) {
                 Log.w(TAG, "Background debian-setup failed", error)
             } finally {
                 debianSetupRunning = false
             }
         }, "debian-setup").apply { isDaemon = true }.start()
+    }
+
+    /**
+     * The hardware OpenGL self-test (droiddesk-gpu-selftest in Debian, written by debian-setup)
+     * has no result yet for the Mesa build in /opt/mesa-kgsl: after setup or a Mesa update.
+     * Checked from the host side, so a normal session start launches no proot for it.
+     */
+    private fun gpuSelfTestNeeded(): Boolean = runCatching {
+        if (!hasAdrenoGpu()) return@runCatching false
+        val rootfs = debianRootfs(baseDir)
+        val version = File(rootfs, "opt/mesa-kgsl/.droiddesk-version").takeIf { it.isFile }
+            ?.readText()?.trim().orEmpty()
+        if (version.isEmpty() || !File(rootfs, "usr/local/sbin/droiddesk-gpu-selftest").isFile) return@runCatching false
+        val result = File(rootfs, "etc/droiddesk/gpu-selftest")
+        !(result.isFile && result.readText().substringBefore(' ').trim() == version)
+    }.getOrDefault(false)
+
+    /** Runs the self-test in Debian (waits there for the X server); log in tmp/gpu-selftest.log. */
+    private fun runGpuSelfTest() {
+        try {
+            val run = File(binDir, "debian-run")
+            if (!run.canExecute()) writeDebianLauncher()
+            val log = File(tmpDir, "gpu-selftest.log")
+            val process = ProcessBuilder(
+                File(prefixDir, "bin/bash").absolutePath, run.absolutePath,
+                "/usr/local/sbin/droiddesk-gpu-selftest",
+            )
+                .directory(homeDir)
+                .redirectErrorStream(true)
+                .redirectOutput(ProcessBuilder.Redirect.appendTo(log))
+                .also { it.environment().clear(); it.environment().putAll(getTermuxEnv()) }
+                .start()
+            if (!process.waitFor(3, java.util.concurrent.TimeUnit.MINUTES)) {
+                process.destroyForcibly()
+                Log.w(TAG, "GPU self-test timed out (log ${log.path})")
+            } else {
+                Log.i(TAG, "GPU self-test finished with ${process.exitValue()} (log ${log.path})")
+            }
+        } catch (error: Exception) {
+            Log.w(TAG, "GPU self-test failed to run", error)
+        }
     }
 
     /** Installs only PRoot, proot-distro and Debian's base rootfs. */
