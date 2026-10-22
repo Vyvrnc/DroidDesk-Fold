@@ -84,8 +84,19 @@ Priority 3, cars and small devices:
 - **D1** panel launchers Phone/SMS only with `FEATURE_TELEPHONY`; none on `FEATURE_AUTOMOTIVE`.
 - **D2** no battery genmon without a battery (it shows a fake "50 % ⚡"); hide the battery and
   hotspot setting entries there.
-- **C1** `droiddesk-gpu status` should self-test the renderer (EGL/GL string) and report a llvmpipe
-  fallback; check that Turnip in Mesa 26.2 covers Adreno 610 (a6xx gen1).
+- **C1 (priority 1)** `/opt/mesa-kgsl/…/libvulkan_freedreno.so` needs `libxcb-keysyms.so.1`, but
+  debian-setup does not install `libxcb-keysyms1`. The Vulkan loader drops the ICD ("Found no
+  drivers"), zink fails and GLX ends with "couldn't find RGB GLX visual", so no GL app runs under
+  gpu-env in Debian. Add the package, and in setup check `ldd` of every .so in /opt/mesa-kgsl for
+  "not found". Find out why the Fold has it (pulled in by another package?). Installed by hand on
+  the ScreenMate.
+- **C2 (priority 1)** even with the library, zink does not work on Adreno 610: Turnip (Mesa 26.2.3)
+  reports apiVersion 1.0.354 and GLX/EGL through zink fails (drisw screen, eglInitialize failed);
+  llvmpipe (Debian Mesa 25.0.7) gives GL 4.5. `droiddesk-gui.sh` and `droiddesk-gpu` decide only on
+  /dev/kgsl-3d0 and /opt/mesa-kgsl existing, so weaker Adrenos get a broken zink and
+  `droiddesk-gpu status` says "on". Self-test at setup or first start (`glxinfo -B`/`eglinfo` under
+  gpu-env, or apiVersion ≥ 1.1); on failure write /etc/droiddesk/gpu-off and report
+  "Adreno XYZ: zink nefunkční, llvmpipe".
 - **G1** `droiddesk-usb-tray.py` autostart (68 MB RSS, 5 s loop) only on USB_DEVICE_ATTACHED.
 - **G2** a lite profile: no Thunar daemon, xfdesktop, notifyd, gvfsd-trash/metadata, gpg-agent.
 - **G3** every `debian-tmux` session is its own proot + tmux server + a `sleep 5` loop.
