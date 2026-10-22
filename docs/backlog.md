@@ -126,3 +126,19 @@ Found after fold.69 on the ScreenMate (setup 12 verified A1, A4, A5, B1, B3, C2,
   self-test fails with our Mesa, try Debian's zink before falling back to llvmpipe.
   fold.70 gpu-run with gpu-off keeps GL on llvmpipe (LIBGL_ALWAYS_SOFTWARE=1, GALLIUM_DRIVER=llvmpipe).
   A7 is fixed in fold.70 by patching proot_cmd.py at every app start.
+
+Craft test round on the ScreenMate with fold.70 (root-09, 2026-10-22):
+- Works: SoundCraft plays through pulse (sink-input on AAudio_sink); PdfCraft and WordCraft on
+  Turnip Vulkan 1.0 (wgpu, window in ~0.6 s) and on lavapipe only (~1.3 s to ready, usable);
+  WordCraft .docx and .odt (via Export) round trip with Czech diacritics. 5 min with desktop,
+  Claude and three apps: nothing died, ~4 GB available, swap unchanged (1.2/4 GB). RSS:
+  SoundCraft 166 MB, WordCraft 163 MB, PdfCraft 132 MB (Turnip) / 173 MB (lavapipe), Claude
+  390–450 MB.
+- **F6** Craft apps want a system file dialog ("install xdg-desktop-portal-gtk or zenity"), else
+  their own dialog starts in /root every time. Add `zenity` (small) with the first Craft app.
+- **F7** SoundCraft keeps its sink-input open and the AAudio stream RUNNING after Stop (~10 % of
+  a core idle). Upstream issue, not ours.
+- Typing Czech through `xdotool type` dropped characters; check with a real keyboard before
+  blaming WordCraft. Paste works.
+- `/proc/loadavg` in proot is a static file from proot-distro's sysdata: nothing in Debian
+  should rely on it.
