@@ -599,10 +599,31 @@ class LinuxRuntime(private val context: Context) {
             # tmux server with it, so a detached host keeps a proot of its own while the session
             # lives, with a tmux server of its own (-L): ending one session leaves the others. The app's uid goes along: the server runs as proot's fake root, clients
             # connect with the real uid and tmux turns them away without server-access.
+            # The log is appended to (one header per start), so an earlier failure stays readable.
+            echo "=== ${'$'}(date "+%Y-%m-%d %H:%M:%S") debian-tmux ${'$'}name ===" >> "${'$'}log"
             setsid nohup "${binDir.absolutePath}/debian-run" bash -c '
-                name=${'$'}1 uid=${'$'}2; shift 2
+                name=${'$'}1 uid=${'$'}2 gid=${'$'}3 uname=${'$'}4; shift 4
                 command -v tmux >/dev/null || { echo "tmux is missing: apt-get install tmux"; exit 1; }
                 tmux -L "droiddesk-${'$'}name" has-session -t "=${'$'}name" 2>/dev/null && exit 0
+                # server-access takes a user name only (tmux 3.5 resolves it with getpwnam), so the
+                # app uid needs a passwd entry. proot-distro adds aid_<name> at install; give it a
+                # moment, then add the entry the way proot-distro does (fake root may write).
+                user=
+                for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+                    user=${'$'}(getent passwd "${'$'}uid" | cut -d: -f1)
+                    [ -n "${'$'}user" ] && break
+                    sleep 0.2
+                done
+                if [ -z "${'$'}user" ] && [ "${'$'}uid" != 0 ]; then
+                    user=aid_${'$'}{uname:-droiddesk${'$'}uid}
+                    getent passwd "${'$'}user" >/dev/null && user=droiddesk${'$'}uid
+                    if echo "${'$'}user:x:${'$'}uid:${'$'}gid:Termux:/:/sbin/nologin" >> /etc/passwd; then
+                        echo "added ${'$'}user (uid ${'$'}uid) to /etc/passwd for tmux server-access"
+                    else
+                        echo "no passwd entry for uid ${'$'}uid, tmux may refuse the client"
+                        user=
+                    fi
+                fi
                 conf=${'$'}HOME/.config/droiddesk/tmux.conf
                 mkdir -p "${'$'}{conf%/*}"
                 {
@@ -623,15 +644,14 @@ class LinuxRuntime(private val context: Context) {
                         echo "bind -T ${'$'}t Escape send-keys -X cancel"
                         echo "bind -T ${'$'}t MouseDown1Pane select-pane \\; send-keys -X clear-selection"
                     done
-                    user=${'$'}(getent passwd "${'$'}uid" | cut -d: -f1)
                     [ -n "${'$'}user" ] && echo "server-access -a ${'$'}user"
                     # This file is rewritten at every server start; own settings go here.
                     echo "source-file -q ~/.config/droiddesk/tmux.local.conf"
                 } > "${'$'}conf"
                 tmux -L "droiddesk-${'$'}name" -f "${'$'}conf" new-session -d -s "${'$'}name" "${'$'}@" || exit 0
                 while tmux -L "droiddesk-${'$'}name" has-session -t "=${'$'}name" 2>/dev/null; do sleep 5; done
-            ' droiddesk-tmux-host "${'$'}name" "${'$'}(id -u)" "${'$'}@" > "${'$'}log" 2>&1 < /dev/null &
-            exec "${binDir.absolutePath}/debian-run" bash -c '
+            ' droiddesk-tmux-host "${'$'}name" "${'$'}(id -u)" "${'$'}(id -g)" "${'$'}(id -un 2>/dev/null)" "${'$'}@" >> "${'$'}log" 2>&1 < /dev/null &
+            "${binDir.absolutePath}/debian-run" bash -c '
                 for i in ${'$'}(seq 150); do
                     tmux -L "droiddesk-${'$'}1" has-session -t "=${'$'}1" 2>/dev/null && exec tmux -L "droiddesk-${'$'}1" attach -t "=${'$'}1"
                     sleep 0.2
@@ -639,6 +659,17 @@ class LinuxRuntime(private val context: Context) {
                 echo "tmux session ${'$'}1 did not start, see ${'$'}2" >&2
                 exit 1
             ' droiddesk-tmux-attach "${'$'}name" "${'$'}log"
+            status=${'$'}?
+            # XFCE runs this with xfce4-terminal -x, whose window closes with the process:
+            # an error has to stay on screen until it is read.
+            if [ "${'$'}status" -ne 0 ]; then
+                echo >&2
+                echo "debian-tmux: připojení k relaci ${'$'}name selhalo (kód ${'$'}status)." >&2
+                echo "Log: ${'$'}log" >&2
+                tail -n 15 "${'$'}log" >&2 2>/dev/null
+                [ -t 0 ] && read -r -p "Stiskněte Enter pro zavření…" _
+            fi
+            exit "${'$'}status"
             """.trimIndent() + "\n",
         )
         tmuxLauncher.setExecutable(true, false)
