@@ -975,7 +975,9 @@ class LinuxRuntime(private val context: Context) {
             # while OpenGL stays on llvmpipe. Debian's Mesa would otherwise put GL on zink as soon
             # as it sees the Vulkan ICD (Craft apps on the ScreenMate One, Adreno 610).
             turnip=/opt/mesa-kgsl/share/vulkan/icd.d/freedreno_icd.aarch64.json
-            lavapipe=/usr/share/vulkan/icd.d/lvp_icd.aarch64.json
+            # Debian trixie names it lvp_icd.json; other builds add the architecture.
+            lavapipe=/usr/share/vulkan/icd.d/lvp_icd.json
+            [ -f "${'$'}lavapipe" ] || lavapipe=/usr/share/vulkan/icd.d/lvp_icd.aarch64.json
             if [ ! -f /etc/droiddesk/gpu-off ]; then
                 . /etc/droiddesk/gpu-env.sh
             elif [ -e /dev/kgsl-3d0 ] && [ -f "${'$'}turnip" ]; then
