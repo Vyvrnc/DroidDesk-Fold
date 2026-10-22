@@ -45,6 +45,11 @@ class MainActivity : FlutterActivity() {
         linuxRuntime = LinuxRuntime(this)
         chrootRuntime = ChrootRuntime(this)
         desktopIntegration = DesktopIntegration(this)
+        // Login files of existing installs (etc/profile from the real paths of this Android
+        // user, no Termux second stage), before any terminal opens. Cheap and idempotent.
+        if (linuxRuntime.isBootstrapped()) {
+            thread(name = "repair-login-files") { linuxRuntime.repairLoginFiles() }
+        }
 
         handleHomeLaunch(intent)
         SharedStorage.requestIfNeeded(this)

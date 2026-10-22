@@ -271,6 +271,8 @@ object TerminalSessions {
         val runtime = LinuxRuntime(context.applicationContext)
         // droiddesk-usb/-serial/-net/-eth of this app version, also without a desktop start.
         runCatching { runtime.writeDeviceTools() }.onFailure { Log.w(TAG, "Device tools: ${it.message}") }
+        // etc/profile from this Android user's real paths (user 10 on Android Automotive).
+        runCatching { runtime.repairLoginFiles() }.onFailure { Log.w(TAG, "Login files: ${it.message}") }
         // Their bridges too: without the desktop DroidDeskService (which starts them) is not running.
         UsbBridge.start(context.applicationContext)
         NetBridge.start(context.applicationContext)

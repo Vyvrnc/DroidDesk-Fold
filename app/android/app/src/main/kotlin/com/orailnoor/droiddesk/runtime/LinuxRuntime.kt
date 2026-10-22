@@ -21,7 +21,10 @@ class LinuxRuntime(private val context: Context) {
     companion object {
         private const val TAG = "LinuxRuntime"
         private const val BOOTSTRAP_MARKER = ".bootstrap_extracted"
-        private const val SHEBANG_MARKER = ".relocated_text_paths_v3"
+        // v4: also files/home, files/apps and cache, so existing installs get one more pass.
+        private const val SHEBANG_MARKER = ".relocated_text_paths_v4"
+        // Termux's app data directory as compiled into its packages.
+        private const val TERMUX_DATA = "/data/data/com.termux"
         private const val ELF_PATCH_MARKER = ".elf_runpaths_patched"
         private const val DE_MARKER = ".de_installed"
         // Release asset built by tools/mesa-kgsl/build.sh (tag mesa-kgsl-<version>).
@@ -1560,6 +1563,7 @@ class LinuxRuntime(private val context: Context) {
             wrapDpkgForPath()
             wrapUpdateAlternatives()
             ensureSocketHookPrebuilt()
+            repairLoginFiles()
             return
         }
 
@@ -1617,6 +1621,9 @@ class LinuxRuntime(private val context: Context) {
 
         // Copy prebuilt socket hook from jniLibs to prefix/lib
         ensureSocketHookPrebuilt()
+
+        // Real-path etc/profile, relocated profile.d, no Termux second stage.
+        repairLoginFiles()
 
         marker.writeText("DroidDesk native bootstrap\n")
         tmpZip.delete()
@@ -1750,7 +1757,9 @@ class LinuxRuntime(private val context: Context) {
             relocateShebangs.writeText(
                 """
                 #!/system/bin/sh
-                old_prefix="/data/data/com.termux/files/usr"
+                # Split so the app's own text relocation (patchShebangs) cannot turn it
+                # into new_prefix: then this script did nothing at all.
+                old_prefix="/data/data/com.""termux/files/usr"
                 new_prefix="${prefixDir.absolutePath}"
                 scan_marker="${'$'}1"
                 [ -f "${'$'}scan_marker" ] || exit 0
@@ -1945,11 +1954,104 @@ class LinuxRuntime(private val context: Context) {
     }
 
     // ── Shebang Patching ──
-    fun patchShebangs(force: Boolean = false) {
-        val oldPrefix = "/data/data/com.termux/files/usr"
-        val newPrefix = prefixDir.absolutePath
 
-        if (oldPrefix == newPrefix) return
+    /**
+     * Termux paths compiled into package scripts and the app's real directories for them.
+     * Everything comes from this app's own dirs: as Android user N they live under
+     * /data/user/N/<package>, never under a fixed /data/data (Android Automotive runs the
+     * app as user 10). Only files/usr used to be mapped, so profile.d/init-termux-properties.sh
+     * ran "mkdir /data/data/com.termux/files/home/.termux" and failed (ScreenMate One).
+     */
+    private fun termuxPathRelocations(): List<Pair<String, String>> = listOf(
+        "$TERMUX_DATA/files/usr" to prefixDir.absolutePath,
+        "$TERMUX_DATA/files/home" to homeDir.absolutePath,
+        "$TERMUX_DATA/files/apps" to File(baseDir, "apps").absolutePath,
+        "$TERMUX_DATA/cache" to context.cacheDir.absolutePath,
+    )
+
+    private fun relocateTermuxPaths(content: String, relocations: List<Pair<String, String>>): String {
+        if (!content.contains("$TERMUX_DATA/")) return content
+        var updated = content
+        for ((old, new) in relocations) updated = updated.replace(old, new)
+        return updated
+    }
+
+    /**
+     * Login files that a shell reads before any desktop start, repaired at every app start
+     * (cheap, idempotent; also called when a terminal profile starts):
+     * - $PREFIX/etc/profile is generated from the real paths. Termux's copy names
+     *   /data/data/com.termux/files/{usr/etc/profile.d,usr/etc/bash.bashrc,home/.bashrc}
+     *   and has no extension or shebang, so the text relocation never touched it, and a login
+     *   shell as another Android user skipped profile.d, bash.bashrc and ~/.bashrc.
+     * - profile.d scripts get the text relocation right away.
+     * - Termux's bootstrap second stage is marked done. Its profile.d fallback ran on the
+     *   first login shell, after the app's own setup had configured everything, and re-ran
+     *   the postinst of every installed package (py3compile errors on the ScreenMate One).
+     *   As it then failed it never deleted itself and would run in every login shell.
+     */
+    fun repairLoginFiles() {
+        runCatching { writeTermuxProfile() }.onFailure { Log.w(TAG, "etc/profile: ${it.message}") }
+        runCatching {
+            val relocations = termuxPathRelocations()
+            File(prefixDir, "etc/profile.d").listFiles { file -> file.isFile && file.name.endsWith("sh") }
+                ?.forEach { file ->
+                    val content = file.readText()
+                    val updated = relocateTermuxPaths(content, relocations)
+                    if (updated != content) file.writeText(updated)
+                }
+        }.onFailure { Log.w(TAG, "profile.d relocation: ${it.message}") }
+        runCatching { disableBootstrapSecondStage() }
+            .onFailure { Log.w(TAG, "Bootstrap second stage: ${it.message}") }
+    }
+
+    private fun writeTermuxProfile() {
+        val etc = File(prefixDir, "etc")
+        if (!etc.isDirectory) return
+        val prefix = prefixDir.absolutePath
+        val home = homeDir.absolutePath
+        val profile = File(etc, "profile")
+        val content = """
+            # Written by DroidDesk at every app start from this Android user's real paths
+            # (Termux's own profile names /data/data/com.termux, which does not exist here).
+            for i in "$prefix/etc/profile.d"/*.sh; do
+            	if [ -r "${'$'}i" ]; then
+            		. "${'$'}i"
+            	fi
+            done
+            unset i
+
+            # Source etc/bash.bashrc and ~/.bashrc also for interactive bash login shells:
+            if [ "${'$'}BASH" ]; then
+            	if [[ "${'$'}-" == *"i"* ]]; then
+            		if [ -r "$prefix/etc/bash.bashrc" ]; then
+            			. "$prefix/etc/bash.bashrc"
+            		fi
+            		if [ -r "$home/.bashrc" ]; then
+            			. "$home/.bashrc"
+            		fi
+            	fi
+            fi
+        """.trimIndent() + "\n"
+        if (profile.isFile && profile.readText() == content) return
+        profile.writeText(content)
+        Log.i(TAG, "Wrote ${profile.path}")
+    }
+
+    private fun disableBootstrapSecondStage() {
+        val dir = File(prefixDir, "etc/termux/termux-bootstrap/second-stage")
+        if (dir.isDirectory) {
+            val lock = File(dir, "termux-bootstrap-second-stage.sh.lock")
+            // The same lock the second stage itself creates (a symlink, never deleted).
+            if (!java.nio.file.Files.exists(lock.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                android.system.Os.symlink("termux-bootstrap-second-stage.sh", lock.absolutePath)
+            }
+        }
+        val fallback = File(prefixDir, "etc/profile.d/01-termux-bootstrap-second-stage-fallback.sh")
+        if (fallback.exists() && fallback.delete()) Log.i(TAG, "Removed the bootstrap second stage fallback")
+    }
+
+    fun patchShebangs(force: Boolean = false) {
+        val relocations = termuxPathRelocations()
 
         val markerFile = File(prefixDir, SHEBANG_MARKER)
         if (!force && markerFile.exists()) {
@@ -1957,7 +2059,7 @@ class LinuxRuntime(private val context: Context) {
             return
         }
 
-        Log.i(TAG, "Patching shebangs: $oldPrefix -> $newPrefix")
+        Log.i(TAG, "Relocating Termux paths: $relocations")
         var patchCount = 0
 
         val dirsToScan = listOf("bin", "libexec", "share", "etc", "var/lib/dpkg/info")
@@ -1982,8 +2084,8 @@ class LinuxRuntime(private val context: Context) {
                         )
                         if (isScript || isPathConfig) {
                             val content = file.readText()
-                            if (content.contains(oldPrefix)) {
-                                val updated = content.replace(oldPrefix, newPrefix)
+                            val updated = relocateTermuxPaths(content, relocations)
+                            if (updated != content) {
                                 file.writeText(updated)
                                 patchCount++
                             }
