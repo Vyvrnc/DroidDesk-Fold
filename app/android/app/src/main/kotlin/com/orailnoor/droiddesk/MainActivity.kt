@@ -29,6 +29,7 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val CHANNEL = "com.droiddesk/core"
         private const val TAG = "MainActivity"
+        private const val REQUEST_MICROPHONE = 4107
         private val packageOperationRunning = java.util.concurrent.atomic.AtomicBoolean(false)
     }
 
@@ -53,12 +54,29 @@ class MainActivity : FlutterActivity() {
 
         handleHomeLaunch(intent)
         SharedStorage.requestIfNeeded(this)
+        requestMicrophoneOnce()
+    }
+
+    /**
+     * Microphone for Linux programs (PulseAudio source). Asked once, and only after the storage
+     * request is settled, so the two dialogs do not race; "deny" sticks until the user grants it
+     * in the Android settings.
+     */
+    private fun requestMicrophoneOnce() {
+        if (!SharedStorage.isGranted(this)) return
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED) return
+        val prefs = getSharedPreferences("droiddesk_permissions", MODE_PRIVATE)
+        if (prefs.getBoolean("microphone_asked", false)) return
+        prefs.edit().putBoolean("microphone_asked", true).apply()
+        requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQUEST_MICROPHONE)
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == SharedStorage.REQUEST_CODE && SharedStorage.isGranted(this)) {
             SharedStorage.linkIntoHome(this)
+            requestMicrophoneOnce()
         }
     }
 
