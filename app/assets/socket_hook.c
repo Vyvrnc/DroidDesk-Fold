@@ -19,6 +19,25 @@
 #define NEW_PREFIX "/data/user/0/com.orailnoor.droiddesk/files/usr"
 #endif
 
+/*
+ * The prefix this copy of the hook serves, taken from its own path at load time
+ * (<prefix>/lib/libsocket_hook.so). The prebuilt binary then also works when the app
+ * runs as another Android user (/data/user/10/... on Android Automotive, ScreenMate
+ * One). NEW_PREFIX stays the fallback and what an on-device build bakes in.
+ */
+static char hook_prefix[512] = NEW_PREFIX;
+
+__attribute__((constructor)) static void init_hook_prefix(void) {
+    Dl_info info;
+    static const char suffix[] = "/lib/libsocket_hook.so";
+    if (!dladdr((void *) init_hook_prefix, &info) || !info.dli_fname) return;
+    size_t len = strlen(info.dli_fname), suffix_len = sizeof(suffix) - 1;
+    if (len <= suffix_len || len - suffix_len >= sizeof(hook_prefix)) return;
+    if (strcmp(info.dli_fname + len - suffix_len, suffix) != 0) return;
+    memcpy(hook_prefix, info.dli_fname, len - suffix_len);
+    hook_prefix[len - suffix_len] = 0;
+}
+
 static const char *TERMUX_PREFIX = "/data/data/com.termux/files/usr";
 static const char *REL_TERMUX_PREFIX = "data/data/com.termux/files/usr";
 static const char *REL_TERMUX_BASE = "data/data/com.termux";
@@ -147,12 +166,12 @@ static const char* strip_dot_slash(const char *path) {
  * prefix (files/home, files/apps …). It used to become the prefix itself, so Termux's
  * profile sourcing /data/data/com.termux/files/home/.bashrc read a directory
  * ("-bash: .: …/.bashrc: is a directory" in the app terminal's login shell).
- * Returns NULL when NEW_PREFIX does not end in /usr.
+ * Returns NULL when hook_prefix does not end in /usr.
  */
 static const char* rewrite_files_path(const char *rest, char *buf, size_t buf_size) {
-    size_t prefix_len = strlen(NEW_PREFIX);
-    if (prefix_len < 4 || strcmp(NEW_PREFIX + prefix_len - 4, "/usr") != 0) return NULL;
-    snprintf(buf, buf_size, "%.*s/%s", (int) (prefix_len - 4), NEW_PREFIX, rest);
+    size_t prefix_len = strlen(hook_prefix);
+    if (prefix_len < 4 || strcmp(hook_prefix + prefix_len - 4, "/usr") != 0) return NULL;
+    snprintf(buf, buf_size, "%.*s/%s", (int) (prefix_len - 4), hook_prefix, rest);
     return buf;
 }
 
@@ -165,7 +184,7 @@ static const char* rewrite_path(const char* path, char* buf, size_t buf_size) {
     if (strncmp(p, REL_TERMUX_PREFIX, rel_len) == 0) {
         char next = p[rel_len];
         if (next == '/' || next == '\0') {
-            snprintf(buf, buf_size, "%s%s", NEW_PREFIX, p + rel_len);
+            snprintf(buf, buf_size, "%s%s", hook_prefix, p + rel_len);
             return buf;
         }
     }
@@ -176,14 +195,14 @@ static const char* rewrite_path(const char* path, char* buf, size_t buf_size) {
         if (strncmp(p + base_len, "/files/", 7) == 0 && rewrite_files_path(p + base_len + 7, buf, buf_size))
             return buf;
         if (next == '/' || next == '\0') {
-            snprintf(buf, buf_size, "%s", NEW_PREFIX);
+            snprintf(buf, buf_size, "%s", hook_prefix);
             return buf;
         }
     }
 
     size_t term_len = strlen(TERMUX_PREFIX);
     if (strncmp(path, TERMUX_PREFIX, term_len) == 0) {
-        snprintf(buf, buf_size, "%s%s", NEW_PREFIX, path + term_len);
+        snprintf(buf, buf_size, "%s%s", hook_prefix, path + term_len);
         return buf;
     }
 
@@ -194,7 +213,7 @@ static const char* rewrite_path(const char* path, char* buf, size_t buf_size) {
             rewrite_files_path(path + abs_base_len + 7, buf, buf_size))
             return buf;
         if (next == '/' || next == '\0') {
-            snprintf(buf, buf_size, "%s", NEW_PREFIX);
+            snprintf(buf, buf_size, "%s", hook_prefix);
             return buf;
         }
     }
@@ -208,7 +227,7 @@ static const char* rewrite_path(const char* path, char* buf, size_t buf_size) {
             if (i == 5 && tmpdir) {
                 snprintf(buf, buf_size, "%s/%s", tmpdir, path + len);
             } else {
-                snprintf(buf, buf_size, "%s/%s%s", NEW_PREFIX, subdirs[i], path + len);
+                snprintf(buf, buf_size, "%s/%s%s", hook_prefix, subdirs[i], path + len);
             }
             return buf;
         }
@@ -250,7 +269,8 @@ static socklen_t rewrite_unix_addr(const struct sockaddr *addr, socklen_t addrle
     const char *tmp_x11 = "/tmp/.X11-unix/X0";
     if (strcmp(original, termux_x11) == 0 || strcmp(original, tmp_x11) == 0) {
         const char *tmpdir = getenv("TMPDIR");
-        snprintf(buf, sizeof(buf), "%s/.X11-unix/X0", tmpdir ? tmpdir : NEW_PREFIX "/tmp");
+        if (tmpdir) snprintf(buf, sizeof(buf), "%s/.X11-unix/X0", tmpdir);
+        else snprintf(buf, sizeof(buf), "%s/tmp/.X11-unix/X0", hook_prefix);
         new_path = buf;
     } else {
         new_path = rewrite_path(original, buf, sizeof(buf));
@@ -501,7 +521,7 @@ int symlink(const char *target, const char *linkpath) {
     const char *new_target = target;
     size_t term_len = strlen(TERMUX_PREFIX);
     if (target && strncmp(target, TERMUX_PREFIX, term_len) == 0) {
-        snprintf(targetbuf, sizeof(targetbuf), "%s%s", NEW_PREFIX, target + term_len);
+        snprintf(targetbuf, sizeof(targetbuf), "%s%s", hook_prefix, target + term_len);
         new_target = targetbuf;
     }
     return real_symlink(new_target, rewrite_path(linkpath, linkbuf, sizeof(linkbuf)));
@@ -514,7 +534,7 @@ int symlinkat(const char *target, int dirfd, const char *linkpath) {
     const char *new_target = target;
     size_t term_len = strlen(TERMUX_PREFIX);
     if (target && strncmp(target, TERMUX_PREFIX, term_len) == 0) {
-        snprintf(targetbuf, sizeof(targetbuf), "%s%s", NEW_PREFIX, target + term_len);
+        snprintf(targetbuf, sizeof(targetbuf), "%s%s", hook_prefix, target + term_len);
         new_target = targetbuf;
     }
     return real_symlinkat(new_target, dirfd, rewrite_at_path(dirfd, linkpath, linkbuf, sizeof(linkbuf)));
@@ -708,16 +728,16 @@ static int exec_relocated_maintainer_script(const char *path, char *const argv[]
     char script_path[1024];
     const char *tmpdir = getenv("TMPDIR");
     if (tmpdir && *tmpdir) snprintf(script_path, sizeof(script_path), "%s/droiddesk-maintscript-XXXXXX", tmpdir);
-    else snprintf(script_path, sizeof(script_path), "%s/../tmp/droiddesk-maintscript-XXXXXX", NEW_PREFIX);
+    else snprintf(script_path, sizeof(script_path), "%s/../tmp/droiddesk-maintscript-XXXXXX", hook_prefix);
     int mem = mkstemp(script_path);
     if (mem < 0) { free(text); return -1; }
     fchmod(mem, 0700);
-    size_t old_len = strlen(TERMUX_PREFIX), new_len = strlen(NEW_PREFIX);
+    size_t old_len = strlen(TERMUX_PREFIX), new_len = strlen(hook_prefix);
     const char *at = text;
     const char *hit;
     int ok = 1;
     while (ok && (hit = strstr(at, TERMUX_PREFIX)) != NULL) {
-        ok = write(mem, at, (size_t) (hit - at)) == hit - at && write(mem, NEW_PREFIX, new_len) == (ssize_t) new_len;
+        ok = write(mem, at, (size_t) (hit - at)) == hit - at && write(mem, hook_prefix, new_len) == (ssize_t) new_len;
         at = hit + old_len;
     }
     if (ok) ok = write(mem, at, strlen(at)) == (ssize_t) strlen(at);
