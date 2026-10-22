@@ -119,3 +119,10 @@ Found after fold.69 on the ScreenMate (setup 12 verified A1, A4, A5, B1, B3, C2,
   line ("name of display: :0") when there is no renderer; take the first
   `error|fail|couldn` line instead.
 - A2, A3, A6 (sshd_config), A7, D1, D2, G1 still open as listed above.
+- **Debian zink works where ours does not** (root-09 test, 2026-10-22): with only the Turnip ICD
+  (no /opt/mesa-kgsl in LD_LIBRARY_PATH), Debian's Mesa 25.0.7 puts GL on zink by itself and it
+  renders on Adreno 610 (GL 4.0), while zink from /opt/mesa-kgsl 26.2.3 fails. glxgears was not
+  faster than llvmpipe there (253–261 vs 293–335 FPS, vsync on). Option for later: when the
+  self-test fails with our Mesa, try Debian's zink before falling back to llvmpipe.
+  fold.70 gpu-run with gpu-off keeps GL on llvmpipe (LIBGL_ALWAYS_SOFTWARE=1, GALLIUM_DRIVER=llvmpipe).
+  A7 is fixed in fold.70 by patching proot_cmd.py at every app start.

@@ -114,6 +114,14 @@ ensure_alsa_pulse() {
     } >> "$ASOUND"
 }
 
+# Craft apps draw through wgpu (Vulkan). Debian's lavapipe is the CPU fallback gpu-run lists after
+# Turnip, so the apps still start where Turnip does not come up (ScreenMate One, Adreno 610).
+ensure_vulkan_fallback() {
+    dpkg-query -W -f='${Status}' mesa-vulkan-drivers 2>/dev/null | grep -q 'install ok installed' && return 0
+    apt-get install -y -o DPkg::Lock::Timeout=300 mesa-vulkan-drivers ||
+        say "mesa-vulkan-drivers se nepodařilo nainstalovat, bez GPU aplikace nemusí naběhnout"
+}
+
 # Office documents name Calibri, Cambria and Consolas: Carlito and Caladea are metric-compatible
 # (Debian's fontconfig aliases them), Inconsolata stands in for Consolas through our alias.
 # Only missing ones are installed; uninstall leaves them (other apps share them).
@@ -265,8 +273,9 @@ do_install() {
     mkdir -p "$STATE"
     echo "$TAG" > "$STATE/$ID.version"
 
-    step 5 "Zvuk, písma a položka v menu..."
+    step 5 "Zvuk, Vulkan, písma a položka v menu..."
     ensure_alsa_pulse
+    ensure_vulkan_fallback
     ensure_office_fonts
     write_menu_override
     menu_sync

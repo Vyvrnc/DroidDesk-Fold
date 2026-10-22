@@ -36,7 +36,8 @@ class LinuxRuntime(private val context: Context) {
         private const val DROIDDESK_ETH_SHA256 = "daf82991ecc5189b14e12b4a344ad32f0a9d72914a7e1f96a66ea851186511c0"
         // Bump when debian-setup gains something existing installs need (rerun at session start).
         // 12: libxcb-keysyms1, Mesa library check, GPU self-test (fold.69).
-        private const val DEBIAN_SETUP_VERSION = 12
+        // 13: gpu-run Vulkan-only mode with lavapipe fallback, clearer self-test detail (fold.70).
+        private const val DEBIAN_SETUP_VERSION = 13
         private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
         // Craft app ids (table in assets/droiddesk/craft-install.sh); also guards the shell command.
         private val CRAFT_ID = Regex("[a-z]{1,20}craft")
@@ -969,8 +970,21 @@ class LinuxRuntime(private val context: Context) {
             DROIDDESK_GPU_ENV
             cat > /usr/local/bin/gpu-run <<'DROIDDESK_GPU_RUN'
             #!/bin/sh
-            # Runs one program with hardware OpenGL even while droiddesk-gpu is off.
-            . /etc/droiddesk/gpu-env.sh
+            # Runs one program with the GPU. With hardware OpenGL on: gpu-env.sh. With it off (by
+            # hand or by the self-test): Vulkan only, Turnip first and lavapipe as the fallback,
+            # while OpenGL stays on llvmpipe. Debian's Mesa would otherwise put GL on zink as soon
+            # as it sees the Vulkan ICD (Craft apps on the ScreenMate One, Adreno 610).
+            turnip=/opt/mesa-kgsl/share/vulkan/icd.d/freedreno_icd.aarch64.json
+            lavapipe=/usr/share/vulkan/icd.d/lvp_icd.aarch64.json
+            if [ ! -f /etc/droiddesk/gpu-off ]; then
+                . /etc/droiddesk/gpu-env.sh
+            elif [ -e /dev/kgsl-3d0 ] && [ -f "${'$'}turnip" ]; then
+                icd=${'$'}turnip
+                [ -f "${'$'}lavapipe" ] && icd="${'$'}icd:${'$'}lavapipe"
+                export VK_ICD_FILENAMES="${'$'}icd" VK_DRIVER_FILES="${'$'}icd"
+                export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe
+            fi
+            unset turnip lavapipe icd
             exec "${'$'}@"
             DROIDDESK_GPU_RUN
             chmod 755 /usr/local/bin/gpu-run
@@ -1052,6 +1066,8 @@ class LinuxRuntime(private val context: Context) {
                 exit 0
             fi
             detail=${'$'}renderer
+            # The first error line says more than the last line ("name of display: :0").
+            [ -n "${'$'}detail" ] || detail=${'$'}(printf '%s\n' "${'$'}out" | grep -iE 'error|fail|couldn' | head -n 1)
             [ -n "${'$'}detail" ] || detail=${'$'}(printf '%s\n' "${'$'}out" | grep -v '^[[:space:]]*${'$'}' | tail -n 1)
             reason="zink nefunkční${'$'}{model:+ (${'$'}model)}, používá se llvmpipe: ${'$'}{detail:-glxinfo skončil kódem ${'$'}status}"
             echo "${'$'}version fail ${'$'}reason" > "${'$'}dir/gpu-selftest"
@@ -2126,6 +2142,30 @@ class LinuxRuntime(private val context: Context) {
         }.onFailure { Log.w(TAG, "profile.d relocation: ${it.message}") }
         runCatching { disableBootstrapSecondStage() }
             .onFailure { Log.w(TAG, "Bootstrap second stage: ${it.message}") }
+        runCatching { patchProotDistroAppBinds() }
+            .onFailure { Log.w(TAG, "proot-distro binds: ${it.message}") }
+    }
+
+    /**
+     * proot-distro binds the app's cache and files/apps as /data/data/<package>/…, which is not
+     * this app's data dir for another Android user (/data/user/10/… on the ScreenMate One):
+     * every login then warned "can't sanitize binding … Permission denied". The two paths become
+     * the real ones; rerun at every app start, so a pkg upgrade of proot-distro is patched again.
+     */
+    private fun patchProotDistroAppBinds() {
+        val replacements = mapOf(
+            "f\"--bind=/data/data/{TERMUX_APP_PACKAGE}/cache\"" to "\"--bind=${context.cacheDir.absolutePath}\"",
+            "f\"/data/data/{TERMUX_APP_PACKAGE}/files/apps\"" to "\"${File(context.filesDir, "apps").absolutePath}\"",
+        )
+        File(prefixDir, "lib").listFiles { file -> file.isDirectory && file.name.startsWith("python3") }
+            ?.map { File(it, "site-packages/proot_distro/commands/login/proot_cmd.py") }
+            ?.filter { it.isFile }
+            ?.forEach { file ->
+                val content = file.readText()
+                var updated = content
+                replacements.forEach { (old, new) -> updated = updated.replace(old, new) }
+                if (updated != content) file.writeText(updated)
+            }
     }
 
     private fun writeTermuxProfile() {
