@@ -125,7 +125,14 @@ class _SetupProgressScreenState extends State<SetupProgressScreen> {
           gradient: DroidTheme.backgroundGradient,
         ),
         child: SafeArea(
-          child: Padding(
+          // Scrolls when the window is short (ScreenMate One: split screen, and a system bar
+          // drawn over the app without an inset cut "Launch DroidDesk" in half).
+          child: LayoutBuilder(
+            builder: (context, constraints) => SingleChildScrollView(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                child: IntrinsicHeight(
+                  child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 32),
             child: Column(
               children: [
@@ -282,8 +289,13 @@ class _SetupProgressScreenState extends State<SetupProgressScreen> {
                       ),
                 ],
 
-                const SizedBox(height: 48),
+                // Room for a bottom bar that overlaps the window without an inset.
+                const SizedBox(height: 96),
               ],
+            ),
+                  ),
+                ),
+              ),
             ),
           ),
         ),
