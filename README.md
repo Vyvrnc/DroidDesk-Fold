@@ -18,7 +18,7 @@
 > - `socket_hook` also redirects `execve()` of compiled-in `com.termux` paths (e.g. bash's command-not-found handler)
 >
 > **Debian container** (proot, for glibc programs such as the native Claude Code build)
-> - `start-debian`, `debian-run CMD`, `claude-debian [args]` (Claude Code in `~/projekty/Claude`)
+> - `start-debian`, `debian-run CMD`, `claude-debian [args]` (Claude Code in `~/projekty/Claude`, created when missing)
 > - `debian-setup` (run once, idempotent): basic tools, Android time zone and locales, Android fonts (emoji, CJK), Debian apps in the XFCE menu, faster apt, Termux binaries removed from Debian's `PATH`
 > - Hardware OpenGL through Zink on Turnip/KGSL (Adreno), a separate Mesa build in `/opt/mesa-kgsl` ([release asset](../../releases/tag/mesa-kgsl-26.2.3), build notes in `tools/mesa-kgsl`); `droiddesk-gpu on|off`, `gpu-run CMD`
 > - Sound (PulseAudio over TCP on 127.0.0.1), the XFCE session bus (notifications), OTG drives under `/storage`, DNS taken from Android's active network (follows a VPN)

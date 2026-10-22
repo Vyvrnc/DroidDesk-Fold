@@ -543,7 +543,7 @@ class LinuxRuntime(private val context: Context) {
                 --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
                 --env PROOT_LOADER_32="${File(prefixDir, "libexec/proot/loader32").absolutePath}" -- \
                 env DISPLAY="${'$'}DISPLAY" TERM="${'$'}{TERM:-xterm-256color}" \
-                bash -lc 'cd ~/projekty/Claude 2>/dev/null || cd ~; PATH="${'$'}HOME/.local/bin:${'$'}PATH"
+                bash -lc 'mkdir -p ~/projekty/Claude; cd ~/projekty/Claude || cd ~; PATH="${'$'}HOME/.local/bin:${'$'}PATH"
                     # proot has no uid map, so Claude Code (2.1.289+) turns local cross-session
                     # messaging off unless it gets a socket path. One socket per session; the
                     # ones of sessions that ended are removed.
@@ -578,7 +578,7 @@ class LinuxRuntime(private val context: Context) {
                 --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
                 --env PROOT_LOADER_32="${File(prefixDir, "libexec/proot/loader32").absolutePath}" -- \
                 env DISPLAY="${'$'}DISPLAY" TERM="${'$'}{TERM:-xterm-256color}" \
-                bash -lc 'cd ~/projekty/Claude 2>/dev/null || cd ~; exec codex --no-daemon "${'$'}@"' codex "${'$'}@"
+                bash -lc 'mkdir -p ~/projekty/Claude; cd ~/projekty/Claude || cd ~; exec codex --no-daemon "${'$'}@"' codex "${'$'}@"
             """.trimIndent() + "\n",
         )
         codexLauncher.setExecutable(true, false)
@@ -678,7 +678,7 @@ class LinuxRuntime(private val context: Context) {
         claudeTmuxLauncher.writeText(
             """
             #!${File(binDir, "bash").absolutePath}
-            exec "${binDir.absolutePath}/debian-tmux" claude bash -lc 'cd ~/projekty/Claude 2>/dev/null || cd ~; PATH="${'$'}HOME/.local/bin:${'$'}PATH"
+            exec "${binDir.absolutePath}/debian-tmux" claude bash -lc 'mkdir -p ~/projekty/Claude; cd ~/projekty/Claude || cd ~; PATH="${'$'}HOME/.local/bin:${'$'}PATH"
                     # proot has no uid map, so Claude Code (2.1.289+) turns local cross-session
                     # messaging off unless it gets a socket path. One socket per session; the
                     # ones of sessions that ended are removed.
@@ -693,7 +693,7 @@ class LinuxRuntime(private val context: Context) {
         codexTmuxLauncher.writeText(
             """
             #!${File(binDir, "bash").absolutePath}
-            exec "${binDir.absolutePath}/debian-tmux" codex bash -lc 'cd ~/projekty/Claude 2>/dev/null || cd ~; exec codex --no-daemon "${'$'}@"' codex "${'$'}@"
+            exec "${binDir.absolutePath}/debian-tmux" codex bash -lc 'mkdir -p ~/projekty/Claude; cd ~/projekty/Claude || cd ~; exec codex --no-daemon "${'$'}@"' codex "${'$'}@"
             """.trimIndent() + "\n",
         )
         codexTmuxLauncher.setExecutable(true, false)
