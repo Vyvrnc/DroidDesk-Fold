@@ -174,3 +174,12 @@ Craft test round on the ScreenMate with fold.70 (root-09, 2026-10-22):
   `chrome-sandbox` or `resources/app.asar` next to the binary) and runs them through a small
   `electron-run` wrapper that adds `--no-sandbox`, plus `--disable-gpu` where hardware GL is off
   or the GPU is virgl; check `--ozone-platform=x11` and Adreno (zink) separately.
+- **OAuth callbacks of Debian apps** (Claude desktop Google login, tablet 2026-10-26): the browser
+  (Termux Firefox, default for http/https) opens `claude://…`, but nothing on the Termux side
+  handles `x-scheme-handler/claude`. droiddesk-menu-sync writes
+  `debian-com.anthropic.Claude.desktop` with that MimeType, yet Termux's mimeinfo.cache /
+  mimeapps.list never learn it. Tablet workaround: `x-scheme-handler/claude=debian-com.anthropic.Claude.desktop`
+  in Termux `~/.config/mimeapps.list` [Default Applications]. Fix: menu-sync runs
+  `update-desktop-database` on the Termux applications dir and copies every
+  `x-scheme-handler/*` of the synced Debian entries into mimeapps.list (without overriding a
+  default the user set). Applies to every Debian app with OAuth over a custom scheme.
