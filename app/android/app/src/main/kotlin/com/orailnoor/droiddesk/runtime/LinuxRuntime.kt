@@ -37,7 +37,8 @@ class LinuxRuntime(private val context: Context) {
         // Bump when debian-setup gains something existing installs need (rerun at session start).
         // 12: libxcb-keysyms1, Mesa library check, GPU self-test (fold.69).
         // 13: gpu-run Vulkan-only mode with lavapipe fallback, clearer self-test detail (fold.70).
-        private const val DEBIAN_SETUP_VERSION = 13
+        // 14: gnome-keyring + Debian session bus, electron-run, URL schemes in menu-sync (fold.72).
+        private const val DEBIAN_SETUP_VERSION = 14
         private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
         // Craft app ids (table in assets/droiddesk/craft-install.sh); also guards the shell command.
         private val CRAFT_ID = Regex("[a-z]{1,20}craft")
@@ -758,6 +759,9 @@ class LinuxRuntime(private val context: Context) {
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
             apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates dbus-x11 xz-utils pulseaudio-utils libnotify-bin tmux proxychains4 xclip libxcb-keysyms1
+            # Debian's own session bus and keyring (droiddesk-session-bus, started by the app):
+            # Electron's safeStorage and other libsecret apps keep their secrets there.
+            apt-get install -y --no-install-recommends dbus-daemon dbus-bin gnome-keyring libsecret-1-0
 
             if [ -f "/usr/share/zoneinfo/$timeZone" ]; then
                 ln -sf "/usr/share/zoneinfo/$timeZone" /etc/localtime
@@ -847,6 +851,54 @@ class LinuxRuntime(private val context: Context) {
                 export GALLIUM_DRIVER=llvmpipe
             fi
             DROIDDESK_GUI_ENV
+
+            # The launchers pass the XFCE bus (/tmp/dbus-session), which belongs to Termux and does
+            # not answer Debian clients (uid across proot). Debian's own bus with gnome-keyring
+            # (droiddesk-session-bus, started by the app per session) takes over while it runs.
+            cat > /etc/profile.d/droiddesk-dbus.sh <<'DROIDDESK_DBUS_ENV'
+            if [ -S /tmp/dbus-debian ]; then export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-debian; fi
+            DROIDDESK_DBUS_ENV
+
+            # Electron apps (Claude desktop, VS Code, Obsidian…); droiddesk-menu-sync puts this in
+            # front of their menu Exec. In a Debian terminal: electron-run claude-desktop.
+            cat > /usr/local/bin/electron-run <<'DROIDDESK_ELECTRON_RUN'
+            #!/bin/bash
+            # electron-run PROGRAM [ARGS...]: an Electron app the way it runs in DroidDesk's Debian.
+            # Leading env, VAR=value and gpu-run words stay in front of the program.
+            #   --no-sandbox: proot runs everything as root; Chromium refuses root with its sandbox.
+            #   --disable-gpu: with hardware OpenGL off (/etc/droiddesk/gpu-off) or without Adreno
+            #     (virgl on Xclipse/Mali) the GPU process died and took the app with it (Tab S10 FE).
+            #     Adreno with hardware OpenGL on keeps the GPU (untested). DROIDDESK_ELECTRON_GPU=0|1
+            #     overrides the choice.
+            #   --password-store=gnome-libsecret: secrets go to gnome-keyring on Debian's session bus.
+            pre=()
+            while [ ${'$'}# -gt 0 ]; do
+                case "${'$'}1" in
+                    env|gpu-run|*/gpu-run|[A-Za-z_]*=*) pre+=("${'$'}1"); shift ;;
+                    *) break ;;
+                esac
+            done
+            [ ${'$'}# -gt 0 ] || { echo "Usage: electron-run PROGRAM [ARGS...]" >&2; exit 2; }
+            program=${'$'}1
+            shift
+            flags=(--no-sandbox --password-store=gnome-libsecret)
+            case "${'$'}{DROIDDESK_ELECTRON_GPU:-}" in
+                0) gpu=0 ;;
+                1) gpu=1 ;;
+                *) if [ -f /etc/droiddesk/gpu-off ] || [ ! -e /dev/kgsl-3d0 ]; then gpu=0; else gpu=1; fi ;;
+            esac
+            [ "${'$'}gpu" = 1 ] || flags+=(--disable-gpu)
+            exec env "${'$'}{pre[@]}" "${'$'}program" "${'$'}{flags[@]}" "${'$'}@"
+            DROIDDESK_ELECTRON_RUN
+            chmod 755 /usr/local/bin/electron-run
+            # A hand-made /usr/local/bin/claude-desktop with its own dbus-run-session and an
+            # empty-password keyring (tablet workaround) would bypass both: archived, not deleted.
+            if [ -f /usr/local/bin/claude-desktop ] && grep -q gnome-keyring-daemon /usr/local/bin/claude-desktop; then
+                droiddesk_bak=/usr/local/bin/claude-desktop.droiddesk-bak-${'$'}(date +%Y%m%d-%H%M%S)
+                mv /usr/local/bin/claude-desktop "${'$'}droiddesk_bak" && chmod 644 "${'$'}droiddesk_bak" &&
+                    echo "Hand-made /usr/local/bin/claude-desktop archived as ${'$'}droiddesk_bak (electron-run replaces it)"
+                unset droiddesk_bak
+            fi
 
             # proot-distro's termux-profile.sh appends the Termux bin directory to
             # PATH. Its bionic binaries cannot link inside Debian ("CANNOT LINK
@@ -1167,11 +1219,75 @@ class LinuxRuntime(private val context: Context) {
             RF="${debianRootfs(baseDir).absolutePath}"
             OUT="${File(homeDir, ".local/share/applications").absolutePath}"
             RUN="${File(binDir, "debian-run").absolutePath}"
+            MIMEAPPS="${File(homeDir, ".config/mimeapps.list").absolutePath}"
+            STATE="${File(homeDir, ".config/droiddesk/debian-scheme-handlers").absolutePath}"
             mkdir -p "${'$'}OUT"; rm -f "${'$'}OUT"/debian-*.desktop
             find_icon() {
                 case "${'$'}1" in /*) [ -f "${'$'}1" ] && echo "${'$'}RF${'$'}1"; return;; esac
                 f=$(ls /usr/share/icons/hicolor/*/apps/"${'$'}1".png /usr/share/icons/hicolor/scalable/apps/"${'$'}1".svg /usr/share/pixmaps/"${'$'}1".* 2>/dev/null | sort -V | tail -1)
                 [ -n "${'$'}f" ] && echo "${'$'}RF${'$'}f" || echo "${'$'}1"
+            }
+            # Electron apps run through electron-run (--no-sandbox, --disable-gpu where needed,
+            # gnome-keyring). Detected by the program the Exec line starts (after env, VAR=value and
+            # gpu-run): a known name, Electron's files next to the resolved binary, or a small
+            # launcher script that starts Electron (VS Code's bin/code).
+            ELECTRON_NAMES=" claude-desktop code code-insiders codium obsidian slack discord signal-desktop element-desktop teams-for-linux joplin bitwarden mattermost-desktop logseq notion-app github-desktop drawio "
+            is_electron() {
+                set -f
+                set -- ${'$'}1
+                set +f
+                while [ ${'$'}# -gt 0 ]; do
+                    case "${'$'}1" in env|gpu-run|*/gpu-run|*=*) shift ;; *) break ;; esac
+                done
+                [ ${'$'}# -gt 0 ] || return 1
+                bin=${'$'}1
+                case "${'$'}bin" in /*) ;; *) bin=$(command -v "${'$'}bin" 2>/dev/null) || return 1 ;; esac
+                case "${'$'}ELECTRON_NAMES" in *" ${'$'}{bin##*/} "*) return 0 ;; esac
+                real=$(readlink -f "${'$'}bin" 2>/dev/null) || return 1
+                dir=${'$'}{real%/*}
+                if [ -e "${'$'}dir/chrome-sandbox" ] || [ -e "${'$'}dir/resources/app.asar" ]; then return 0; fi
+                [ "$(head -c 2 "${'$'}real" 2>/dev/null)" = "#!" ] && [ "$(wc -c < "${'$'}real")" -lt 65536 ] &&
+                    grep -qE 'electron|ELECTRON_|app\.asar|chrome-sandbox' "${'$'}real"
+            }
+            # Custom URL schemes (OAuth callbacks such as claude://): Firefox and exo-open on the Termux
+            # side resolve them through mimeapps.list there. A scheme gets our entry only while it has
+            # no default; our lines are listed in STATE and go again with their entry (unless the user
+            # changed them). http, https and file stay with the Termux browser and file manager.
+            sync_schemes() {
+                tmp=$(mktemp -d) || return 0
+                for f in "${'$'}OUT"/debian-*.desktop; do
+                    [ -f "${'$'}f" ] || continue
+                    sed -n 's/^MimeType=//p' "${'$'}f" | head -n 1 | tr ';' '\n' |
+                        grep '^x-scheme-handler/.' | grep -vE '^x-scheme-handler/(https?|file)${'$'}' |
+                        sed "s|${'$'}|=${'$'}{f##*/}|"
+                done | sort -u > "${'$'}tmp/wanted"
+                mkdir -p "${'$'}{STATE%/*}" "${'$'}{MIMEAPPS%/*}"
+                [ -f "${'$'}STATE" ] || : > "${'$'}STATE"
+                : > "${'$'}tmp/owned"
+                grep -vxF -f "${'$'}tmp/wanted" "${'$'}STATE" > "${'$'}tmp/gone"
+                if [ -s "${'$'}tmp/gone" ] && [ -f "${'$'}MIMEAPPS" ]; then
+                    awk 'NR == FNR { gone[${'$'}0] = 1; next }
+                        /^\[/ { s = (${'$'}0 == "[Default Applications]") }
+                        !(s && (${'$'}0 in gone))' "${'$'}tmp/gone" "${'$'}MIMEAPPS" > "${'$'}tmp/mime" &&
+                        cat "${'$'}tmp/mime" > "${'$'}MIMEAPPS"
+                fi
+                if [ -s "${'$'}tmp/wanted" ] && [ ! -f "${'$'}MIMEAPPS" ]; then : > "${'$'}MIMEAPPS"; fi
+                while IFS= read -r line; do
+                    key=${'$'}{line%%=*}
+                    current=$(awk -v k="${'$'}key" '/^\[/ { s = (${'$'}0 == "[Default Applications]"); next }
+                        s && index(${'$'}0, k "=") == 1 { print substr(${'$'}0, length(k) + 2); exit }' "${'$'}MIMEAPPS")
+                    if [ -z "${'$'}current" ]; then
+                        awk -v l="${'$'}line" '
+                            /^\[/ { if (s && !done) { print l; done = 1 } s = (${'$'}0 == "[Default Applications]") }
+                            { print }
+                            END { if (!done) { if (!s) print "[Default Applications]"; print l } }' "${'$'}MIMEAPPS" > "${'$'}tmp/mime" &&
+                            cat "${'$'}tmp/mime" > "${'$'}MIMEAPPS" && echo "${'$'}line" >> "${'$'}tmp/owned"
+                    elif [ "${'$'}key=${'$'}current" = "${'$'}line" ] && grep -qxF "${'$'}line" "${'$'}STATE"; then
+                        echo "${'$'}line" >> "${'$'}tmp/owned"
+                    fi
+                done < "${'$'}tmp/wanted"
+                cat "${'$'}tmp/owned" > "${'$'}STATE"
+                rm -rf "${'$'}tmp"
             }
             for d in /usr/share/applications/*.desktop /usr/local/share/applications/*.desktop; do
                 [ -f "${'$'}d" ] || continue
@@ -1187,12 +1303,23 @@ class LinuxRuntime(private val context: Context) {
                     grep -vE '^(Exec|TryExec|Icon|Name(\[[^]]*\])?|DBusActivatable|Actions)=' > "${'$'}out"
                 {
                     echo "Name=${'$'}name (Debian)"
-                    # debian-run passes the XFCE session bus, so notifications and
-                    # portals work; dbus-launch used to leave a private bus per app.
-                    echo "Exec=${'$'}RUN ${'$'}exec_line"
+                    # debian-run's login shell takes Debian's session bus (droiddesk-dbus.sh) when
+                    # it runs; dbus-launch used to leave a private bus per app.
+                    if [ -x /usr/local/bin/electron-run ] && is_electron "${'$'}exec_line"; then
+                        echo "Exec=${'$'}RUN /usr/local/bin/electron-run ${'$'}exec_line"
+                        echo "X-DroidDesk-Electron=true"
+                    else
+                        echo "Exec=${'$'}RUN ${'$'}exec_line"
+                    fi
                     echo "Icon=$(find_icon "${'$'}icon")"
                 } >> "${'$'}out"
             done
+            sync_schemes
+            # Debian's update-desktop-database (when installed) writes mimeinfo.cache in the Termux
+            # applications directory; Termux's own binary cannot run inside proot.
+            if command -v update-desktop-database >/dev/null 2>&1; then
+                update-desktop-database -q "${'$'}OUT" 2>/dev/null || true
+            fi
             echo "droiddesk-menu-sync: $(ls "${'$'}OUT"/debian-*.desktop 2>/dev/null | wc -l) entries -> ${'$'}OUT"
             DROIDDESK_MENU_SYNC
             chmod 755 /usr/local/sbin/droiddesk-menu-sync
