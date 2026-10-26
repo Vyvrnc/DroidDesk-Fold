@@ -154,3 +154,11 @@ Craft test round on the ScreenMate with fold.70 (root-09, 2026-10-22):
   `/Xft/DPI` = 96 × zoom for the steps between, bigger cursor, QT_SCALE_FACTOR / winit scale for
   Qt and Craft apps), per screen (inner, cover, DeX). Keep today's stretched mode as a fast
   option for weak devices (ScreenMate One).
+- **Window decorations at 2×.** xfwm4 ignores Window Scaling; its themes are fixed-size pixmaps.
+  Termux's fluent-gtk-theme ships only Fluent, Fluent-Dark, Fluent-Light and the -compact
+  variants, no -hdpi/-xhdpi. `Default-xhdpi` helps a little. Build Fluent-Dark-xhdpi (and -hdpi)
+  xfwm4 variants from the upstream SVG assets (vinceliuice/Fluent-gtk-theme) and switch to them
+  together with the 200 % / 150 % zoom.
+- **Czech XFCE is not possible as is**: Termux packages ship no translations
+  (`$PREFIX/share/locale/cs` does not exist), so LANG/LANGUAGE change nothing on the native
+  desktop. Debian apps already follow the Android language.
