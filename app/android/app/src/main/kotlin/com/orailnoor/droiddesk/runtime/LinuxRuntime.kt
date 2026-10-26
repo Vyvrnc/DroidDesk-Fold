@@ -4080,14 +4080,21 @@ class LinuxRuntime(private val context: Context) {
         }.onFailure { Log.w(TAG, "PulseAudio client.conf: ${it.message}") }
         // The daemon itself starts without PULSE_CLIENTCONFIG, so autospawn = no cannot get in
         // its way; pactl in the same script keeps it and cannot autospawn.
+        // Every start attempt is appended to $TMPDIR/droiddesk-pulse.log (also /tmp in Debian):
+        // without adb there was no way to see why pulse did not come up (tablet, fold.69).
+        val log = File(tmpDir, "droiddesk-pulse.log").absolutePath
         return """
-            pa_daemon() { env -u PULSE_CLIENTCONFIG pulseaudio "${'$'}@"; }
+            pa_log="$log"
+            [ -f "${'$'}pa_log" ] && [ "${'$'}(wc -c < "${'$'}pa_log")" -gt 262144 ] && mv -f "${'$'}pa_log" "${'$'}pa_log.old"
+            echo "=== ${'$'}(date '+%F %T') PulseAudio start" >> "${'$'}pa_log"
+            # Start-up errors (before the daemon forks) go to the log; the running daemon stays quiet.
+            pa_daemon() { env -u PULSE_CLIENTCONFIG pulseaudio "${'$'}@" >> "${'$'}pa_log" 2>&1; echo "pulseaudio --start exit ${'$'}?" >> "${'$'}pa_log"; }
             timeout 2 pulseaudio -k >/dev/null 2>&1 || true
             pkill -9 -x pulseaudio >/dev/null 2>&1 || true
             if [ "${if (aaudio) "1" else "0"}" = "1" ]; then
                 pa_daemon --start --exit-idle-time=-1 $configArgs\
                     --load=module-aaudio-sink \
-                    --load="$tcp" >/dev/null 2>&1 || true
+                    --load="$tcp" || true
                 audio_ready=0
                 for attempt in 1 2 3 4 5 6 7 8 9 10; do
                     if timeout 2 pactl list short sinks 2>/dev/null | grep -q AAudio_sink; then
@@ -4096,18 +4103,25 @@ class LinuxRuntime(private val context: Context) {
                     fi
                     sleep 0.1
                 done
+                echo "AAudio_sink ready: ${'$'}audio_ready" >> "${'$'}pa_log"
                 if [ "${'$'}audio_ready" != "1" ]; then
                     timeout 2 pulseaudio -k >/dev/null 2>&1 || true
                     pkill -9 -x pulseaudio >/dev/null 2>&1 || true
-                    pa_daemon --start --exit-idle-time=-1 --load="$tcp" >/dev/null 2>&1 || true
+                    pa_daemon --start --exit-idle-time=-1 --load="$tcp" || true
                 fi
             else
-                pa_daemon --start --exit-idle-time=-1 --load="$tcp" >/dev/null 2>&1 || true
+                pa_daemon --start --exit-idle-time=-1 --load="$tcp" || true
             fi
         """.trimIndent()
     }
 
     @Volatile private var pulseCheckRunning = false
+
+    /** An xfce4-session of this app (same uid) is running, whoever started it. */
+    private fun desktopProcessAlive(): Boolean =
+        File("/proc").listFiles { file -> file.name.all(Char::isDigit) }.orEmpty().any { proc ->
+            runCatching { File(proc, "comm").readText().trim() == "xfce4-session" }.getOrDefault(false)
+        }
 
     /**
      * PulseAudio watchdog, called by DroidDeskService every ~20 s. When the daemon does not
@@ -4117,7 +4131,9 @@ class LinuxRuntime(private val context: Context) {
      * PulseAudio refuses root. Only while the native desktop session runs.
      */
     fun ensurePulseAudio() {
-        if (pulseCheckRunning || !isRunning() || !isBootstrapped()) return
+        // isRunning() only knows a session this process started; after the app process was
+        // recreated the desktop may still run, so a live xfce4-session counts too.
+        if (pulseCheckRunning || !isBootstrapped() || !(isRunning() || desktopProcessAlive())) return
         pulseCheckRunning = true
         try {
             val script = "timeout 3 pactl info >/dev/null 2>&1 && exit 0\n" +
