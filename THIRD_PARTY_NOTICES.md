@@ -53,6 +53,10 @@ Relevant upstream projects include:
 - Default look: Fluent GTK and icon themes by Vince Liu (GPL-3.0), Termux packages
   `fluent-gtk-theme`, `fluent-icon-theme`: <https://github.com/vinceliuice/Fluent-gtk-theme>,
   <https://github.com/vinceliuice/Fluent-icon-theme>
+- `assets/droiddesk/themes/Fluent-Dark-xhdpi` and `-xxhdpi`: the xfwm4 window decorations of
+  Fluent-Dark (GPL-3.0) rendered at 2× and 3× from `src/xfwm4/assets-Dark.svg` of
+  vinceliuice/Fluent-gtk-theme commit 7a49a464b0188c340101c52965c18190b1c694cf with Inkscape;
+  the source SVG is in that repository.
 - Claude Code (Anthropic, proprietary; not redistributed): the app catalog runs Anthropic's
   installer `https://claude.ai/install.sh` inside Debian on request, under Anthropic's terms
 

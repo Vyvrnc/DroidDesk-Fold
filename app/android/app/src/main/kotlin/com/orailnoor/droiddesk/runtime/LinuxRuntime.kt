@@ -2276,6 +2276,32 @@ class LinuxRuntime(private val context: Context) {
             .onFailure { Log.w(TAG, "Bootstrap second stage: ${it.message}") }
         runCatching { patchProotDistroAppBinds() }
             .onFailure { Log.w(TAG, "proot-distro binds: ${it.message}") }
+        runCatching { installBundledThemes() }
+            .onFailure { Log.w(TAG, "Bundled themes: ${it.message}") }
+    }
+
+    /**
+     * HiDPI window decorations shipped in the APK (assets/droiddesk/themes: Fluent-Dark-xhdpi 2×,
+     * -xxhdpi 3×; xfwm4 does not scale its pixmaps with Window Scaling) are copied to
+     * ~/.local/share/themes, where xfwm4 finds them. Files are rewritten only when they differ.
+     */
+    private fun installBundledThemes() {
+        val target = File(homeDir, ".local/share/themes")
+        fun copy(assetPath: String, dest: File) {
+            val children = context.assets.list(assetPath).orEmpty()
+            if (children.isEmpty()) {
+                val bytes = context.assets.open(assetPath).use { it.readBytes() }
+                if (!dest.isFile || !dest.readBytes().contentEquals(bytes)) {
+                    dest.parentFile?.mkdirs()
+                    dest.writeBytes(bytes)
+                }
+                return
+            }
+            children.forEach { copy("$assetPath/$it", File(dest, it)) }
+        }
+        context.assets.list("droiddesk/themes").orEmpty().forEach { theme ->
+            copy("droiddesk/themes/$theme", File(target, theme))
+        }
     }
 
     /**
