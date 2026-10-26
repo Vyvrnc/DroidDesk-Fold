@@ -142,3 +142,15 @@ Craft test round on the ScreenMate with fold.70 (root-09, 2026-10-22):
   blaming WordCraft. Paste works.
 - `/proc/loadavg` in proot is a static file from proot-distro's sysdata: nothing in Debian
   should rely on it.
+
+## Display scaling (tablet, 2026-10-26)
+
+- **Sharp zoom.** The zoom button (Wide/Phone/Monitor 125–200 %) lowers the X resolution and
+  stretches it (`DisplayProfile.kt`: X resolution = window / scale, `displayStretch`), so anything
+  above 100 % is blurry; 125–175 % even more (non-integer stretch). Workaround that works:
+  DroidDesk zoom at 100 % and XFCE Appearance → Window Scaling 2× (integer only), in-between
+  sizes through Appearance → Fonts → Custom DPI (120 ≈ 125 %, 144 ≈ 150 %, 168 ≈ 175 %).
+  Plan: X server always native; zoom maps to xsettings (`/Gdk/WindowScalingFactor` 2 for 200 %,
+  `/Xft/DPI` = 96 × zoom for the steps between, bigger cursor, QT_SCALE_FACTOR / winit scale for
+  Qt and Craft apps), per screen (inner, cover, DeX). Keep today's stretched mode as a fast
+  option for weak devices (ScreenMate One).
