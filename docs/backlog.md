@@ -183,3 +183,18 @@ Craft test round on the ScreenMate with fold.70 (root-09, 2026-10-22):
   `update-desktop-database` on the Termux applications dir and copies every
   `x-scheme-handler/*` of the synced Debian entries into mimeapps.list (without overriding a
   default the user set). Applies to every Debian app with OAuth over a custom scheme.
+- **Secret storage for Debian apps** (Claude desktop, tablet): Electron safeStorage reports
+  "No system keyring"; Debian cannot use the Termux session bus
+  (`DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session` → "Did not receive a reply", likely
+  auth/uid across proot). Tablet workaround in `/usr/local/bin/claude-desktop`:
+  `dbus-run-session` → `gnome-keyring-daemon --daemonize --unlock --components=secrets` (login
+  keyring, empty password, ~/.local/share/keyrings) → app with `--password-store=gnome-libsecret`.
+  Generic fix: a Debian session bus plus gnome-keyring started once per Debian session (shared by
+  all apps), and the Electron wrapper passes `--password-store=gnome-libsecret`. Decide whether
+  an empty-password keyring is acceptable (it is plain on disk) or unlock it with a key from
+  Android Keystore.
+- **xdg-open of http(s) from Debian** (Electron sign-in): droiddesk-open → android-app-launcher
+  in mode xdg opened Firefox, but XFCE also showed "Failed to execute default Web Browser …
+  /data/user/0/com.orailnoor.droiddesk/files/usr/bin/firefox". Looks like a second launch
+  attempt (exo-open) or a Debian env leaking into the native side; check how mode xdg handles
+  http(s) and which process shows the dialog.
