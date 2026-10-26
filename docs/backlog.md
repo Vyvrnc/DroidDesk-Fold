@@ -272,3 +272,15 @@ default. Copy of the config: tablet `/sdcard/Download/droiddesk-layout-2026-10-2
   screen and phones (size 60 / icons 36 is too big there), ties in with the sharp-scaling item.
   Apply only to new installs or on request ("Apply Windows layout" in Desktop tools), never over
   an existing user layout. No battery genmon without a battery (D2).
+
+## Web apps (Slack etc., tablet, 2026-10-26)
+
+Slack as a separate app on the tablet: Termux Firefox with its own profile (~/.mozilla-apps/slack,
+user.js + chrome/userChrome.css hide tabs and nav bar), `--no-remote --class Slack --name Slack`,
+launcher `slack-web.desktop`. Firefox sets its own `_NET_WM_ICON`, so the tasklist showed the
+Firefox icon (profile `chrome/icons/default/main-window.png` is ignored). Being tested: 
+`x11-seticon.py CLASS ICON.png [PID]` (python3 + ctypes on libX11, minimal PNG decoder, sets
+`_NET_WM_ICON` on windows of that WM_CLASS; re-applies for 60 s because Firefox overwrites it
+after map) started by a `slack-app` wrapper. Plan: a generic "web app" helper in DroidDesk
+(name, URL, icon → profile, .desktop, icon fix), also for Teams, Outlook, Meet; maybe a small
+UI in Desktop tools.
