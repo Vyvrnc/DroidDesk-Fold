@@ -2818,7 +2818,22 @@ class LinuxRuntime(private val context: Context) {
      */
     fun openWithLinuxApp(target: String): Boolean {
         if (!isBootstrapped()) return false
-        val script = "if [ -e \"\$1\" ]; then exec gio open \"\$1\"; fi; gio open \"\$1\" || exec exo-open \"\$1\""
+        // gio first, exo-open only when gio fails. The tablet showed exo's "Failed to execute
+        // default Web Browser" next to a Firefox that did open (Electron sign-in, fold.72): the log
+        // records gio's and exo-open's exit codes (scheme only, no URL) to tell which one failed.
+        val log = File(tmpDir, "droiddesk-open.log").absolutePath
+        val script = """
+            if [ -e "${'$'}1" ]; then exec gio open "${'$'}1"; fi
+            log="$log"
+            [ -f "${'$'}log" ] && [ "${'$'}(wc -c < "${'$'}log")" -gt 65536 ] && mv -f "${'$'}log" "${'$'}log.old"
+            gio open "${'$'}1" >/dev/null 2>&1
+            status=${'$'}?
+            [ "${'$'}status" -eq 0 ] && exit 0
+            exo-open "${'$'}1" >/dev/null 2>&1
+            exo=${'$'}?
+            echo "${'$'}(date "+%F %T") ${'$'}{1%%:*}: gio open exited ${'$'}status, exo-open exited ${'$'}exo" >> "${'$'}log"
+            exit "${'$'}exo"
+        """.trimIndent()
         return runCatching {
             val process = ProcessBuilder(File(binDir, "bash").absolutePath, "-c", script, "droiddesk-open", target)
                 .directory(homeDir)

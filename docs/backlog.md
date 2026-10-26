@@ -214,3 +214,43 @@ Craft test round on the ScreenMate with fold.70 (root-09, 2026-10-22):
   the app while the phone is unlocked (same as on a Linux desktop). Open: what removing the
   screen lock does to an `UnlockedDeviceRequired` key (unverified); before the first unlock after
   a reboot the keyring stays locked by design. Effort ~1–1.5 days incl. tests on Fold and tablet.
+
+### fold.72: implemented, untested on devices (2026-10-26)
+
+- **Electron**: `/usr/local/bin/electron-run` (debian-setup 14) adds `--no-sandbox
+  --password-store=gnome-libsecret`, plus `--disable-gpu` with `/etc/droiddesk/gpu-off` or without
+  `/dev/kgsl-3d0`; `DROIDDESK_ELECTRON_GPU=0|1` overrides. droiddesk-menu-sync routes an entry
+  through it when its program (after `env`, `VAR=…`, `gpu-run`) is a known Electron app, has
+  `chrome-sandbox` or `resources/app.asar` next to the resolved binary, or is a small launcher
+  script mentioning Electron; such entries carry `X-DroidDesk-Electron=true`. Chosen in menu-sync,
+  not as `/usr/local/share/applications` overrides like Craft: detection is generic, menu-sync
+  reads that directory itself, and the URL-scheme handler entries go through the same Exec. A
+  Debian terminal needs `electron-run claude-desktop`. Adreno with the GPU on is untested.
+- **URL schemes**: menu-sync adds `x-scheme-handler/<s>=debian-….desktop` to Termux
+  `~/.config/mimeapps.list` [Default Applications] only while the scheme has no default, records
+  its lines in `~/.config/droiddesk/debian-scheme-handlers` and removes them with the entry (unless
+  the user changed them). http, https and file are skipped. Debian's `update-desktop-database`
+  runs on the Termux applications dir when installed (Termux's cannot run inside proot).
+- **Keyring**: `KeyringSecret.kt` (AndroidKeyStore AES-256-GCM, `setUnlockedDeviceRequired`, falls
+  back to a key without it if refused; password in prefs `droiddesk_keyring` as IV + ciphertext).
+  Host `assets/droiddesk/droiddesk-session-bus`, copied into `/usr/local/sbin` and started through
+  debian-run at desktop start, terminal start and after debian-setup; stopped with Stop Server.
+  `/etc/profile.d/droiddesk-dbus.sh` switches login shells to `/tmp/dbus-debian` while the socket
+  exists. `dbus-daemon --nofork` (not `--fork`) and `gnome-keyring-daemon --foreground` keep
+  their pids known to the host, which is the first process of its proot. Old keyring without the
+  marker `.droiddesk-keystore` (tablet), a lost key (`--reset`) or a keyring that does not unlock
+  → archived as `login.keyring.bak-<date>`, new one created, Czech notice via notify-send.
+  Logs: `tmp/droiddesk-debian-bus.log`. Tested in a Debian trixie container (fresh, idempotent,
+  restart, wrong password, reset, migration); not yet in proot on a device.
+  The tablet's hand-made `/usr/local/bin/claude-desktop` (it contains `gnome-keyring-daemon`) is
+  archived by debian-setup 14 as `claude-desktop.droiddesk-bak-<date>`.
+- **Double browser launch** (not fixed, cause not proven): the only second attempt in the code is
+  `openWithLinuxApp` (AndroidAppBridge mode `xdg`): `gio open URL || exec exo-open URL`. The
+  dialog text is exo's WebBrowser helper, so gio open returned non-zero. Either gio launched
+  Firefox and still failed, or gio failed (no `x-scheme-handler/https` default; for http GLib may
+  also try to resolve the URL through gvfs) and exo's helper launched Firefox but reported a
+  failure because the started `firefox` process exited non-zero after handing the URL to the
+  running instance. `tmp/droiddesk-open.log` now records both exit codes (scheme only); with them:
+  gio ≠ 0 and Firefox opened by gio → drop the exo fallback for URLs; gio ≠ 0 with no window
+  from gio → set `x-scheme-handler/http(s)` defaults to Firefox in Termux mimeapps.list and use
+  gio only.
