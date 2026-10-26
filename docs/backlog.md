@@ -254,3 +254,21 @@ Craft test round on the ScreenMate with fold.70 (root-09, 2026-10-22):
   gio ≠ 0 and Firefox opened by gio → drop the exo fallback for URLs; gio ≠ 0 with no window
   from gio → set `x-scheme-handler/http(s)` defaults to Firefox in Termux mimeapps.list and use
   gio only.
+
+## Windows-like desktop as the default (Matěj, tablet, 2026-10-26)
+
+Matěj set XFCE up like Windows on the Tab S10 FE and wants it on the Fold and as the DroidDesk
+default. Copy of the config: tablet `/sdcard/Download/droiddesk-layout-2026-10-26/`
+(xfce4-panel.xml, xfwm4.xml, xsettings.xml, xfce4-desktop.xml).
+- One bottom panel: `p=8` (bottom centre), length 100 %, locked, size 60, icon-size 36, black
+  background, dark mode. Order: applicationsmenu (icon only) → launchers terminal / files /
+  browser → tasklist (no labels, grouping 1) → separator (expand) → systray (square icons) →
+  genmon droiddesk-battery → clock (%H:%M) → showdesktop at the far right. Orphan plugins
+  5/8/11/14 must not go into the default.
+- xfwm4: placement_mode=center, placement_ratio=20, button_layout `O|SHMC`, title left,
+  tile_on_move, snap_to_border.
+- Look: Fluent-Dark / Fluent-dark icons / xfwm4 Fluent-Dark, Sans 11, Adwaita cursor 50.
+- Default: write x/y from the resolution (p=8 + 100 % is enough); smaller panel on the Fold cover
+  screen and phones (size 60 / icons 36 is too big there), ties in with the sharp-scaling item.
+  Apply only to new installs or on request ("Apply Windows layout" in Desktop tools), never over
+  an existing user layout. No battery genmon without a battery (D2).
