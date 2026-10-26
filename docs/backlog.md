@@ -198,3 +198,19 @@ Craft test round on the ScreenMate with fold.70 (root-09, 2026-10-22):
   /data/user/0/com.orailnoor.droiddesk/files/usr/bin/firefox". Looks like a second launch
   attempt (exo-open) or a Debian env leaking into the native side; check how mode xdg handles
   http(s) and which process shows the dialog.
+  **Chosen direction (Matěj, 2026-10-26): unlock with a key from Android Keystore.** Design:
+  1. App: AES-256-GCM key in Android Keystore (non-exportable, `setUnlockedDeviceRequired(true)`),
+     a random 32-byte keyring password generated once, stored only encrypted (prefs/file).
+  2. Debian session host (like debian-tmux's): `dbus-daemon --session` on
+     `unix:path=/tmp/dbus-debian` plus `gnome-keyring-daemon --daemonize --unlock
+     --components=secrets`; the app decrypts the password and writes it to the host's stdin
+     (`--unlock` reads stdin) — never argv, env or a file. Debian launchers export
+     `DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-debian`.
+  3. The Electron wrapper adds `--password-store=gnome-libsecret`.
+  4. Migration: an existing empty-password keyring (tablet) is replaced; stored secrets are lost
+     once (sign in again), or re-encrypted if `ChangeWithMasterPassword` works.
+  5. Lost key (app reinstalled, Keystore wiped): keyring reset with a notice, secrets lost.
+  Protects the keyring file against copies of the app data; not against processes running as
+  the app while the phone is unlocked (same as on a Linux desktop). Open: what removing the
+  screen lock does to an `UnlockedDeviceRequired` key (unverified); before the first unlock after
+  a reboot the keyring stays locked by design. Effort ~1–1.5 days incl. tests on Fold and tablet.
