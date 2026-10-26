@@ -162,3 +162,15 @@ Craft test round on the ScreenMate with fold.70 (root-09, 2026-10-22):
 - **Czech XFCE is not possible as is**: Termux packages ship no translations
   (`$PREFIX/share/locale/cs` does not exist), so LANG/LANGUAGE change nothing on the native
   desktop. Debian apps already follow the Android language.
+
+## Electron apps in Debian (tablet, 2026-10-26)
+
+- Claude desktop (claude-desktop 3.6556.2 arm64) does nothing from the menu: as root in proot
+  Electron stops with "Running as root without --no-sandbox is not supported"; with
+  `--no-sandbox` only it exits 1 without a log (GPU process on virgl, Tab S10 FE); with
+  `--no-sandbox --disable-gpu` it runs. Tablet workaround: `/usr/local/bin/claude-desktop` →
+  `exec /usr/bin/claude-desktop --no-sandbox --disable-gpu "$@"`. Same will hit VS Code,
+  Obsidian, Slack desktop etc. Plan: droiddesk-menu-sync detects Electron apps (a
+  `chrome-sandbox` or `resources/app.asar` next to the binary) and runs them through a small
+  `electron-run` wrapper that adds `--no-sandbox`, plus `--disable-gpu` where hardware GL is off
+  or the GPU is virgl; check `--ozone-platform=x11` and Adreno (zink) separately.
