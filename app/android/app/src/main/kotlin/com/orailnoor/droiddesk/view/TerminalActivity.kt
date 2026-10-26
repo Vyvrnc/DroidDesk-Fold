@@ -273,6 +273,8 @@ object TerminalSessions {
         runCatching { runtime.writeDeviceTools() }.onFailure { Log.w(TAG, "Device tools: ${it.message}") }
         // etc/profile from this Android user's real paths (user 10 on Android Automotive).
         runCatching { runtime.repairLoginFiles() }.onFailure { Log.w(TAG, "Login files: ${it.message}") }
+        // Debian's session bus and keyring (Electron apps, libsecret), also without a desktop.
+        runCatching { runtime.ensureDebianSessionBusInBackground() }.onFailure { Log.w(TAG, "Debian bus: ${it.message}") }
         // Their bridges too: without the desktop DroidDeskService (which starts them) is not running.
         UsbBridge.start(context.applicationContext)
         NetBridge.start(context.applicationContext)

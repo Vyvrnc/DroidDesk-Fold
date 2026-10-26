@@ -99,6 +99,9 @@ class LinuxRuntime(private val context: Context) {
         // wrappers operate on the same session.
         @Volatile private var sessionProcess: Process? = null
         @Volatile private var dbusProcess: Process? = null
+        // Debian's session bus host (droiddesk-session-bus), see ensureDebianSessionBusInBackground.
+        @Volatile private var debianBusProcess: Process? = null
+        @Volatile private var debianBusStarting = false
     }
 
     @Volatile private var activeCommandProcess: Process? = null
@@ -3386,6 +3389,8 @@ class LinuxRuntime(private val context: Context) {
                 val code = process.waitFor()
                 Log.i(TAG, "Background debian-setup finished with $code (log ${log.path})")
                 if (code == 0 && gpuSelfTestNeeded()) runGpuSelfTest()
+                // Setup 14 brings gnome-keyring: the bus can start in this session already.
+                if (code == 0) ensureDebianSessionBusInBackground()
             } catch (error: Exception) {
                 Log.w(TAG, "Background debian-setup failed", error)
             } finally {
@@ -3433,6 +3438,128 @@ class LinuxRuntime(private val context: Context) {
         } catch (error: Exception) {
             Log.w(TAG, "GPU self-test failed to run", error)
         }
+    }
+
+    private fun debianFileExists(path: String): Boolean = java.nio.file.Files.exists(
+        File(debianRootfs(baseDir), path).toPath(),
+        java.nio.file.LinkOption.NOFOLLOW_LINKS,
+    )
+
+    /**
+     * Debian's own session bus (/tmp/dbus-debian) with gnome-keyring unlocked by a password from
+     * Android Keystore (KeyringSecret), so Electron's safeStorage and libsecret apps have a keyring.
+     * The host is assets/droiddesk/droiddesk-session-bus, copied into the rootfs and started
+     * through debian-run as the first process of its own proot (it stays until the bus ends, see
+     * there). The password goes to its stdin only. Idempotent here and in the host; called at
+     * desktop start, when a terminal profile starts and after debian-setup. Needs debian-setup 14
+     * (dbus-daemon, dbus-send, gnome-keyring). Log: tmp/droiddesk-debian-bus.log.
+     */
+    fun ensureDebianSessionBusInBackground() {
+        if (debianBusStarting || debianBusProcess?.isAlive == true) return
+        if (!isBootstrapped() || debianRootfsMarkers().none(File::exists)) return
+        if (!listOf("usr/bin/dbus-daemon", "usr/bin/dbus-send", "usr/bin/gnome-keyring-daemon").all { debianFileExists(it) }) return
+        debianBusStarting = true
+        Thread({
+            try {
+                startDebianSessionBus()
+            } catch (error: Exception) {
+                Log.w(TAG, "Debian session bus could not start", error)
+            } finally {
+                debianBusStarting = false
+            }
+        }, "debian-session-bus").apply { isDaemon = true }.start()
+    }
+
+    private fun startDebianSessionBus() {
+        val script = File(debianRootfs(baseDir), "usr/local/sbin/droiddesk-session-bus")
+        val content = context.assets.open("droiddesk/droiddesk-session-bus").use { it.readBytes() }
+        if (!script.isFile || !script.readBytes().contentEquals(content)) {
+            script.parentFile?.mkdirs()
+            val tmp = File(script.parentFile, ".droiddesk-session-bus.new")
+            tmp.writeBytes(content)
+            tmp.setExecutable(true, false)
+            check(tmp.renameTo(script)) { "rename to ${script.path} failed" }
+        }
+        val secret = KeyringSecret.load(context) ?: return
+        val run = File(binDir, "debian-run")
+        if (!run.canExecute()) writeDebianLauncher()
+        val log = File(tmpDir, "droiddesk-debian-bus.log")
+        if (log.length() > 262_144) log.renameTo(File(tmpDir, "droiddesk-debian-bus.log.old"))
+        val ready = File(tmpDir, "dbus-debian.ready")
+        val started = System.currentTimeMillis()
+        val command = mutableListOf(
+            File(prefixDir, "bin/bash").absolutePath, run.absolutePath, "/usr/local/sbin/droiddesk-session-bus",
+        )
+        if (secret.reset) command += "--reset"
+        val process = try {
+            ProcessBuilder(command)
+                .directory(homeDir)
+                .redirectErrorStream(true)
+                .redirectOutput(ProcessBuilder.Redirect.appendTo(log))
+                .also { it.environment().clear(); it.environment().putAll(getTermuxEnv()) }
+                .start()
+                .also { process ->
+                    // The password only ever travels through this pipe (no newline, then EOF).
+                    runCatching { process.outputStream.use { it.write(secret.password) } }
+                        .onFailure { Log.w(TAG, "Keyring password not delivered: ${it.message}") }
+                }
+        } finally {
+            secret.password.fill(0)
+        }
+        debianBusProcess = process
+        // Ready: the host exits 0 when a bus with an unlocked keyring is already there, or
+        // marks a fresh start with dbus-debian.ready.
+        val deadline = started + 30_000
+        var ok = false
+        while (System.currentTimeMillis() < deadline) {
+            if (ready.isFile && ready.lastModified() >= started - 2_000) { ok = true; break }
+            if (!process.isAlive) { ok = process.exitValue() == 0; break }
+            Thread.sleep(200)
+        }
+        if (!ok) {
+            Log.w(TAG, "Debian session bus/keyring not ready (log ${log.path})")
+            return
+        }
+        Log.i(TAG, "Debian session bus with unlocked keyring ready")
+        if (secret.reset) KeyringSecret.resetDone(context)
+        val notice = File(tmpDir, "dbus-debian.notice")
+        val text = notice.takeIf { it.isFile }?.readText()?.trim().orEmpty()
+        notice.delete()
+        if (text.isNotEmpty()) notifyDesktop("Klíčenka Debianu", text)
+    }
+
+    /** A desktop notification on the XFCE bus (xfce4-notifyd); only logged without a desktop. */
+    private fun notifyDesktop(title: String, text: String) {
+        Log.w(TAG, "$title: $text")
+        val notifySend = File(binDir, "notify-send")
+        if (!notifySend.canExecute()) return
+        runCatching {
+            ProcessBuilder(notifySend.absolutePath, "-i", "dialog-password", title, text)
+                .directory(homeDir)
+                .redirectErrorStream(true)
+                .redirectOutput(ProcessBuilder.Redirect.to(File("/dev/null")))
+                .also { it.environment().clear(); it.environment().putAll(getTermuxEnv()) }
+                .start()
+                .waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+        }
+    }
+
+    /**
+     * Ends the Debian session bus and the keyring (Stop Server). The pids come from the host's
+     * pid file; only processes that still look like the host's are signalled.
+     */
+    private fun stopDebianSessionBus() {
+        debianBusProcess?.destroy()
+        debianBusProcess = null
+        val pidFile = File(tmpDir, "dbus-debian.pid")
+        val pids = pidFile.takeIf { it.isFile }?.readText()?.trim()?.split(Regex("\\s+"))
+            ?.mapNotNull(String::toIntOrNull).orEmpty()
+        val names = listOf("dbus-daemon", "gnome-keyring-daemon", "droiddesk-session-bus")
+        pids.forEach { pid ->
+            val cmdline = runCatching { File("/proc/$pid/cmdline").readText().replace('\u0000', ' ') }.getOrDefault("")
+            if (names.any { cmdline.contains(it) }) android.os.Process.sendSignal(pid, 15)
+        }
+        listOf("dbus-debian", "dbus-debian.pid", "dbus-debian.ready").forEach { File(tmpDir, it).delete() }
     }
 
     /** Installs only PRoot, proot-distro and Debian's base rootfs. */
@@ -3958,6 +4085,7 @@ class LinuxRuntime(private val context: Context) {
         }
         refreshDebianSetupInBackground()
         ensureVirglServerInBackground()
+        ensureDebianSessionBusInBackground()
         if (selectedDesktop == "xfce4") ensureDefaultLookInBackground()
 
         // X11ServerService owns this socket. Never delete it from the client runtime.
@@ -4298,6 +4426,7 @@ class LinuxRuntime(private val context: Context) {
         killDesktopShell()
         dbusProcess?.destroyForcibly()
         dbusProcess = null
+        stopDebianSessionBus()
         virglServer?.destroyForcibly()
         virglServer = null
         Log.i(TAG, "Session stopped")

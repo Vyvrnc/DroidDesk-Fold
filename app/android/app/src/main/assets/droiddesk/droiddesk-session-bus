@@ -1,0 +1,158 @@
+#!/bin/bash
+# droiddesk-session-bus [--reset]: Debian's own D-Bus session bus (unix:path=/tmp/dbus-debian) with
+# gnome-keyring (secrets only) on it, the login keyring unlocked with the password the app writes
+# to stdin. The password comes from a key in Android Keystore (KeyringSecret.kt); it never goes
+# through argv, the environment or a file.
+#
+# The app copies this script from the APK (assets/droiddesk) into the rootfs and starts it through
+# debian-run once per desktop or terminal session. It is the first process of its own proot, and
+# proot-distro kills that proot when it exits, so it waits for the bus and takes the keyring with it.
+# The XFCE bus (/tmp/dbus-session) belongs to Termux and refuses Debian clients (uid across proot).
+#
+# Idempotent: a bus that answers with the login keyring unlocked is left as it is (exit 0). Otherwise
+# an older host is ended and everything starts fresh; /tmp/dbus-debian.ready marks success.
+# --reset: the key in Android Keystore was lost, so the keyring is archived and created anew.
+# A login keyring from before (manual setup with an empty password, tablet) is archived as
+# login.keyring.bak-<date>, never deleted. /tmp/dbus-debian.notice carries a message for the user.
+# Log: the app's tmp/droiddesk-debian-bus.log (stdout of this script).
+
+sock=/tmp/dbus-debian
+pidfile=/tmp/dbus-debian.pid
+ready=/tmp/dbus-debian.ready
+notice=/tmp/dbus-debian.notice
+keyrings=$HOME/.local/share/keyrings
+mark=$keyrings/.droiddesk-keystore
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$sock"
+# gnome-keyring's control socket; short, so the host path stays far below sun_path's 108 bytes.
+export XDG_RUNTIME_DIR=/tmp/xdg-debian
+
+reset=0
+[ "$1" = --reset ] && reset=1
+
+log() { echo "$(date '+%F %T') droiddesk-session-bus: $*"; }
+q() { dbus-send --session --print-reply --reply-timeout=2000 "$@" 2>/dev/null; }
+# NameHasOwner first: asking org.freedesktop.secrets itself would D-Bus-activate a locked daemon.
+has_secrets() {
+    q --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner \
+        string:org.freedesktop.secrets | grep -q 'boolean true'
+}
+unlocked() {
+    has_secrets && q --dest=org.freedesktop.secrets /org/freedesktop/secrets/collection/login \
+        org.freedesktop.DBus.Properties.Get string:org.freedesktop.Secret.Collection string:Locked |
+        grep -q 'boolean false'
+}
+# Only processes of an earlier host are ended (pid files survive reboots, pids get reused).
+ours() {
+    tr '\0' ' ' 2>/dev/null < "/proc/$1/cmdline" | grep -qE 'dbus-daemon|gnome-keyring-daemon|droiddesk-session-bus'
+}
+
+if [ "$reset" = 0 ] && [ -S "$sock" ] && unlocked; then
+    log "bus answers and the login keyring is unlocked, nothing to do"
+    exit 0
+fi
+
+# The password, read once (a retry needs it again); it stays in this shell's memory and goes to
+# gnome-keyring-daemon through a pipe from printf, a builtin, so it is never on a command line.
+IFS= read -r -d '' password || true
+exec 0</dev/null
+if [ -z "$password" ]; then
+    log "no password on stdin (the app starts this script and passes it)"
+    exit 2
+fi
+for tool in dbus-daemon dbus-send gnome-keyring-daemon; do
+    command -v "$tool" >/dev/null 2>&1 || { log "$tool missing, run debian-setup"; exit 1; }
+done
+
+log "starting (reset=$reset)"
+if [ -s "$pidfile" ]; then
+    for pid in $(cat "$pidfile"); do
+        [ "$pid" != "$$" ] && ours "$pid" && kill "$pid" 2>/dev/null && log "ended earlier process $pid"
+    done
+    sleep 0.5
+fi
+rm -f "$sock" "$ready" "$pidfile"
+mkdir -p -m 700 "$XDG_RUNTIME_DIR"
+rm -rf "$XDG_RUNTIME_DIR/keyring"
+
+dbus_pid=
+keyring_pid=
+cleanup() {
+    [ -n "$keyring_pid" ] && kill "$keyring_pid" 2>/dev/null
+    [ -n "$dbus_pid" ] && kill "$dbus_pid" 2>/dev/null
+    rm -f "$sock" "$ready" "$pidfile"
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT HUP
+
+# --nofork: the pid stays known, and the bus is this host's child.
+dbus-daemon --session --address="unix:path=$sock" --nofork --nopidfile &
+dbus_pid=$!
+echo "$$ $dbus_pid" > "$pidfile"
+for _ in $(seq 50); do
+    [ -S "$sock" ] && q --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetId >/dev/null && break
+    kill -0 "$dbus_pid" 2>/dev/null || break
+    sleep 0.1
+done
+if ! q --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetId >/dev/null; then
+    log "dbus-daemon did not come up on $sock"
+    exit 1
+fi
+log "bus up on $sock (dbus-daemon $dbus_pid)"
+
+mkdir -p "$keyrings"
+chmod 700 "$keyrings" 2>/dev/null
+archive() {
+    local backup
+    backup="$keyrings/login.keyring.bak-$(date +%Y%m%d-%H%M%S)"
+    mv "$keyrings/login.keyring" "$backup" || return 1
+    log "$1: login.keyring archived as ${backup##*/}"
+    echo "$2 Původní klíčenka je uložená jako ~/.local/share/keyrings/${backup##*/}." > "$notice"
+}
+if [ -f "$keyrings/login.keyring" ]; then
+    if [ "$reset" = 1 ]; then
+        archive "key in Android Keystore lost, keyring reset" \
+            "Klíčenka Debianu byla založena znovu, protože se ztratil její klíč v Androidu (přeinstalace aplikace nebo změna zámku obrazovky). Přihlášení aplikací v Debianu (např. Claude) je potřeba zadat znovu."
+    elif [ ! -f "$mark" ]; then
+        archive "keyring from before the Keystore unlock (manual setup, empty password)" \
+            "Klíčenka Debianu se nově odemyká klíčem z úložiště klíčů Androidu. Aplikace v Debianu (např. Claude) se možná budou chtít přihlásit znovu."
+    fi
+fi
+
+# --unlock reads the password from stdin and creates the login keyring when there is none.
+start_keyring() {
+    printf '%s' "$password" | gnome-keyring-daemon --foreground --unlock --components=secrets >/dev/null 2>&1 &
+    keyring_pid=$!
+    echo "$$ $dbus_pid $keyring_pid" > "$pidfile"
+    # A wrong password leaves the keyring locked: 2 s of a locked login keyring count as failure.
+    local locked=0
+    for _ in $(seq 100); do
+        unlocked && return 0
+        kill -0 "$keyring_pid" 2>/dev/null || return 1
+        if has_secrets; then
+            locked=$((locked + 1))
+            [ "$locked" -ge 20 ] && return 1
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+if ! start_keyring && [ -f "$keyrings/login.keyring" ]; then
+    # A keyring made with another password (not ours, or an older key): archive, start once more.
+    kill "$keyring_pid" 2>/dev/null
+    wait "$keyring_pid" 2>/dev/null
+    keyring_pid=
+    archive "login keyring did not unlock with the Keystore password" \
+        "Klíčenku Debianu se nepodařilo odemknout heslem z Androidu, proto byla založena znovu. Přihlášení aplikací v Debianu (např. Claude) je potřeba zadat znovu."
+    start_keyring
+fi
+unset password
+if ! unlocked; then
+    log "gnome-keyring did not unlock the login keyring; the bus stays, apps get no keyring"
+else
+    touch "$mark"
+    : > "$ready"
+    log "login keyring unlocked (gnome-keyring-daemon $keyring_pid)"
+fi
+
+wait "$dbus_pid"
+log "bus ended"
