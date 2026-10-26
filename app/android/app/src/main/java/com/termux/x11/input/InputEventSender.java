@@ -45,6 +45,9 @@ public final class InputEventSender {
 
     /** Set of pressed keys for which we've sent TextEvent. */
     private final TreeSet<Integer> mPressedTextKeys;
+
+    /** Accent of a dead key waiting for the next character (0 = none). */
+    private int mPendingAccent = 0;
     private final TreeSet<Integer> mPressedKeys;
 
     public InputEventSender(InputStub injector) {
@@ -222,6 +225,29 @@ public final class InputEventSender {
         int scancode = (preferScancodes || !no_modifiers) ? e.getScanCode(): 0;
 
         if (!preferScancodes) {
+            // Dead keys of a hardware keyboard (Czech ˇ and ´): Android flags the accent with
+            // COMBINING_ACCENT and leaves composing to the receiver. Hold it and compose it with
+            // the next character, as an Android text field would; X only got a plain "caron".
+            if (pressed && no_modifiers && (e.getUnicodeChar() & KeyCharacterMap.COMBINING_ACCENT) != 0) {
+                mPendingAccent = unicode;
+                mPressedTextKeys.add(keyCode);
+                return true;
+            }
+            if (pressed && unicode != 0 && no_modifiers && mPendingAccent != 0) {
+                int accent = mPendingAccent;
+                mPendingAccent = 0;
+                int composed = unicode == ' ' ? 0 : KeyCharacterMap.getDeadChar(accent, unicode);
+                if (composed != 0) {
+                    unicode = composed;
+                } else {
+                    // No composed form (or space): the accent itself, then the key as typed.
+                    mInjector.sendTextEvent(new String(Character.toChars(accent)).getBytes(UTF_8));
+                    if (unicode == ' ') {
+                        mPressedTextKeys.add(keyCode);
+                        return true;
+                    }
+                }
+            }
             if (pressed && unicode != 0 && no_modifiers) {
                 mPressedTextKeys.add(keyCode);
                 if ((e.getMetaState() & META_ALT_RIGHT_ON) != 0)
