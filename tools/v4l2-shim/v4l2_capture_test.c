@@ -10,7 +10,8 @@
  * 2. Capture like VideoCaptureModuleV4L2::StartCapture/CaptureProcess/StopCapture for three
  *    modes: open(O_RDWR|O_NONBLOCK), ENUM_FMT + preference, S_FMT, G_PARM/S_PARM, REQBUFS 4,
  *    QUERYBUF + mmap + QBUF, STREAMON, poll(POLLIN, 1000) + DQBUF + QBUF, munmap, STREAMOFF,
- *    close. Checks bytesused, the frame counter in rows 0-1 and the frame rate.
+ *    close. Checks bytesused, the frame counter in rows 0-1 and the frame rate. With
+ *    V4L2_TEST_SOURCE=bridge (frames from fake_camera_bridge) the counter only has to rise.
  * 3. fd behaviour: dup, fcntl(F_DUPFD_CLOEXEC/F_GETFL), fstat, close order, and that other
  *    fds (/dev/null) pass through untouched.
  *
@@ -32,6 +33,7 @@
 #include <unistd.h>
 
 static int failures;
+static int bridge_mode;
 #define CHECK(cond, ...)                                     \
     do {                                                     \
         if (!(cond)) {                                       \
@@ -284,7 +286,9 @@ static void capture(unsigned W, unsigned H, unsigned fps, uint32_t force, double
         frames++;
         CHECK(b.bytesused == sizeimage, "bytesused %u != %u", b.bytesused, sizeimage);
         uint32_t ctr = decode_counter(start[b.index], fourcc);
-        if (ctr != b.sequence) bad_counter++;
+        /* pattern: the image counter is the V4L2 sequence; camera bridge (V4L2_TEST_SOURCE=bridge,
+         * fake_camera_bridge): the bridge's frame seq, which only has to rise */
+        if (bridge_mode ? have_prev && ctr <= prev : ctr != b.sequence) bad_counter++;
         if (have_prev && ctr != prev + 1) skipped += ctr - prev - 1;
         prev = ctr;
         have_prev = 1;
@@ -304,7 +308,8 @@ static void capture(unsigned W, unsigned H, unsigned fps, uint32_t force, double
     CHECK(source_rate > fps * 0.9 && source_rate < fps * 1.1, "source rate %.1f not within 10 %% of %u",
           source_rate, fps);
     CHECK(delivered > fps * 0.5, "delivered rate %.1f below half of %u", delivered, fps);
-    CHECK(bad_counter == 0, "frame counter in the image != v4l2_buffer.sequence");
+    CHECK(bad_counter == 0, bridge_mode ? "bridge frame counter in the image did not rise"
+                                        : "frame counter in the image != v4l2_buffer.sequence");
     if (saved) {
         char path[256];
         snprintf(path, sizeof(path), "%s-%ux%u-%s.ppm", ppm, W, H, fcc(fourcc));
@@ -324,6 +329,8 @@ int main(int argc, char **argv) {
     double secs = argc > 1 ? atof(argv[1]) : 3.0;
     const char *ppm = argc > 2 ? argv[2] : NULL;
     setvbuf(stdout, NULL, _IOLBF, 0);
+    const char *src = getenv("V4L2_TEST_SOURCE");
+    bridge_mode = src && strcmp(src, "bridge") == 0;
 
     /* passthrough sanity: a normal fd is untouched */
     int nul = open("/dev/null", O_RDWR);

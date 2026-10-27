@@ -1,8 +1,9 @@
 /*
  * libdroiddesk_v4l2.so — LD_PRELOAD shim that makes /dev/video0 a V4L2 capture device in
- * user space, without a kernel node, root or v4l2loopback. Prototype: the frames come from
- * a built-in moving test pattern (frame_source_pattern.c); the Android camera bridge will
- * plug in behind the same frame source interface (frame_source.h).
+ * user space, without a kernel node, root or v4l2loopback. The frames come from the
+ * DroidDesk app's camera (frame_source_bridge.c, protocol in camera_bridge_protocol.h), or
+ * from a built-in moving test pattern (frame_source_pattern.c) when the app's camera is not
+ * available or DROIDDESK_V4L2_SOURCE=pattern. Both sit behind frame_source.h.
  *
  * Modelled on PipeWire's pipewire-v4l2 (MIT): the device fd is a real eventfd, so poll,
  * select, epoll, fcntl, dup and close work on it without hooks. The eventfd runs in
@@ -19,6 +20,10 @@
  *   DROIDDESK_V4L2_LOG    log file (default $TMPDIR/droiddesk-v4l2.log, else /tmp/...)
  *   DROIDDESK_V4L2_DEBUG  1 = log every ioctl on the fake device, 0 = only the important ones
  *   DROIDDESK_V4L2_OFF    1 = pass everything through (the library stays loaded but inert)
+ *   DROIDDESK_V4L2_SOURCE camera (default) or pattern
+ *   DROIDDESK_CAMERA_FACING front (default) or back; DROIDDESK_CAMERA_ROTATE extra degrees
+ *                         (0/90/180/270); DROIDDESK_CAMERA_MIRROR 1 = flip horizontally;
+ *                         DROIDDESK_CAMERA_SOCKET abstract socket name (tests)
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -131,6 +136,15 @@ __attribute__((format(printf, 1, 2))) static void logmsg(const char *fmt, ...) {
     ssize_t w = write(log_fd, buf, (size_t)n);
     (void)w;
     pthread_mutex_unlock(&log_lock);
+}
+
+void dd_log(const char *fmt, ...) {
+    char buf[900];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    logmsg("%s", buf);
 }
 
 /* ---- device state ----------------------------------------------------------------- */
@@ -306,18 +320,20 @@ static void *producer(void *arg) {
             memmove(c->queued, c->queued + 1, --c->nqueued * sizeof(c->queued[0]));
             c->buf[idx].state = BUF_FILLING;
         }
-        uint32_t seq = c->sequence++;
+        uint32_t seq = c->sequence;
         uint8_t *dst = idx >= 0 ? c->mem + (size_t)idx * c->stride : NULL;
         const struct dd_frame_source *src = c->source;
         void *ctx = c->source_ctx;
         pthread_mutex_unlock(&lock);
 
         struct timespec ts = {0, 0};
-        int ok = src->next_frame(ctx, dst, seq, &ts) == 0;
+        int r = src->next_frame(ctx, dst, seq, &ts);
+        int ok = r == 0;
 
         pthread_mutex_lock(&lock);
+        if (r >= 0 && c->sequence == seq) c->sequence++; /* a frame was due (sent or dropped) */
         if (idx < 0) {
-            c->dropped++;
+            if (r >= 0) c->dropped++;
         } else if (c->buf[idx].state == BUF_FILLING) {
             if (ok && !c->stop) {
                 c->buf[idx].state = BUF_DONE;
@@ -379,7 +395,10 @@ static void stream_off(struct cam *c) {
 static int stream_on(struct cam *c) {
     if (c->streaming) return 0;
     if (!c->nbufs) return EINVAL;
-    c->source = &dd_pattern_source;
+    /* The bridge source falls back to the pattern itself (without blocking here, under the
+     * lock) when the app's camera is not there. */
+    const char *want = getenv("DROIDDESK_V4L2_SOURCE");
+    c->source = want && strcmp(want, "pattern") == 0 ? &dd_pattern_source : &dd_bridge_source;
     c->source_ctx = c->source->start(&c->fmt, DEVICE_MINOR);
     if (!c->source_ctx) return EIO;
     c->stop = 0;

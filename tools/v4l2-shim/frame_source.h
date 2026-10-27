@@ -2,10 +2,10 @@
  * Frame source interface of libdroiddesk_v4l2.so.
  *
  * The V4L2 emulation (v4l2_shim.c) owns the fake device, the buffers and the ioctl state
- * machine. A frame source only produces pixels. The prototype has one source, a moving
- * test pattern (frame_source_pattern.c). The Android camera bridge replaces it later with
- * a source that copies the newest frame from the app's shared-memory ring (memfd +
- * @droiddesk.camera socket) into dst.
+ * machine. A frame source only produces pixels. Two sources: the Android camera bridge
+ * (frame_source_bridge.c, copies the newest frame from the app's shared-memory ring, see
+ * camera_bridge_protocol.h) and a moving test pattern (frame_source_pattern.c), which the
+ * bridge source also falls back to when the app's camera is not available.
  *
  * Threading: start/stop run on the application thread that issues STREAMON/STREAMOFF.
  * next_frame runs on the shim's producer thread, without the shim's lock held.
@@ -34,7 +34,9 @@ struct dd_frame_source {
      * (format->sizeimage bytes). dst == NULL means "no buffer queued, drop this frame"
      * (the source still paces itself). Fills *timestamp (CLOCK_MONOTONIC) of the frame.
      * Must return within about 100 ms, so STREAMOFF does not hang. Returns 0 when a
-     * frame was produced, -1 when none was (the producer just calls again).
+     * frame was written to dst, 1 when a frame was due but dst was NULL (dropped; the
+     * sequence number counts on), -1 when no frame was due (the producer just calls again
+     * with the same sequence number).
      */
     int (*next_frame)(void *ctx, uint8_t *dst, uint32_t sequence, struct timespec *timestamp);
     /* STREAMOFF or the last close. */
@@ -42,5 +44,9 @@ struct dd_frame_source {
 };
 
 extern const struct dd_frame_source dd_pattern_source;
+extern const struct dd_frame_source dd_bridge_source;
+
+/* The shim's log ($TMPDIR/droiddesk-v4l2.log), for the sources. */
+__attribute__((visibility("hidden"), format(printf, 1, 2))) void dd_log(const char *fmt, ...);
 
 #endif

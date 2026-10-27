@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Rebuilds jniLibs/arm64-v8a/libdroiddesk_v4l2.so (fake /dev/video0 for Termux Firefox,
 # see docs/camera-bridge-research.md "Prototype status") from tools/v4l2-shim/ with
-# NDK r28c, API 29, like build-socket-hook.sh. Also builds the bionic test program
-# tools/v4l2-shim/out/v4l2_capture_test (not committed). Run from the repo root.
+# NDK r28c, API 29, like build-socket-hook.sh. Also builds the bionic test programs
+# tools/v4l2-shim/out/v4l2_capture_test and out/fake_camera_bridge (not committed).
+# Run from the repo root.
 # Commit the source and the binary together.
 set -euo pipefail
 
@@ -20,9 +21,14 @@ cd /repo/tools/v4l2-shim
 \$T/aarch64-linux-android29-clang -shared -fPIC -O2 -Wall -Wextra -Wno-unused-parameter \
   -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -Wl,-z,max-page-size=16384 \
   -o /repo/app/android/app/src/main/jniLibs/arm64-v8a/libdroiddesk_v4l2.so \
-  v4l2_shim.c frame_source_pattern.c -ldl
+  v4l2_shim.c frame_source_bridge.c frame_source_pattern.c -ldl
 \$T/aarch64-linux-android29-clang -O2 -Wall -o out/v4l2_capture_test v4l2_capture_test.c
+\$T/aarch64-linux-android29-clang -O2 -Wall -Wextra -Wno-unused-parameter -o out/fake_camera_bridge \
+  fake_camera_bridge.c frame_source_pattern.c
 \$T/llvm-strip --strip-unneeded /repo/app/android/app/src/main/jniLibs/arm64-v8a/libdroiddesk_v4l2.so
 \$T/llvm-nm -D --defined-only /repo/app/android/app/src/main/jniLibs/arm64-v8a/libdroiddesk_v4l2.so \
   | grep -w -E 'open|openat|close|ioctl|mmap|mmap64|dup|fcntl|stat|fstat'
+if \$T/llvm-nm -D --defined-only /repo/app/android/app/src/main/jniLibs/arm64-v8a/libdroiddesk_v4l2.so | grep -w dd_log; then
+  echo 'dd_log must stay hidden'; exit 1
+fi
 "

@@ -25,6 +25,17 @@ echo "== shim before socket_hook"
 LD_PRELOAD=$V:$H $TMPDIR/v4l2_capture_test 2 | grep -E "fps|RESULT|FAIL" || fail=1
 echo "== socket_hook before shim (as the APK exports LD_PRELOAD)"
 LD_PRELOAD=$H:$V $TMPDIR/v4l2_capture_test 2 | grep -E "fps|RESULT|FAIL" || fail=1
+echo "== camera source through fake_camera_bridge (memfd over SCM_RIGHTS, seqlock slots)"
+cp $O/fake_camera_bridge $TMPDIR/ && chmod +x $TMPDIR/fake_camera_bridge
+$TMPDIR/fake_camera_bridge 2>$TMPDIR/fake-bridge.log &
+FAKE=$!
+sleep 1
+V4L2_TEST_SOURCE=bridge LD_PRELOAD=$V:$H $TMPDIR/v4l2_capture_test 3 $TMPDIR/bionic-bridge > $TMPDIR/bridge.out || fail=1
+grep -E "fps|RESULT|FAIL" $TMPDIR/bridge.out
+n=$(grep -c "camera bridge: ok v=1" $DROIDDESK_V4L2_LOG || true)
+echo "   $n of 4 streams from the bridge"
+[ "$n" = 4 ] || fail=1
+kill $FAKE; wait $FAKE 2>/dev/null || true
 echo "== inherited through bash, DROIDDESK_V4L2_OFF=1 makes it inert"
 LD_PRELOAD=$V bash -c "$TMPDIR/v4l2_capture_test 1 | tail -n 1"
 DROIDDESK_V4L2_OFF=1 LD_PRELOAD=$V bash -c "$TMPDIR/v4l2_capture_test 1 | grep -c FAIL" >/dev/null || true

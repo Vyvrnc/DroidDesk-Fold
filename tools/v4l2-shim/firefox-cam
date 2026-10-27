@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
-# firefox-cam — prototype launcher: Termux Firefox with the fake V4L2 camera
-# (libdroiddesk_v4l2.so, test pattern) in a separate profile.
+# firefox-cam — Termux Firefox with the DroidDesk camera: the fake V4L2 device
+# (libdroiddesk_v4l2.so) fed by the app's CameraBridge (Camera2), in a separate profile.
 #
-#   bash firefox-cam [URL]        default URL: https://webcamtests.com/
+#   firefox-cam [URL]             default URL: https://webcamtests.com/
+#
+#   DROIDDESK_CAMERA_FACING=back  back camera instead of the front one
+#   DROIDDESK_V4L2_SOURCE=pattern moving test pattern instead of the camera
+#   DROIDDESK_CAMERA_ROTATE=90|180|270, DROIDDESK_CAMERA_MIRROR=1  correct the picture by hand
+#
+# Without the app's camera (no permission, camera busy, bridge missing) the shim shows the
+# test pattern and says why in $TMPDIR/droiddesk-v4l2.log.
 #
 # Opt-in only: nothing else in DroidDesk preloads the shim. A new Firefox instance is needed
 # (--no-remote + own profile): camera capture runs in Firefox's parent process, so an
 # already running Firefox without the shim would get the URL and find no camera.
+# DroidDesk installs this script as $PREFIX/bin/firefox-cam.
 #
 # Logs: $TMPDIR/droiddesk-v4l2.log (shim), $TMPDIR/firefox-cam-moz.log* (Firefox camera
 # modules: CamerasParent, VideoEngine, webrtc_trace).
@@ -17,13 +25,13 @@ SHIM=$PREFIX/lib/libdroiddesk_v4l2.so
 PROFILE=${FIREFOX_CAM_PROFILE:-$HOME/.mozilla-apps/camera-test}
 
 if [ ! -f "$SHIM" ]; then
-    echo "missing $SHIM (copy jniLibs/arm64-v8a/libdroiddesk_v4l2.so there)" >&2
+    echo "missing $SHIM (DroidDesk copies it at desktop start; or copy jniLibs/arm64-v8a/libdroiddesk_v4l2.so there)" >&2
     exit 1
 fi
 
 mkdir -p "$PROFILE"
 cat > "$PROFILE/user.js" <<'EOF'
-// firefox-cam: fake V4L2 camera prototype
+// firefox-cam: DroidDesk camera (fake V4L2 device fed by the app)
 // Camera + WebGL crashes the tab (SIGSEGV) on these devices; keep WebGL off for camera tests.
 user_pref("webgl.disabled", true);
 // No D-Bus in Termux Firefox: never try the portal/PipeWire camera path.
@@ -34,7 +42,9 @@ user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("browser.aboutwelcome.enabled", false);
 EOF
 
+export DROIDDESK_V4L2_SOURCE="${DROIDDESK_V4L2_SOURCE:-camera}"
 export LD_PRELOAD="$SHIM${LD_PRELOAD:+:$LD_PRELOAD}"
+echo "firefox-cam: source $DROIDDESK_V4L2_SOURCE, ${DROIDDESK_CAMERA_FACING:-front} camera"
 export MOZ_LOG="${MOZ_LOG:-CamerasParent:4,VideoEngine:4,webrtc_trace:3}"
 export MOZ_LOG_FILE="${MOZ_LOG_FILE:-$TMPDIR/firefox-cam-moz.log}"
 echo "firefox-cam: LD_PRELOAD=$LD_PRELOAD"

@@ -225,7 +225,7 @@ static int pattern_next_frame(void *ctx, uint8_t *dst, uint32_t sequence, struct
     while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &p->next, NULL) == EINTR) {}
     clock_gettime(CLOCK_MONOTONIC, timestamp);
     if (dst) render(p, dst, sequence);
-    return dst ? 0 : -1;
+    return dst ? 0 : 1;
 }
 
 static void pattern_stop(void *ctx) {
