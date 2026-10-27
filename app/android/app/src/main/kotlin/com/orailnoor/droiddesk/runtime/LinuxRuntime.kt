@@ -3275,6 +3275,7 @@ class LinuxRuntime(private val context: Context) {
 
     @Volatile private var debianSetupRunning = false
     @Volatile private var virglServer: Process? = null
+    private val virglLock = Any()
     @Volatile private var virglStarting = false
 
     /**
@@ -3347,17 +3348,20 @@ class LinuxRuntime(private val context: Context) {
                         env["TMPDIR"] = tmpDir.absolutePath
                     }
                     .start()
-                virglServer = process
+                synchronized(virglLock) { virglServer = process }
                 Log.i(TAG, "virgl server started (ANGLE/Vulkan), socket ${socket.path}")
                 // When the server dies on its own, its socket goes too: Debian shells and the next
                 // native session get llvmpipe again. Programs started from a running XFCE keep its
                 // virpipe environment until the desktop restarts (which starts a new server).
                 Thread({
                     val code = runCatching { process.waitFor() }.getOrNull()
-                    if (virglServer === process) {
-                        Log.w(TAG, "virgl server exited ($code), see ${log.path}")
-                        virglSocket.delete()
-                        virglServer = null
+                    // Under the lock: a stop and a new server in between must keep the new socket.
+                    synchronized(virglLock) {
+                        if (virglServer === process) {
+                            Log.w(TAG, "virgl server exited ($code), see ${log.path}")
+                            virglSocket.delete()
+                            virglServer = null
+                        }
                     }
                 }, "virgl-server-watch").apply { isDaemon = true }.start()
             } catch (error: Exception) {
@@ -4576,13 +4580,15 @@ class LinuxRuntime(private val context: Context) {
         dbusProcess?.destroyForcibly()
         dbusProcess = null
         stopDebianSessionBus()
-        virglServer?.let {
-            it.destroyForcibly()
-            // A leftover socket would make the next session's environment pick virpipe
-            // before a new server is listening.
-            virglSocket.delete()
+        synchronized(virglLock) {
+            virglServer?.let {
+                it.destroyForcibly()
+                // A leftover socket would make the next session's environment pick virpipe
+                // before a new server is listening.
+                virglSocket.delete()
+            }
+            virglServer = null
         }
-        virglServer = null
         Log.i(TAG, "Session stopped")
     }
 
