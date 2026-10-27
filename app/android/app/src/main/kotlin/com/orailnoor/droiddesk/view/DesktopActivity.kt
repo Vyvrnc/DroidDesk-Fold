@@ -49,6 +49,7 @@ class DesktopActivity : Activity() {
     private lateinit var linuxRuntime: LinuxRuntime
     private lateinit var chrootRuntime: ChrootRuntime
     private var clipboardSync: ClipboardSync? = null
+    private var nativeClipboard = false
     private lateinit var placeholder: FrameLayout
     private var x11ServiceClient: X11ServiceClient? = null
     private var inputController: X11InputController? = null
@@ -210,7 +211,7 @@ class DesktopActivity : Activity() {
         // Ctrl turned every click into a right click (DeX, Fold).
         releaseModifiers()
         if (hasFocus) enableImmersiveMode()
-        if (hasFocus) startClipboardSync() else clipboardSync?.stop()
+        if (hasFocus && !nativeClipboard) startClipboardSync() else clipboardSync?.stop()
         updateDexKeyCapture(hasFocus)
         if (hasFocus && !isSetupDone) {
             isSetupDone = true
@@ -411,6 +412,10 @@ class DesktopActivity : Activity() {
         }
         addDesktopControls()
         lorieView?.requestFocus()
+        // The X server syncs the clipboard itself; the xclip poller could not reach a chroot.
+        lorieView?.enableClipboardSync()
+        nativeClipboard = true
+        clipboardSync?.stop()
         if (shouldStartSession) {
             startDesktopSessionIfRequested()
         } else {

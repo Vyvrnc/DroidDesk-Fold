@@ -881,6 +881,22 @@ public class LorieView extends SurfaceView implements InputStub {
         TouchInputHandler.refreshInputDevices();
     }
 
+    /**
+     * DroidDesk never calls reloadPreferences(), so the X server's clipboard bridge stayed off
+     * (GitHub issue #1). Called once the view is connected; leaves filtering and keys alone.
+     */
+    public void enableClipboardSync() {
+        clipboardSyncEnabled = true;
+        setClipboardSyncEnabled(true, true);
+        clipboard.removePrimaryClipChangedListener(clipboardListener);
+        // Announce what is on the Android clipboard already (copied before the desktop opened).
+        lastClipboardTimestamp = 0;
+        if (hasWindowFocus()) {
+            clipboard.addPrimaryClipChangedListener(clipboardListener);
+            checkForClipboardChange();
+        }
+    }
+
     // It is used in native code
     void setClipboardText(String text) {
         clipboard.setPrimaryClip(ClipData.newPlainText("X11 clipboard", text));
