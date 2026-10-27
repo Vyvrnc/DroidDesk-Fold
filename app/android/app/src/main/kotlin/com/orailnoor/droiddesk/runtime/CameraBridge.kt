@@ -399,7 +399,11 @@ object CameraBridge {
         /** Clockwise rotation that makes the sensor image upright on the current display. */
         private fun rotation(): Int {
             val display = displayRotation * 90
-            val auto = if (frontLens) (sensorOrientation - display + 360) % 360 else (sensorOrientation + display) % 360
+            // Display.rotation turns the screen counter-clockwise, so the back camera subtracts it
+            // and the (unmirrored) front camera adds it, as in Camera.setDisplayOrientation without
+            // its mirror step. The signs were swapped in fold.77/78: both cameras upside down on
+            // the unfolded Fold 7 (sensor 90/270, display rotation 90).
+            val auto = if (frontLens) (sensorOrientation + display) % 360 else (sensorOrientation - display + 360) % 360
             return (auto + request.rotate) % 360
         }
 
