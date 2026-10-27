@@ -158,10 +158,18 @@ static int connect_and_open(struct bridge *b) {
 /* "ok ..." with the shared memory fd: map it and check the layout. NULL = fine, else why not. */
 static const char *map_ring(struct bridge *b, const char *line) {
     if (b->shm_fd < 0) return "answer without the shared memory fd";
-    struct stat st;
-    if (fstat(b->shm_fd, &st) < 0 || st.st_size < (off_t)sizeof(struct ddcam_header))
+    /* The size comes from "size=" in the answer: Android's SharedMemory is ashmem, whose fstat
+     * reports st_size 0 (Fold 7, fold.77). fstat only for memfd-based bridges (tests). */
+    unsigned long long size = 0;
+    const char *field = strstr(line, " size=");
+    if (field) size = strtoull(field + 6, NULL, 10);
+    if (!size) {
+        struct stat st;
+        if (fstat(b->shm_fd, &st) == 0 && st.st_size > 0) size = (unsigned long long)st.st_size;
+    }
+    if (size < sizeof(struct ddcam_header) || size > (1ULL << 30))
         return "shared memory too small";
-    b->mem_size = (size_t)st.st_size;
+    b->mem_size = (size_t)size;
     void *m = mmap(NULL, b->mem_size, PROT_READ, MAP_SHARED, b->shm_fd, 0);
     if (m == MAP_FAILED) {
         b->mem_size = 0;
