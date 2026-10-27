@@ -1365,8 +1365,11 @@ class LinuxRuntime(private val context: Context) {
             }
             // Format and files: libdroiddesk_blk.so (LD_PRELOAD shim) and libdroiddesk_exfat.so
             // (exFAT files) from the APK into $PREFIX/lib, as a new inode whenever they
-            // changed (running tools may still have the old one mapped).
-            for (name in listOf("libdroiddesk_blk.so", "libdroiddesk_exfat.so", "libdroiddesk_ntfs.so")) {
+            // changed (running tools may still have the old one mapped). libdroiddesk_v4l2.so
+            // (fake /dev/video0, camera bridge prototype) is only copied; nothing preloads it
+            // unless the user starts Firefox through tools/v4l2-shim/firefox-cam.
+            for (name in listOf("libdroiddesk_blk.so", "libdroiddesk_exfat.so", "libdroiddesk_ntfs.so",
+                    "libdroiddesk_v4l2.so")) {
                 val source = File(context.applicationInfo.nativeLibraryDir, name)
                 val target = File(prefixDir, "lib/$name")
                 if (source.isFile && !(target.isFile && target.readBytes().contentEquals(source.readBytes()))) {

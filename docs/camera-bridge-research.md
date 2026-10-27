@@ -4,7 +4,7 @@ Goal: Google Meet / Slack huddles in a Linux browser inside DroidDesk-Fold (Term
 Debian Brave/Chromium/Electron under proot) use the phone/tablet camera. No root, so no
 v4l2loopback, no `/dev/video*`, no CUSE.
 
-Status: research only, nothing built. Claims marked **[unverified]** were not confirmed
+Status: research, plus the Spike A prototype (fake V4L2 device with a test pattern, see "Prototype status" at the end). Claims marked **[unverified]** were not confirmed
 against source or a device. Web content was treated as data.
 
 ## TL;DR
@@ -350,3 +350,160 @@ quirks 1.5–2. Device testing (Fold 7, Tab S10 FE, ScreenMate) + Meet/Slack 1�
   https://developer.android.com/about/versions/11/privacy/foreground-services ,
   https://developer.android.com/about/versions/14/changes/fgs-types-required
 - Chromium fake capture: https://codereview.chromium.org/2358093002 , https://testrtc.com/?p=176
+
+## Prototype status (Spike A, 2026-10-27)
+
+Built: `libdroiddesk_v4l2.so`, a user-space fake `/dev/video0` with a built-in moving test
+pattern. No Android camera code yet. Opt-in only: nothing preloads it unless Firefox is
+started through `tools/v4l2-shim/firefox-cam`.
+
+### Files
+
+| File | What |
+|---|---|
+| `tools/v4l2-shim/v4l2_shim.c` | The shim: open/openat (+64, fortify `__open_2`), close, dup/dup2/dup3, fcntl (F_DUPFD*), ioctl, mmap/mmap64, stat/lstat/fstat/fstatat (+64), access/faccessat. Bionic + glibc, LP64. |
+| `tools/v4l2-shim/frame_source.h` | Frame source interface (`start` / `next_frame` / `stop`). The Camera2 bridge plugs in here. |
+| `tools/v4l2-shim/frame_source_pattern.c` | Test pattern: scrolling 75 % bars, bouncing box, frame counter, `WxH fps`, a one-cell-per-frame ticker (one sweep per second = right fps), machine-readable counter in rows 0-1. |
+| `tools/v4l2-shim/v4l2_capture_test.c` | Replays Firefox's V4L2 sequence (below) and checks frames, counter, rate, fd behaviour. |
+| `tools/build-v4l2-shim.sh` | NDK r28c / API 29 build (Docker, same image as `build-socket-hook.sh`) → `app/android/app/src/main/jniLibs/arm64-v8a/libdroiddesk_v4l2.so` + bionic test binary in `tools/v4l2-shim/out/`. |
+| `tools/v4l2-shim/test-bionic.sh` | Runs the bionic build in `termux/termux-docker:aarch64` (Android libc/linker under qemu), alone and stacked with `libsocket_hook.so` in both orders. |
+| `tools/v4l2-shim/test-glibc.sh` | glibc build in Debian trixie; the test program plus `v4l2-ctl` and `ffmpeg -f v4l2`. |
+| `tools/v4l2-shim/firefox-cam` | Launcher: own profile, `webgl.disabled`, `allow-pipewire=false`, `LD_PRELOAD`, `MOZ_LOG`. |
+| `LinuxRuntime.writeDeviceTools()` | Copies the `.so` to `$PREFIX/lib` like `libdroiddesk_blk.so` (copy only, nothing loads it). |
+
+`socket_hook.c` is unchanged. The two libraries chain through `dlsym(RTLD_NEXT)`, so the
+order in `LD_PRELOAD` does not matter (tested both).
+
+### How Termux Firefox finds and drives a camera (verified at `FIREFOX_157_0_RELEASE`)
+
+- **Linux code path, not Android.** Termux patch
+  [`0001-configure-treat-termux-as-linux.patch`](https://github.com/termux/termux-packages/blob/master/x11-packages/firefox/0001-configure-treat-termux-as-linux.patch)
+  maps `*-android` to OS "GNU" / kernel "Linux", so `OS_TARGET` is Linux and
+  [`dom/media/systemservices/moz.build`](https://github.com/mozilla-firefox/firefox/blob/FIREFOX_157_0_RELEASE/dom/media/systemservices/moz.build#L32-L36)
+  does not build the Android capture backend. The factory always allows V4L2 and only tries
+  PipeWire with `MOZ_ENABLE_DBUS`, which `--disable-dbus` removes
+  ([video_capture_factory.cc L18-L31](https://github.com/mozilla-firefox/firefox/blob/FIREFOX_157_0_RELEASE/dom/media/systemservices/video_engine/video_capture_factory.cc#L18-L31)).
+- **Process: the parent (main) Firefox process.** `CamerasChild` talks to `CamerasParent` over
+  PBackground ([CamerasChild.cpp L42](https://github.com/mozilla-firefox/firefox/blob/FIREFOX_157_0_RELEASE/dom/media/systemservices/CamerasChild.cpp#L42)),
+  whose parent side lives in the main process. The build has `--disable-sandbox`, so nothing
+  blocks the preload or the fake fd. Consequence: the shim must be in the env of the *first*
+  Firefox process, so `firefox-cam` uses `--no-remote` and its own profile.
+- **Enumeration: a fixed probe, no readdir, no sysfs.** `open("/dev/video%d", O_RDONLY)` for
+  n = 0..63, `VIDIOC_QUERYCAP`, capture bit from `device_caps` when `V4L2_CAP_DEVICE_CAPS` is
+  set; name = `card`, unique id = `bus_info`
+  ([device_info_v4l2.cc L204-L299](https://github.com/mozilla-firefox/firefox/blob/FIREFOX_157_0_RELEASE/third_party/libwebrtc/modules/video_capture/linux/device_info_v4l2.cc#L204-L299),
+  [L388-L395](https://github.com/mozilla-firefox/firefox/blob/FIREFOX_157_0_RELEASE/third_party/libwebrtc/modules/video_capture/linux/device_info_v4l2.cc#L388-L395)).
+  Mozilla's fork adds an inotify thread on `/dev/` and `/dev/v4l/by-path/` for hotplug
+  (L154-L176). On Android these watches fail quietly; the fake device is always "present".
+- **Capabilities: `VIDIOC_TRY_FMT` over 15 formats × 13 sizes**, recorded when the returned
+  size equals the asked size. The *asked* fourcc is recorded, so the shim fails TRY_FMT with
+  EINVAL for formats it does not have (a spec-style substitution would list fake MJPEG/RGB
+  modes). The fps is guessed, not asked: **15 for width ≥ 800 (non-MJPEG), else 30**
+  (L397-L483). So pages get 1280x720 at 15 fps and 640x480 at 30 fps.
+- **Open for capture: device matched by `bus_info` prefix** (`Init`,
+  [video_capture_v4l2.cc L74-L112](https://github.com/mozilla-firefox/firefox/blob/FIREFOX_157_0_RELEASE/third_party/libwebrtc/modules/video_capture/linux/video_capture_v4l2.cc#L74-L112)),
+  so `bus_info` must be non-empty and unique per fake device.
+- **Capture sequence** ([video_capture_v4l2.cc L127-L484](https://github.com/mozilla-firefox/firefox/blob/FIREFOX_157_0_RELEASE/third_party/libwebrtc/modules/video_capture/linux/video_capture_v4l2.cc#L127-L484)):
+  `open(O_RDWR|O_NONBLOCK)` → `ENUM_FMT` (preference: HD = MJPEG, I420, YV12, YUYV, UYVY,
+  NV12 …; SD = I420 first) → `S_FMT` → `G_PARM` (+ `S_PARM` 1/maxFPS if `CAP_TIMEPERFRAME`) →
+  `REQBUFS` 4 × MMAP → `QUERYBUF` + `mmap(MAP_SHARED, m.offset)` + `QBUF` → `STREAMON` →
+  capture thread: **`poll(POLLIN, 1000 ms)`** + `DQBUF` + `QBUF` → stop: `munmap`,
+  `STREAMOFF`, `close`. No `select`, no `read`, no controls, no events, no ENUM_FRAMESIZES.
+  (§1.3 above says `select()`; Firefox 157 uses `poll()`.)
+
+### What the shim implements
+
+- `/dev/video0` (exact path) → a real **eventfd in semaphore mode**; its counter = filled
+  buffers waiting for DQBUF, so `poll`/`select`/`epoll` need no hook. `O_NONBLOCK`/`O_CLOEXEC`
+  from `open` carry over. An internal `F_DUPFD_CLOEXEC` copy keeps the eventfd alive for the
+  producer; dups via `dup`/`dup2`/`dup3`/`fcntl` are tracked (refcount); the last close stops
+  the stream and frees the buffers.
+- Buffers: one memfd (`memfd_create` syscall, temp-file fallback), a page-aligned slot per
+  buffer; `mmap` on the fake fd maps the memfd slot. A producer thread per stream calls the
+  frame source at its own pace and drops frames when no buffer is queued (sequence counts on).
+- ioctls: QUERYCAP (`driver droiddesk`, `card "DroidDesk Camera"`,
+  `bus_info platform:droiddesk-camera-0`, CAPTURE|STREAMING + DEVICE_CAPS), ENUM_FMT / G_FMT /
+  S_FMT / TRY_FMT (YU12, NV12, YUYV × 1280x720, 640x480), ENUM_FRAMESIZES /
+  ENUM_FRAMEINTERVALS (discrete, 30 and 15 fps), G_PARM / S_PARM (1-30 fps), ENUMINPUT /
+  G_INPUT / S_INPUT, REQBUFS (2-8, MMAP) / QUERYBUF / QBUF / DQBUF / STREAMON / STREAMOFF.
+  Controls and standards: EINVAL / ENODATA; anything else ENOTTY (logged). `stat`/`access`
+  see a char device 81:0.
+- Fork: `pthread_atfork` keeps the lock consistent; a child does not inherit the producer.
+- Env: `DROIDDESK_V4L2_LOG` (log path, default `$TMPDIR/droiddesk-v4l2.log`),
+  `DROIDDESK_V4L2_DEBUG=1` (every ioctl/mmap), `DROIDDESK_V4L2_OFF=1` (inert).
+
+### Test results (2026-10-27, no device)
+
+- **Bionic** (`test-bionic.sh`, termux-docker aarch64 under qemu, Android `libc.so` and
+  linker): PASS alone and stacked with `libsocket_hook.so` in both orders. Firefox sequence:
+  exactly one device, 6 capabilities (YU12/NV12/YUYV × 640x480@30, 1280x720@15). Capture
+  YU12 1280x720@15 → 15.0 fps, YU12 640x480 → 30.0, YUYV 640x480 → 30.0, NV12 1280x720 →
+  30.0 fps; 0 poll timeouts, 0 dropped, image counter = `v4l2_buffer.sequence` on every
+  frame; dup / F_DUPFD / fstat / F_GETFL work; no POLLIN after STREAMOFF; `/dev/null` ioctls
+  pass through (ENOTTY); inheritance through `bash` and `DROIDDESK_V4L2_OFF=1` checked.
+- **glibc** (`test-glibc.sh`, Debian trixie x86_64): the same program PASS; `v4l2-ctl --all`,
+  `--list-formats-ext`, `--stream-mmap=4 --stream-count=90` (YUYV 640x480, 30.00 fps, exact
+  byte count); `ffmpeg -f v4l2` I420 1280x720 → 90 frames at 30 fps, NV12 640x480 → PNG.
+  `v4l2-ctl` identifies nodes through `/sys/dev/char/81:0/uevent`; the test fakes that file
+  in a tmpfs (Firefox never reads sysfs).
+- Frames dumped as PNG in `tools/v4l2-shim/out/` (git-ignored) checked visually for all
+  three formats.
+- **Not tested: real Firefox.** No Termux Firefox could run here; that is the on-device step.
+
+### On-device test (Fold 7 / Tab S10 FE)
+
+1. Get the library into the prefix:
+   - after the next APK build nothing is needed, `writeDeviceTools()` copies it to
+     `$PREFIX/lib/libdroiddesk_v4l2.so`;
+   - before that: `adb push app/android/app/src/main/jniLibs/arm64-v8a/libdroiddesk_v4l2.so
+     tools/v4l2-shim/firefox-cam tools/v4l2-shim/out/v4l2_capture_test /data/local/tmp/`, then
+     in a DroidDesk terminal `cp /data/local/tmp/libdroiddesk_v4l2.so $PREFIX/lib/ &&
+     cp /data/local/tmp/firefox-cam /data/local/tmp/v4l2_capture_test ~/`. If the app cannot
+     read `/data/local/tmp`, push to `/sdcard/Download/` and copy from there.
+2. Without a browser (optional): `chmod +x ~/v4l2_capture_test &&
+   LD_PRELOAD=$PREFIX/lib/libdroiddesk_v4l2.so:$LD_PRELOAD ~/v4l2_capture_test 3`
+   → expect `RESULT: PASS`.
+3. In the DroidDesk desktop terminal: `bash ~/firefox-cam` (opens https://webcamtests.com/) or
+   `bash ~/firefox-cam https://webrtc.github.io/samples/src/content/getusermedia/gum/`.
+   It starts a separate instance (`--no-remote`, profile `~/.mozilla-apps/camera-test`), so a
+   Firefox that is already open does not swallow the URL.
+4. Pages, in this order:
+   - https://webrtc.github.io/samples/src/content/getusermedia/gum/ — plain getUserMedia;
+     allow "DroidDesk Camera". Expect moving bars, the bouncing box, a counting frame number
+     and the bottom ticker sweeping once per second.
+   - https://webcamtests.com/ — name, resolution and measured fps.
+   - https://webrtc.github.io/samples/src/content/getusermedia/resolution/ — VGA should run at
+     30 fps, HD at 15 fps (libwebrtc's guess, see above).
+   - Meet: https://meet.google.com/ → "New meeting" preview, then a 2-party call;
+     `about:webrtc` shows the outgoing resolution and fps. The profile has
+     `webgl.disabled=true` (camera + WebGL crashed the tab before).
+5. Look for: the camera in the permission prompt / device list; a moving image; the counter
+   rising ~30/s (640x480) or ~15/s (1280x720); no tab crash.
+6. Logs to collect:
+   - `$TMPDIR/droiddesk-v4l2.log`: one `loaded into …` line per Firefox process, then
+     `open /dev/video0`, `QUERYCAP`, `S_FMT`, `S_PARM`, `REQBUFS 4 -> 4`, `STREAMON …`,
+     `stats: … fps` every 10 s, `STREAMOFF`, `close … (device released)`. For a full ioctl
+     trace: `DROIDDESK_V4L2_DEBUG=1 bash ~/firefox-cam`.
+   - `$TMPDIR/firefox-cam-moz.log*` (MOZ_LOG `CamerasParent`, `VideoEngine`, `webrtc_trace`).
+   - A tab crash: the terminal output of `firefox-cam` and `logcat`.
+   - No camera at all: check that a `loaded into …/firefox` line exists (the preload reached
+     the parent) and whether `open /dev/video0` appears.
+
+### Open risks
+
+- Firefox itself is untested: a libxul call path the shim does not hook (raw
+  `syscall(SYS_openat)`, `ioctl` through another symbol) would show as "no camera" without
+  `open /dev/video0` in the log. The source uses plain libc calls.
+- 1280x720 runs at 15 fps in Firefox because libwebrtc guesses the fps from the width (only
+  MJPEG is exempt). 720p30 would need a 1280x720 MJPEG mode (JPEG encode on the phone);
+  otherwise calls use 640x480@30 or 720p15.
+- The camera + WebGL tab crash is not understood; the prototype only turns WebGL off.
+- fd identity: an fd closed behind the shim's back (`syscall(SYS_close)`, `close_range`)
+  leaves a stale entry; if the number is reused, that fd is treated as the camera. Not on
+  Firefox's capture path, but `close_range` in child-process setup is worth checking.
+- A blocking DQBUF (fd without O_NONBLOCK) racing a close from another thread is not safe
+  yet (Firefox uses O_NONBLOCK).
+- Only `/dev/video0`, one stream at a time per open. Front/back = `/dev/video1` later;
+  Chromium under proot also needs the readdir/placeholder from §2 (a).
+- The Android side (Camera2 → memfd ring → `@droiddesk.camera`) replaces `dd_pattern_source`;
+  timing, rotation and the foreground rules from §3 are not addressed yet.

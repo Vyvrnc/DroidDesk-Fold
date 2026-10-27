@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# firefox-cam — prototype launcher: Termux Firefox with the fake V4L2 camera
+# (libdroiddesk_v4l2.so, test pattern) in a separate profile.
+#
+#   bash firefox-cam [URL]        default URL: https://webcamtests.com/
+#
+# Opt-in only: nothing else in DroidDesk preloads the shim. A new Firefox instance is needed
+# (--no-remote + own profile): camera capture runs in Firefox's parent process, so an
+# already running Firefox without the shim would get the URL and find no camera.
+#
+# Logs: $TMPDIR/droiddesk-v4l2.log (shim), $TMPDIR/firefox-cam-moz.log* (Firefox camera
+# modules: CamerasParent, VideoEngine, webrtc_trace).
+set -eu
+PREFIX=${PREFIX:-/data/user/0/com.orailnoor.droiddesk/files/usr}
+TMPDIR=${TMPDIR:-$PREFIX/tmp}
+SHIM=$PREFIX/lib/libdroiddesk_v4l2.so
+PROFILE=${FIREFOX_CAM_PROFILE:-$HOME/.mozilla-apps/camera-test}
+
+if [ ! -f "$SHIM" ]; then
+    echo "missing $SHIM (copy jniLibs/arm64-v8a/libdroiddesk_v4l2.so there)" >&2
+    exit 1
+fi
+
+mkdir -p "$PROFILE"
+cat > "$PROFILE/user.js" <<'EOF'
+// firefox-cam: fake V4L2 camera prototype
+// Camera + WebGL crashes the tab (SIGSEGV) on these devices; keep WebGL off for camera tests.
+user_pref("webgl.disabled", true);
+// No D-Bus in Termux Firefox: never try the portal/PipeWire camera path.
+user_pref("media.webrtc.camera.allow-pipewire", false);
+// Real capture path, not Firefox's built-in fake stream.
+user_pref("media.navigator.streams.fake", false);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.aboutwelcome.enabled", false);
+EOF
+
+export LD_PRELOAD="$SHIM${LD_PRELOAD:+:$LD_PRELOAD}"
+export MOZ_LOG="${MOZ_LOG:-CamerasParent:4,VideoEngine:4,webrtc_trace:3}"
+export MOZ_LOG_FILE="${MOZ_LOG_FILE:-$TMPDIR/firefox-cam-moz.log}"
+echo "firefox-cam: LD_PRELOAD=$LD_PRELOAD"
+echo "firefox-cam: shim log $TMPDIR/droiddesk-v4l2.log, Firefox log $MOZ_LOG_FILE*"
+exec firefox --no-remote --profile "$PROFILE" "${1:-https://webcamtests.com/}"
