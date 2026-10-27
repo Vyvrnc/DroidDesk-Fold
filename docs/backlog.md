@@ -284,3 +284,36 @@ Firefox icon (profile `chrome/icons/default/main-window.png` is ignored). Being 
 after map) started by a `slack-app` wrapper. Plan: a generic "web app" helper in DroidDesk
 (name, URL, icon → profile, .desktop, icon fix), also for Teams, Outlook, Meet; maybe a small
 UI in Desktop tools.
+
+## GPU for the native desktop without Adreno (tablet, 2026-10-27)
+
+**Status: experimental opt-in, implemented, untested on devices.** Default stays llvmpipe.
+`droiddesk-native-gpu on|off|status` (asset `droiddesk/droiddesk-native-gpu`, installed to
+`$PREFIX/bin`). `on` refuses on Adreno (Turnip + Zink already), otherwise installs Termux's
+main-repo `mesa` instead of `mesa-zink` (simulated first, stops if apt would remove anything else;
+the swap is recorded in `$PREFIX/etc/droiddesk/native-gpu-mesa-swapped`, `off` never swaps back),
+plus `virglrenderer-android` and `angle-android`, and writes
+`$PREFIX/etc/droiddesk/native-gpu-virgl`. The app's virgl server (the Debian one) then also starts
+for this marker; the native session gets `GALLIUM_DRIVER=virpipe` without
+`LIBGL_ALWAYS_SOFTWARE`/llvmpipe override (`LinuxRuntime.nativeVirglActive`: marker, no Adreno,
+`mesa` installed, server socket present; session start waits up to 5 s for the socket).
+
+Findings (Galaxy Tab S10 FE, Xclipse, Android 16):
+- Termux's Mesa ignores `VTEST_SOCKET_NAME` and connects to `$PREFIX/tmp/.virgl_test`; the server
+  binds `$TMPDIR/.virgl_test` (files/tmp). The app now links `$PREFIX/tmp/.virgl_test` to it when
+  the server starts (both paths are real, well under the 107-byte `sun_path`).
+- `mesa-zink` 22.0.5 (TUR) is too old for virglrenderer-android 1.3.0: capset size mismatch, stack
+  corruption abort. Termux's `mesa` 26.2.5 works: glxgears 139–149 FPS, renderer
+  "virgl (ANGLE (Samsung… Vulkan))". Adreno keeps `mesa-zink` (zink without kopper, no flicker).
+- Firefox with HW WebRender over virgl vs llvmpipe: scrolling ~50 % less CPU, YouTube ~23 % less.
+  Firefox chooses WebRender HW by itself when GL works; no prefs are forced.
+
+**Known crash:** YouTube (ambient mode canvas readback) intermittently kills Firefox: the client
+dies after a `TRANSFER_GET2` readback, the server log (`$TMPDIR/virgl-server.log`) repeats
+`virgl_fence_set_fd: failed err=-9` / `failed to export fence sync object`. Workaround: turn off
+YouTube's ambient mode, or start Firefox with `GALLIUM_DRIVER=llvmpipe LIBGL_ALWAYS_SOFTWARE=true`.
+Next: find why the fence export fails (ANGLE's EGL sync on Xclipse, `EGL_ANDROID_native_fence_sync`)
+before this can become a default.
+
+Other limits: if the server dies, apps started from the running XFCE keep `virpipe` until the
+desktop restarts (the app removes the socket, so new terminals and the next session use llvmpipe).

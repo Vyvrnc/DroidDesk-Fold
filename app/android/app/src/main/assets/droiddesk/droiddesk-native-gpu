@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# droiddesk-native-gpu — EXPERIMENTAL hardware OpenGL for the native (Termux) desktop on GPUs
+# without Adreno (Mali, Xclipse): Termux's Mesa as a virgl client (GALLIUM_DRIVER=virpipe) of the
+# app's virgl server (ANGLE on Android's Vulkan driver), the same server Debian's droiddesk-gpu uses.
+#
+#   droiddesk-native-gpu on|off|status
+#
+# on      installs Termux's main-repo mesa instead of mesa-zink (mesa-zink 22 is too old for
+#         virglrenderer-android 1.3 and aborts), virglrenderer-android and angle-android, and writes
+#         $PREFIX/etc/droiddesk/native-gpu-virgl. The app starts the server with the next desktop
+#         session and then gives the whole native session GALLIUM_DRIVER=virpipe.
+# off     removes the marker; the next desktop session is on llvmpipe again. mesa stays installed
+#         (llvmpipe works with it the same way); mesa-zink comes back only by hand.
+# status  marker, Mesa package, server socket, renderer of glxinfo -B (when mesa-demos is there).
+#
+# Adreno does not need this: the native desktop already runs on Turnip + Zink there.
+# DroidDesk installs this script as $PREFIX/bin/droiddesk-native-gpu.
+set -u
+PREFIX=${PREFIX:-/data/user/0/com.orailnoor.droiddesk/files/usr}
+TMPDIR=${TMPDIR:-${PREFIX%/usr}/tmp}
+CONF=$PREFIX/etc/droiddesk
+MARKER=$CONF/native-gpu-virgl
+SWAPPED=$CONF/native-gpu-mesa-swapped
+SOCKET=$TMPDIR/.virgl_test
+LINK=$PREFIX/tmp/.virgl_test
+LOG=$TMPDIR/virgl-server.log
+PACKAGES="mesa virglrenderer-android angle-android"
+
+pkg_version() {
+    dpkg-query -W -f='${Status} ${Version}' "$1" 2>/dev/null | sed -n 's/^install ok installed //p'
+}
+
+firefox_hint() {
+    cat <<EOF
+
+Firefox: hardwarový WebRender si zapne sám, když najde funkční OpenGL (ověříš v about:support,
+řádek „Compositing“). DroidDesk žádné předvolby Firefoxu nemění.
+Pozor, známá chyba: YouTube může Firefox přes virgl občas shodit (zpětné čtení plátna pro
+ambientní režim; v $LOG pak bývá „failed to export fence sync object“).
+Pomáhá vypnout v přehrávači YouTube Nastavení → Ambientní režim. Když Firefox padá dál,
+spusť ho softwarově: GALLIUM_DRIVER=llvmpipe LIBGL_ALWAYS_SOFTWARE=true firefox
+EOF
+}
+
+socket_answers() {
+    [ -S "$LINK" ] || [ -S "$SOCKET" ] || return 1
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 - "$LINK" <<'EOF' >/dev/null 2>&1
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(2)
+s.connect(sys.argv[1])
+s.close()
+EOF
+}
+
+cmd_on() {
+    if [ -e /dev/kgsl-3d0 ]; then
+        echo "Tohle zařízení má Adreno: nativní desktop už běží na GPU (Turnip + Zink)." >&2
+        echo "droiddesk-native-gpu je jen pro GPU bez Adrena (Mali, Xclipse); nic neměním." >&2
+        exit 1
+    fi
+    echo "EXPERIMENTÁLNÍ: hardwarové OpenGL nativního desktopu přes virgl (ANGLE/Vulkan)."
+    zink=$(pkg_version mesa-zink)
+    echo "[1/3] Aktualizuji seznam balíčků…"
+    apt-get update || echo "  apt-get update selhal, zkouším pokračovat s tím, co je k dispozici." >&2
+    if [ -n "$zink" ]; then
+        echo "[2/3] Měním mesa-zink $zink za mesa z hlavního repozitáře Termuxu…"
+        # Only mesa-zink may go: anything else that apt would remove means a dependency we do not
+        # know, so stop and show it instead.
+        if ! sim=$(apt-get -s install $PACKAGES 2>&1); then
+            printf '%s\n' "$sim" >&2
+            echo "Instalace by neprošla, nic jsem neměnil." >&2
+            exit 1
+        fi
+        others=$(printf '%s\n' "$sim" | awk '$1 == "Remv" && $2 != "mesa-zink" { print $2 }')
+        if [ -n "$others" ]; then
+            echo "Výměna by odebrala i další balíčky, proto ji nedělám:" >&2
+            printf '  %s\n' $others >&2
+            exit 1
+        fi
+    else
+        echo "[2/3] Instaluji mesa, virglrenderer-android a angle-android…"
+    fi
+    if ! apt-get install -y $PACKAGES; then
+        echo "Instalace balíčků selhala; hardwarové OpenGL zůstává vypnuté." >&2
+        exit 1
+    fi
+    mesa=$(pkg_version mesa)
+    if [ -z "$mesa" ]; then
+        echo "Balíček mesa není po instalaci nainstalovaný; hardwarové OpenGL zůstává vypnuté." >&2
+        exit 1
+    fi
+    mkdir -p "$CONF"
+    if [ -n "$zink" ] && [ -z "$(pkg_version mesa-zink)" ]; then
+        echo "mesa-zink $zink" > "$SWAPPED"
+    fi
+    echo "[3/3] Zapínám (značka $MARKER)."
+    touch "$MARKER"
+    echo
+    echo "Hotovo: mesa $mesa. Restartuj desktop v aplikaci DroidDesk; nová relace dostane"
+    echo "GALLIUM_DRIVER=virpipe, jakmile běží virgl server (log: $LOG)."
+    echo "Kontrola po restartu: droiddesk-native-gpu status"
+    echo "Vypnutí: droiddesk-native-gpu off"
+    firefox_hint
+}
+
+cmd_off() {
+    rm -f "$MARKER"
+    echo "Hardwarové OpenGL nativního desktopu: vypnuto. Po restartu desktopu zase llvmpipe."
+    if [ -f "$SWAPPED" ]; then
+        echo "Při zapnutí se vyměnil balíček ($(cat "$SWAPPED") → mesa). mesa zůstává, softwarové"
+        echo "vykreslování s ní funguje stejně. Původní balíček vrátíš: pkg install mesa-zink"
+    fi
+}
+
+cmd_status() {
+    if [ -e /dev/kgsl-3d0 ]; then
+        echo "GPU: Adreno, nativní desktop běží na Turnip + Zink (droiddesk-native-gpu se nepoužívá)."
+    elif [ -f "$MARKER" ]; then
+        echo "Hardwarové OpenGL nativního desktopu: zapnuto (EXPERIMENTÁLNÍ, virgl)"
+    else
+        echo "Hardwarové OpenGL nativního desktopu: vypnuto (llvmpipe). Zapnutí: droiddesk-native-gpu on"
+    fi
+    mesa=$(pkg_version mesa)
+    zink=$(pkg_version mesa-zink)
+    packages=
+    [ -n "$mesa" ] && packages="mesa $mesa"
+    [ -n "$zink" ] && packages="${packages:+$packages, }mesa-zink $zink"
+    echo "Mesa: ${packages:-žádný balíček}"
+    [ -f "$SWAPPED" ] && echo "  (při zapnutí vyměněno: $(cat "$SWAPPED") → mesa)"
+    if [ -f "$MARKER" ] && [ -z "$mesa" ]; then
+        echo "  Bez balíčku mesa zůstává llvmpipe; spusť znovu droiddesk-native-gpu on."
+    fi
+    if socket_answers; then
+        echo "virgl server: odpovídá ($LINK)"
+    elif [ -S "$SOCKET" ]; then
+        echo "virgl server: socket existuje, ale neodpovídá (log: $LOG)"
+    else
+        echo "virgl server: neběží (spouští se s relací desktopu; log: $LOG)"
+    fi
+    echo "Tento terminál: GALLIUM_DRIVER=${GALLIUM_DRIVER:-nenastaveno}"
+    if command -v glxinfo >/dev/null 2>&1; then
+        renderer=$(timeout 15 glxinfo -B 2>/dev/null | sed -n 's/^ *OpenGL renderer string: //p' | head -n 1)
+        echo "glxinfo -B: ${renderer:-bez výsledku (X server nebo OpenGL nedostupné)}"
+    else
+        echo "glxinfo: není nainstalovaný (pkg install mesa-demos), test vykreslení přeskočen"
+    fi
+    [ -f "$MARKER" ] && firefox_hint
+    return 0
+}
+
+case "${1:-status}" in
+    on) cmd_on ;;
+    off) cmd_off ;;
+    status) cmd_status ;;
+    *) echo "Použití: droiddesk-native-gpu on|off|status" >&2; exit 2 ;;
+esac

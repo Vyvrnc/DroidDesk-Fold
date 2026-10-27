@@ -145,6 +145,24 @@ class LinuxRuntime(private val context: Context) {
     /** Qualcomm exposes the Adreno render device through KGSL on Android. */
     private fun hasAdrenoGpu(): Boolean = File("/dev/kgsl-3d0").exists()
 
+    /**
+     * Experimental hardware OpenGL for the native desktop without Adreno (Mali, Xclipse):
+     * Termux's Mesa as a virgl client (virpipe) of the app's virgl server, the same server
+     * Debian uses. Opt-in through "droiddesk-native-gpu on", which writes this marker and
+     * swaps mesa-zink for Termux's main-repo mesa (mesa-zink 22 is too old for
+     * virglrenderer-android 1.3: capset size mismatch, the client aborts).
+     */
+    private val nativeGpuMarker: File get() = File(prefixDir, "etc/droiddesk/native-gpu-virgl")
+    private val virglSocket: File get() = File(tmpDir, ".virgl_test")
+
+    /** Native virgl is asked for and can work: marker, no Adreno, Termux's mesa (not mesa-zink). */
+    private fun nativeVirglWanted(): Boolean =
+        !hasAdrenoGpu() && nativeGpuMarker.exists() &&
+            File(prefixDir, "var/lib/dpkg/info/mesa.list").exists()
+
+    /** The one decision for the native session's OpenGL: virgl only while its server socket is there. */
+    private fun nativeVirglActive(): Boolean = nativeVirglWanted() && virglSocket.exists()
+
     // The fork supports XFCE only: the dock, Android menu, USB window and tweaks are
     // built for it. A choice saved by an older build (lxqt/mate/kde) also gets XFCE.
     @Suppress("UNUSED_PARAMETER")
@@ -233,6 +251,8 @@ class LinuxRuntime(private val context: Context) {
         val freedrenoIcd = File(prefixDir, "share/vulkan/icd.d/freedreno_icd.aarch64.json")
         return if (hasAdrenoGpu() && freedrenoIcd.exists()) {
             "Turnip + Zink"
+        } else if (nativeVirglActive()) {
+            "virgl (ANGLE/Vulkan, experimental)"
         } else {
             "Software (llvmpipe)"
         }
@@ -1421,6 +1441,12 @@ class LinuxRuntime(private val context: Context) {
                 val script = context.assets.open("droiddesk/firefox-cam").bufferedReader().use { it.readText() }
                 launcher.writeText("#!${File(binDir, "bash").absolutePath}\n" + script.substringAfter('\n'))
                 launcher.setExecutable(true, false)
+            }
+            // Experimental hardware OpenGL for the native desktop without Adreno (virgl), opt-in.
+            File(binDir, "droiddesk-native-gpu").let { command ->
+                val script = context.assets.open("droiddesk/droiddesk-native-gpu").bufferedReader().use { it.readText() }
+                command.writeText("#!${File(binDir, "bash").absolutePath}\n" + script.substringAfter('\n'))
+                command.setExecutable(true, false)
             }
             val cameraClient = File(binDir, "droiddesk-camera.py")
             context.assets.open("droiddesk/droiddesk-camera.py").use { input ->
@@ -2972,6 +2998,11 @@ class LinuxRuntime(private val context: Context) {
             env["VK_ICD_FILENAMES"] = freedrenoIcd.absolutePath
             env["MESA_LOADER_DRIVER_OVERRIDE"] = "zink"
             env["GALLIUM_DRIVER"] = "zink"
+        } else if (nativeVirglActive()) {
+            // Experimental, opt-in (droiddesk-native-gpu): Termux's Mesa talks to the app's
+            // virgl server ($PREFIX/tmp/.virgl_test links to it). No LIBGL_ALWAYS_SOFTWARE and
+            // no llvmpipe override, or Mesa never loads virpipe.
+            env["GALLIUM_DRIVER"] = "virpipe"
         } else {
             env["LIBGL_ALWAYS_SOFTWARE"] = "true"
             env["MESA_LOADER_DRIVER_OVERRIDE"] = "llvmpipe"
@@ -3250,7 +3281,9 @@ class LinuxRuntime(private val context: Context) {
      * Hardware OpenGL for Debian programs on GPUs without KGSL (Mali, Xclipse; Galaxy Tab
      * S10 FE): Termux's virgl_test_server_android renders through ANGLE on Android's Vulkan
      * driver, Debian's Mesa is its client (GALLIUM_DRIVER=virpipe, /tmp/.virgl_test).
-     * Switched on by "droiddesk-gpu on" in Debian (/etc/droiddesk/gpu-virgl).
+     * Switched on by "droiddesk-gpu on" in Debian (/etc/droiddesk/gpu-virgl) or, for the
+     * native desktop (experimental), by "droiddesk-native-gpu on" ($PREFIX/etc/droiddesk/
+     * native-gpu-virgl, see nativeVirglWanted).
      *
      * The server needs a clean environment: Termux's $PREFIX/lib has libandroid-stub's
      * libbinder_ndk.so (no symbol versions), which shadows the system one and breaks
@@ -3262,8 +3295,12 @@ class LinuxRuntime(private val context: Context) {
     private fun ensureVirglServerInBackground() {
         if (File("/dev/kgsl-3d0").exists() || virglStarting || virglServer?.isAlive == true) return
         val rootfs = debianRootfs(baseDir)
-        if (!File(rootfs, "etc/droiddesk/gpu-virgl").exists() || File(rootfs, "etc/droiddesk/gpu-off").exists()) return
+        val debianWants = File(rootfs, "etc/droiddesk/gpu-virgl").exists() && !File(rootfs, "etc/droiddesk/gpu-off").exists()
+        if (!debianWants && !nativeVirglWanted()) return
         virglStarting = true
+        // No server of ours is alive: a socket left by a killed app would answer nobody, and the
+        // native session (nativeVirglActive) must not mistake it for a running server.
+        virglSocket.delete()
         Thread({
             try {
                 val log = File(tmpDir, "virgl-server.log")
@@ -3280,8 +3317,20 @@ class LinuxRuntime(private val context: Context) {
                         .start().waitFor()
                 }
                 val patched = prepareVirglServer(server, angle) ?: return@Thread
-                val socket = File(tmpDir, ".virgl_test")
+                val socket = virglSocket
                 socket.delete()
+                // Termux's Mesa ignores VTEST_SOCKET_NAME and connects to $PREFIX/tmp/.virgl_test
+                // (its compiled-in com.termux path, rewritten by the socket hook), Debian to /tmp,
+                // which is $TMPDIR. The server binds the $TMPDIR path itself (it runs without the
+                // hook; ~57 bytes, well under sun_path's 107), the native side gets a symlink.
+                runCatching {
+                    val link = File(prefixDir, "tmp/.virgl_test")
+                    if (runCatching { android.system.Os.readlink(link.path) }.getOrNull() != socket.absolutePath) {
+                        link.parentFile?.mkdirs()
+                        link.delete()
+                        android.system.Os.symlink(socket.absolutePath, link.path)
+                    }
+                }.onFailure { Log.w(TAG, "virgl: native socket link failed", it) }
                 val process = ProcessBuilder(
                     patched.absolutePath, "--angle-vulkan", "--multi-clients", "--socket-path", socket.absolutePath,
                 ).directory(tmpDir).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.to(log))
@@ -3300,6 +3349,17 @@ class LinuxRuntime(private val context: Context) {
                     .start()
                 virglServer = process
                 Log.i(TAG, "virgl server started (ANGLE/Vulkan), socket ${socket.path}")
+                // When the server dies on its own, its socket goes too: Debian shells and the next
+                // native session get llvmpipe again. Programs started from a running XFCE keep its
+                // virpipe environment until the desktop restarts (which starts a new server).
+                Thread({
+                    val code = runCatching { process.waitFor() }.getOrNull()
+                    if (virglServer === process) {
+                        Log.w(TAG, "virgl server exited ($code), see ${log.path}")
+                        virglSocket.delete()
+                        virglServer = null
+                    }
+                }, "virgl-server-watch").apply { isDaemon = true }.start()
             } catch (error: Exception) {
                 Log.w(TAG, "virgl server could not start", error)
             } finally {
@@ -3755,7 +3815,10 @@ class LinuxRuntime(private val context: Context) {
         // mesa-zink pulls the Vulkan loader selected by the active Termux repo.
         // Current repositories use vulkan-loader-generic, which provides and
         // conflicts with the older vulkan-loader-android package name.
-        if (!installPackageGroup("pkg install -y mesa-zink")) {
+        // With the native virgl opt-in (droiddesk-native-gpu, no Adreno) a repeated setup keeps
+        // Termux's mesa: mesa-zink 22 aborts as a client of virglrenderer-android 1.3.
+        val mesaPackage = if (!hasAdrenoGpu() && nativeGpuMarker.exists()) "mesa" else "mesa-zink"
+        if (!installPackageGroup("pkg install -y $mesaPackage")) {
             // Graphics acceleration is optional. A desktop with llvmpipe is much
             // better UX than failing setup because a vendor Vulkan stack is not
             // compatible with the current Mesa package set.
@@ -4148,6 +4211,17 @@ class LinuxRuntime(private val context: Context) {
         }
         refreshDebianSetupInBackground()
         ensureVirglServerInBackground()
+        // The native session's environment is fixed when XFCE starts: give the server a moment
+        // to bind its socket, or the whole session would stay on llvmpipe. The packages come with
+        // droiddesk-native-gpu on, so this only waits for the process itself.
+        if (nativeVirglWanted()) {
+            var waited = 0
+            while (!virglSocket.exists() && waited < 5000) {
+                if (runCatching { Thread.sleep(100) }.isFailure) break
+                waited += 100
+            }
+            Log.i(TAG, "Native virgl: socket ${if (virglSocket.exists()) "ready" else "missing, llvmpipe"} after $waited ms")
+        }
         ensureDebianSessionBusInBackground()
         if (selectedDesktop == "xfce4") ensureDefaultLookInBackground()
 
@@ -4502,7 +4576,12 @@ class LinuxRuntime(private val context: Context) {
         dbusProcess?.destroyForcibly()
         dbusProcess = null
         stopDebianSessionBus()
-        virglServer?.destroyForcibly()
+        virglServer?.let {
+            it.destroyForcibly()
+            // A leftover socket would make the next session's environment pick virpipe
+            // before a new server is listening.
+            virglSocket.delete()
+        }
         virglServer = null
         Log.i(TAG, "Session stopped")
     }

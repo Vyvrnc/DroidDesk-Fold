@@ -234,6 +234,7 @@ Commands of this fork's DroidDesk app (in its terminal):
 | `debian-setup` | Install/refresh the Debian integration (tools, locale, time zone, fonts, menu, GPU); safe to repeat |
 | `droiddesk-gpu on\|off\|status` | Hardware OpenGL for Debian programs (applies to newly started apps) |
 | `gpu-run CMD…` | One Debian program with hardware OpenGL even while it is switched off |
+| `droiddesk-native-gpu on\|off\|status` | Experimental: hardware OpenGL for the native desktop on GPUs without Adreno (virgl over ANGLE/Vulkan, swaps `mesa-zink` for `mesa`; takes effect after a desktop restart). YouTube can crash Firefox, see `docs/backlog.md` |
 | `droiddesk-open [--android] FILE\|URL` | Open with the Linux app, or in Android with `--android` / when no Linux app fits |
 | `droiddesk-usb list` | USB devices attached to the phone |
 | `droiddesk-usb flash IMAGE[.xz\|.gz] [DEVICE] [--lun N]` | Write a disk image to a flash drive or card and verify it |
