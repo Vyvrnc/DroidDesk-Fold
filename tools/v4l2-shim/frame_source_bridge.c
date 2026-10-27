@@ -8,7 +8,9 @@
  * slices of at most 100 ms. When the app is not reachable, answers with an error (no
  * permission, camera busy, no camera) or does not answer within 35 s (the permission
  * dialog), the source falls back to the test pattern for this stream and logs why. A stream
- * that breaks later (app restarted) keeps the last picture and reconnects every 2 s.
+ * that breaks later (app restarted) keeps the last picture and reconnects every 2 s. "err busy"
+ * (a page switching cameras opens the new device before closing the old one) retries every
+ * 0.5 s instead of falling back.
  *
  * The app always sends tightly packed I420 at the size the shim asked for; NV12 and YUYV
  * are converted here while copying.
@@ -22,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -34,6 +37,7 @@
 
 #define ANSWER_TIMEOUT_MS 35000 /* the app may be showing the permission dialog (30 s) */
 #define RETRY_MS 2000
+#define BUSY_RETRY_MS 500
 #define SLICE_MS 100
 
 enum state { WAIT_OK, STREAM, LOST, FALLBACK };
@@ -58,6 +62,7 @@ struct bridge {
     void *pattern;
     uint8_t *tmp; /* I420 copy when the V4L2 format is NV12 or YUYV */
     uint64_t frames, torn, skipped;
+    int busy; /* waiting for another stream to release the camera */
 };
 
 static long now_ms_diff(const struct timespec *a, const struct timespec *b) {
@@ -130,12 +135,13 @@ static int connect_and_open(struct bridge *b) {
         errno = e;
         return -1;
     }
-    /* Without DROIDDESK_CAMERA_FACING the app picks the camera last chosen with
-     * "droiddesk-camera front|back" (front at first). */
+    /* /dev/video0 is the front camera, /dev/video1 the back one; DROIDDESK_CAMERA_FACING
+     * forces one camera for both. "droiddesk-camera front|back" still switches a running
+     * stream. */
     const char *facing = getenv("DROIDDESK_CAMERA_FACING");
-    char facing_field[16] = "";
-    if (facing && *facing)
-        snprintf(facing_field, sizeof(facing_field), " facing=%s", strcmp(facing, "back") == 0 ? "back" : "front");
+    if (!facing || !*facing) facing = b->device == 1 ? "back" : "front";
+    char facing_field[16];
+    snprintf(facing_field, sizeof(facing_field), " facing=%s", strcmp(facing, "back") == 0 ? "back" : "front");
     char line[256];
     int len = snprintf(line, sizeof(line),
                        "open v=%d width=%u height=%u fps=%u format=I420%s rotate=%d mirror=%d\n",
@@ -160,15 +166,20 @@ static const char *map_ring(struct bridge *b, const char *line) {
     if (b->shm_fd < 0) return "answer without the shared memory fd";
     /* The size comes from "size=" in the answer: Android's SharedMemory is ashmem, whose fstat
      * reports st_size 0 (Fold 7, fold.77). fstat only for memfd-based bridges (tests). */
-    unsigned long long size = 0;
+    unsigned long long size = 0, real = 0;
     const char *field = strstr(line, " size=");
     if (field) size = strtoull(field + 6, NULL, 10);
-    if (!size) {
-        struct stat st;
-        if (fstat(b->shm_fd, &st) == 0 && st.st_size > 0) size = (unsigned long long)st.st_size;
+    struct stat st;
+    if (fstat(b->shm_fd, &st) == 0 && st.st_size > 0) real = (unsigned long long)st.st_size;
+    else {
+        int n = ioctl(b->shm_fd, _IO(0x77, 4) /* ASHMEM_GET_SIZE */, 0);
+        if (n > 0) real = (unsigned long long)n;
     }
+    if (!size) size = real;
     if (size < sizeof(struct ddcam_header) || size > (1ULL << 30))
         return "shared memory too small";
+    /* A larger size than the region would fault (SIGBUS) on the first read past its end. */
+    if (real && size > real) return "answer claims more shared memory than the region has";
     b->mem_size = (size_t)size;
     void *m = mmap(NULL, b->mem_size, PROT_READ, MAP_SHARED, b->shm_fd, 0);
     if (m == MAP_FAILED) {
@@ -203,10 +214,17 @@ static void handle_line(struct bridge *b, char *line) {
         const char *why = map_ring(b, line);
         if (why) fall_back(b, why);
         else {
+            b->busy = 0;
             b->state = STREAM;
             b->last_seq = 0;
             b->have_out = 0;
         }
+    } else if (strncmp(line, "err busy", 8) == 0 && b->state == WAIT_OK) {
+        if (!b->busy) dd_log("camera bridge: camera busy (another stream), retrying every %d ms", BUSY_RETRY_MS);
+        b->busy = 1;
+        disconnect(b);
+        b->state = LOST;
+        in_ms(&b->deadline, BUSY_RETRY_MS);
     } else if (strncmp(line, "err", 3) == 0 && b->state == WAIT_OK) {
         char why[300];
         snprintf(why, sizeof(why), "app answered \"%s\"", line);
@@ -343,7 +361,7 @@ static int bridge_next_frame(void *ctx, uint8_t *dst, uint32_t sequence, struct 
             sleep_ms(SLICE_MS);
             return -1;
         }
-        dd_log("camera bridge: reconnected, waiting for the camera");
+        if (!b->busy) dd_log("camera bridge: reconnected, waiting for the camera");
     }
 
     int fresh = b->have_pending && b->pending_seq > b->last_seq;

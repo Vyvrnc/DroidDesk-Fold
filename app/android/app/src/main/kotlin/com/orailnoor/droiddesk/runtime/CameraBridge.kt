@@ -558,6 +558,18 @@ object CameraBridge {
             } catch (error: Exception) {
                 return finishOpen("camera-error ${error.message}")
             } ?: return finishOpen("no-camera Android lists no usable camera")
+            try {
+                openCamera(id)
+            } catch (error: Exception) {
+                // Camera removed or the camera service died between listing and opening.
+                imageReader?.close()
+                imageReader = null
+                finishOpen("camera-error ${error.message}")
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        private fun openCamera(id: String) {
             val characteristics = manager.getCameraCharacteristics(id)
             cameraId = id
             sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
@@ -584,6 +596,7 @@ object CameraBridge {
 
                     override fun onDisconnected(camera: CameraDevice) {
                         camera.close()
+                        if (imageReader !== reader) return // an older attempt (facing switch)
                         if (device === camera || device == null) finishOpen("camera-error the camera was taken by another app or DroidDesk went to the background")
                     }
 
@@ -596,6 +609,7 @@ object CameraBridge {
                             CameraDevice.StateCallback.ERROR_CAMERA_DEVICE -> "camera device error"
                             else -> "camera service error $error"
                         }
+                        if (imageReader !== reader) return // an older attempt (facing switch)
                         if (device === camera || device == null) finishOpen("camera-error $why")
                     }
                 }, handler)

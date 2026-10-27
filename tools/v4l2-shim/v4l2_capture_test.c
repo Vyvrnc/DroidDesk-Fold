@@ -29,6 +29,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -80,7 +81,10 @@ static int enumerate(void) {
         count++;
         printf("device %s: card '%s' driver '%s' bus_info '%s' caps 0x%08x device_caps 0x%08x\n", dev,
                cap.card, cap.driver, cap.bus_info, cap.capabilities, cap.device_caps);
-        CHECK(cap.bus_info[0] != 0, "bus_info must be set (libwebrtc matches devices by it)");
+        static char prev_bus[32];
+        CHECK(cap.bus_info[0] != 0 && strcmp((char *)cap.bus_info, prev_bus) != 0,
+              "bus_info must be set and unique (libwebrtc matches devices by it)");
+        snprintf(prev_bus, sizeof(prev_bus), "%s", (char *)cap.bus_info);
         CHECK(cap.device_caps & V4L2_CAP_STREAMING, "STREAMING capability");
 
         static const uint32_t fmts[] = {
@@ -342,10 +346,11 @@ int main(int argc, char **argv) {
     struct stat st;
     CHECK(stat("/dev/video0", &st) == 0 && S_ISCHR(st.st_mode), "stat /dev/video0");
     CHECK(access("/dev/video0", R_OK | W_OK) == 0, "access /dev/video0");
-    CHECK(open("/dev/video1", O_RDONLY) < 0, "/dev/video1 must not exist");
+    CHECK(stat("/dev/video1", &st) == 0 && minor(st.st_rdev) == 1, "stat /dev/video1 (back camera)");
+    CHECK(open("/dev/video2", O_RDONLY) < 0, "/dev/video2 must not exist");
 
     int n = enumerate();
-    CHECK(n == 1, "expected exactly 1 capture device, found %d", n);
+    CHECK(n == 2, "expected 2 capture devices (front, back), found %d", n);
     if (n) {
         capture(1280, 720, 15, 0, secs, ppm); /* Firefox: HD capability, fps guessed 15 */
         capture(640, 480, 30, 0, secs, ppm);  /* Firefox: SD, I420, 30 fps */

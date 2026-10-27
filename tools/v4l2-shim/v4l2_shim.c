@@ -1,6 +1,6 @@
 /*
- * libdroiddesk_v4l2.so — LD_PRELOAD shim that makes /dev/video0 a V4L2 capture device in
- * user space, without a kernel node, root or v4l2loopback. The frames come from the
+ * libdroiddesk_v4l2.so — LD_PRELOAD shim that makes /dev/video0 (front camera) and /dev/video1
+ * (back camera) V4L2 capture devices in user space, without a kernel node, root or v4l2loopback. The frames come from the
  * DroidDesk app's camera (frame_source_bridge.c, protocol in camera_bridge_protocol.h), or
  * from a built-in moving test pattern (frame_source_pattern.c) when the app's camera is not
  * available or DROIDDESK_V4L2_SOURCE=pattern. Both sit behind frame_source.h.
@@ -21,7 +21,8 @@
  *   DROIDDESK_V4L2_DEBUG  1 = log every ioctl on the fake device, 0 = only the important ones
  *   DROIDDESK_V4L2_OFF    1 = pass everything through (the library stays loaded but inert)
  *   DROIDDESK_V4L2_SOURCE camera (default) or pattern
- *   DROIDDESK_CAMERA_FACING front (default) or back; DROIDDESK_CAMERA_ROTATE extra degrees
+ *   DROIDDESK_CAMERA_FACING front or back for both devices (default: video0 front, video1
+ *                         back); DROIDDESK_CAMERA_ROTATE extra degrees
  *                         (0/90/180/270); DROIDDESK_CAMERA_MIRROR 1 = flip horizontally;
  *                         DROIDDESK_CAMERA_SOCKET abstract socket name (tests)
  */
@@ -52,12 +53,16 @@
 #error "LP64 only (arm64 bionic, x86_64/aarch64 glibc)"
 #endif
 
-#define DEVICE_PATH "/dev/video0"
-#define DEVICE_MINOR 0
 #define MAX_FD 4096
 #define MAX_BUFS 8
-#define CARD_NAME "DroidDesk Camera"
-#define BUS_INFO "platform:droiddesk-camera-0"
+
+/* One device per phone camera, so a browser's own camera picker switches between them. The
+ * index is the minor number and goes to the frame source, which maps it to the facing. */
+static const struct { const char *path, *card, *bus_info; } devices[] = {
+    {"/dev/video0", "DroidDesk – přední kamera", "platform:droiddesk-camera-0"},
+    {"/dev/video1", "DroidDesk – zadní kamera", "platform:droiddesk-camera-1"},
+};
+#define NDEVICES (int)(sizeof(devices) / sizeof(devices[0]))
 
 #ifdef __BIONIC__
 typedef int ioctl_req_t; /* bionic: int ioctl(int, int, ...) */
@@ -164,6 +169,7 @@ static const uint32_t intervals[] = {30, 15}; /* fps, discrete */
 #define NINTERVALS (sizeof(intervals) / sizeof(intervals[0]))
 
 struct cam {
+    int device;        /* index into devices[] */
     int refs;          /* fds (dups) pointing at this open file */
     int notify_fd;     /* internal dup of the eventfd, survives the app closing its fd */
     struct dd_format fmt;
@@ -181,6 +187,7 @@ struct cam {
     unsigned done[MAX_BUFS], ndone;     /* FIFO of filled buffers for DQBUF */
     /* streaming */
     int streaming, stop, thread_valid;
+    int stopping;      /* a stream_off is joining the producer (lock dropped) */
     pthread_t thread;
     pthread_cond_t cond;
     const struct dd_frame_source *source;
@@ -202,8 +209,12 @@ static void set_fd(int fd, struct cam *c) {
     __atomic_store_n(&fdmap[fd], c, __ATOMIC_RELEASE);
 }
 
-static int is_device_path(const char *path) {
-    return !disabled && path && strcmp(path, DEVICE_PATH) == 0;
+/* Index of the fake device at path, or -1. */
+static int device_index(const char *path) {
+    if (disabled || !path) return -1;
+    for (int i = 0; i < NDEVICES; i++)
+        if (strcmp(path, devices[i].path) == 0) return i;
+    return -1;
 }
 
 static void compute_format(struct dd_format *f, uint32_t fourcc, uint32_t w, uint32_t h) {
@@ -368,17 +379,22 @@ static void *producer(void *arg) {
     return NULL;
 }
 
-/* Called with lock held; drops it while joining the producer. */
+/* Called with lock held; drops it while joining the producer. A second caller (STREAMOFF and
+ * the last close on two threads) waits until the first one has finished the teardown. */
 static void stream_off(struct cam *c) {
+    while (c->stopping) pthread_cond_wait(&c->cond, &lock);
     if (!c->streaming) return;
     c->stop = 1;
     pthread_cond_broadcast(&c->cond);
     if (c->thread_valid) {
         pthread_t t = c->thread;
         c->thread_valid = 0;
+        c->stopping = 1;
         pthread_mutex_unlock(&lock);
         pthread_join(t, NULL);
         pthread_mutex_lock(&lock);
+        c->stopping = 0;
+        pthread_cond_broadcast(&c->cond);
     }
     if (c->source && c->source_ctx) c->source->stop(c->source_ctx);
     c->source_ctx = NULL;
@@ -399,7 +415,7 @@ static int stream_on(struct cam *c) {
      * lock) when the app's camera is not there. */
     const char *want = getenv("DROIDDESK_V4L2_SOURCE");
     c->source = want && strcmp(want, "pattern") == 0 ? &dd_pattern_source : &dd_bridge_source;
-    c->source_ctx = c->source->start(&c->fmt, DEVICE_MINOR);
+    c->source_ctx = c->source->start(&c->fmt, c->device);
     if (!c->source_ctx) return EIO;
     c->stop = 0;
     c->sequence = 0;
@@ -421,7 +437,7 @@ static int stream_on(struct cam *c) {
 
 /* ---- open / close / dup ------------------------------------------------------------- */
 
-static int cam_open(int flags) {
+static int cam_open(int device, int flags) {
     int efd_flags = EFD_SEMAPHORE;
     if (flags & O_NONBLOCK) efd_flags |= EFD_NONBLOCK;
     if (flags & O_CLOEXEC) efd_flags |= EFD_CLOEXEC;
@@ -441,6 +457,7 @@ static int cam_open(int flags) {
         errno = ENOMEM;
         return -1;
     }
+    c->device = device;
     c->refs = 1;
     c->notify_fd = nfd;
     c->memfd = -1;
@@ -450,7 +467,7 @@ static int cam_open(int flags) {
     pthread_mutex_lock(&lock);
     set_fd(fd, c);
     pthread_mutex_unlock(&lock);
-    logmsg("open %s flags=0x%x -> fd %d", DEVICE_PATH, flags, fd);
+    logmsg("open %s flags=0x%x -> fd %d", devices[device].path, flags, fd);
     return fd;
 }
 
@@ -483,12 +500,20 @@ static void track_dup(int oldfd, int newfd) {
     pthread_mutex_unlock(&lock);
 }
 
-static void prefork(void) { pthread_mutex_lock(&lock); }
-static void postfork_parent(void) { pthread_mutex_unlock(&lock); }
+static void prefork(void) {
+    pthread_mutex_lock(&lock);
+    pthread_mutex_lock(&log_lock);
+}
+static void postfork_parent(void) {
+    pthread_mutex_unlock(&log_lock);
+    pthread_mutex_unlock(&lock);
+}
+/* The child forgets the inherited camera fds (they become plain eventfds): cleaning them up
+ * would send "close" over the bridge connection it shares with the parent and stop the
+ * parent's camera. The objects leak in the child, which normally execs right away. */
 static void postfork_child(void) {
-    /* The producer thread does not exist in the child. */
-    for (int fd = 0; fd < MAX_FD; fd++)
-        if (fdmap[fd]) fdmap[fd]->thread_valid = 0;
+    for (int fd = 0; fd < MAX_FD; fd++) fdmap[fd] = NULL;
+    pthread_mutex_unlock(&log_lock);
     pthread_mutex_unlock(&lock);
 }
 
@@ -527,11 +552,11 @@ static const char *ioctl_name(unsigned int req) {
     }
 }
 
-static int do_querycap(struct v4l2_capability *cap) {
+static int do_querycap(const struct cam *c, struct v4l2_capability *cap) {
     memset(cap, 0, sizeof(*cap));
     snprintf((char *)cap->driver, sizeof(cap->driver), "droiddesk");
-    snprintf((char *)cap->card, sizeof(cap->card), CARD_NAME);
-    snprintf((char *)cap->bus_info, sizeof(cap->bus_info), BUS_INFO);
+    snprintf((char *)cap->card, sizeof(cap->card), "%s", devices[c->device].card);
+    snprintf((char *)cap->bus_info, sizeof(cap->bus_info), "%s", devices[c->device].bus_info);
     cap->version = (6u << 16) | (1u << 8);
     cap->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING;
     cap->capabilities = cap->device_caps | V4L2_CAP_DEVICE_CAPS;
@@ -581,7 +606,7 @@ static int do_fmt(struct cam *c, struct v4l2_format *f, int set) {
 static int do_ioctl(struct cam *c, unsigned int req, void *arg) {
     switch (req) {
     case (unsigned int)VIDIOC_QUERYCAP:
-        return do_querycap(arg);
+        return do_querycap(c, arg);
 
     case (unsigned int)VIDIOC_ENUM_FMT: {
         struct v4l2_fmtdesc *d = arg;
@@ -838,7 +863,8 @@ int open(const char *path, int flags, ...) {
     va_start(ap, flags);
     mode_t mode = va_mode(flags, ap);
     va_end(ap);
-    if (is_device_path(path)) return cam_open(flags);
+    int dev = device_index(path);
+    if (dev >= 0) return cam_open(dev, flags);
     if (!real_open) resolve();
     return real_open(path, flags, mode);
 }
@@ -848,7 +874,8 @@ int open64(const char *path, int flags, ...) {
     va_start(ap, flags);
     mode_t mode = va_mode(flags, ap);
     va_end(ap);
-    if (is_device_path(path)) return cam_open(flags);
+    int dev = device_index(path);
+    if (dev >= 0) return cam_open(dev, flags);
     if (!real_open64) resolve();
     return real_open64(path, flags, mode);
 }
@@ -858,7 +885,8 @@ int openat(int dirfd, const char *path, int flags, ...) {
     va_start(ap, flags);
     mode_t mode = va_mode(flags, ap);
     va_end(ap);
-    if (is_device_path(path)) return cam_open(flags); /* absolute: dirfd is ignored */
+    int dev = device_index(path);
+    if (dev >= 0) return cam_open(dev, flags); /* absolute: dirfd is ignored */
     if (!real_openat) resolve();
     return real_openat(dirfd, path, flags, mode);
 }
@@ -868,7 +896,8 @@ int openat64(int dirfd, const char *path, int flags, ...) {
     va_start(ap, flags);
     mode_t mode = va_mode(flags, ap);
     va_end(ap);
-    if (is_device_path(path)) return cam_open(flags);
+    int dev = device_index(path);
+    if (dev >= 0) return cam_open(dev, flags);
     if (!real_openat64) resolve();
     return real_openat64(dirfd, path, flags, mode);
 }
@@ -898,28 +927,26 @@ int dup(int fd) {
     return r;
 }
 
+/* After a successful dup2/dup3: newfd no longer is what it was, and may now be the camera.
+ * Failed calls leave the tracking alone; dup2(fd, fd) changes nothing. */
 static int dup_onto(int oldfd, int newfd, int r) {
-    if (r >= 0 && lookup(oldfd)) track_dup(oldfd, r);
+    if (r < 0 || oldfd == newfd) return r;
+    if (lookup(newfd)) {
+        pthread_mutex_lock(&lock);
+        release_fd(newfd);
+        pthread_mutex_unlock(&lock);
+    }
+    if (lookup(oldfd)) track_dup(oldfd, r);
     return r;
 }
 
 int dup2(int oldfd, int newfd) {
     if (!real_dup2) resolve();
-    if (oldfd != newfd && lookup(newfd)) {
-        pthread_mutex_lock(&lock);
-        release_fd(newfd);
-        pthread_mutex_unlock(&lock);
-    }
     return dup_onto(oldfd, newfd, real_dup2(oldfd, newfd));
 }
 
 int dup3(int oldfd, int newfd, int flags) {
     if (!real_dup3) resolve();
-    if (oldfd != newfd && lookup(newfd)) {
-        pthread_mutex_lock(&lock);
-        release_fd(newfd);
-        pthread_mutex_unlock(&lock);
-    }
     return dup_onto(oldfd, newfd, real_dup3(oldfd, newfd, flags));
 }
 
@@ -946,38 +973,43 @@ int fcntl64(int fd, int cmd, ...) {
 
 /* ---- stat / access ---------------------------------------------------------------- */
 
-static void fake_stat(struct stat *st) {
+static void fake_stat(int device, struct stat *st) {
     memset(st, 0, sizeof(*st));
     st->st_mode = S_IFCHR | 0660;
-    st->st_rdev = makedev(81, DEVICE_MINOR);
+    st->st_rdev = makedev(81, device);
     st->st_nlink = 1;
     st->st_uid = getuid();
     st->st_gid = getgid();
     st->st_blksize = 4096;
-    st->st_ino = 0xd201d35cu;
+    st->st_ino = 0xd201d35cu + (unsigned)device;
 }
 
 int stat(const char *path, struct stat *st) {
-    if (is_device_path(path)) { fake_stat(st); return 0; }
+    int dev = device_index(path);
+    if (dev >= 0) { fake_stat(dev, st); return 0; }
     if (!real_stat) resolve();
     return real_stat(path, st);
 }
 
 int lstat(const char *path, struct stat *st) {
-    if (is_device_path(path)) { fake_stat(st); return 0; }
+    int dev = device_index(path);
+    if (dev >= 0) { fake_stat(dev, st); return 0; }
     if (!real_lstat) resolve();
     return real_lstat(path, st);
 }
 
 int fstat(int fd, struct stat *st) {
-    if (lookup(fd)) { fake_stat(st); return 0; }
+    struct cam *c = lookup(fd);
+    if (c) { fake_stat(c->device, st); return 0; }
     if (!real_fstat) resolve();
     return real_fstat(fd, st);
 }
 
 int fstatat(int dirfd, const char *path, struct stat *st, int flags) {
-    if (is_device_path(path)) { fake_stat(st); return 0; }
-    if ((flags & AT_EMPTY_PATH) && path && !*path && lookup(dirfd)) { fake_stat(st); return 0; }
+    int dev = device_index(path);
+    if (dev >= 0) { fake_stat(dev, st); return 0; }
+    struct cam *c = (flags & AT_EMPTY_PATH) && path && !*path ? lookup(dirfd) : NULL;
+    if (c) { fake_stat(c->device, st); return 0; }
     if (!real_fstatat) resolve();
     return real_fstatat(dirfd, path, st, flags);
 }
@@ -992,13 +1024,13 @@ int fstatat64(int dirfd, const char *path, struct stat64 *st, int flags) {
 }
 
 int access(const char *path, int mode) {
-    if (is_device_path(path)) return (mode & X_OK) ? (errno = EACCES, -1) : 0;
+    if (device_index(path) >= 0) return (mode & X_OK) ? (errno = EACCES, -1) : 0;
     if (!real_access) resolve();
     return real_access(path, mode);
 }
 
 int faccessat(int dirfd, const char *path, int mode, int flags) {
-    if (is_device_path(path)) return (mode & X_OK) ? (errno = EACCES, -1) : 0;
+    if (device_index(path) >= 0) return (mode & X_OK) ? (errno = EACCES, -1) : 0;
     if (!real_faccessat) resolve();
     return real_faccessat(dirfd, path, mode, flags);
 }

@@ -128,11 +128,12 @@ static void stream(int c, const char *open_line) {
     hd->slots = SLOTS;
     hd->slot_stride = (uint32_t)stride;
     hd->data_offset = DDCAM_DATA_OFFSET;
+    const char *facing = strstr(open_line, " facing=back") ? "back" : "front";
     char ok[256];
     snprintf(ok, sizeof(ok),
              "ok v=1 width=%u height=%u fps=%u format=I420 slots=%d slot_stride=%zu data_offset=%u "
-             "size=%zu camera=fake facing=front sensor=%ux%u rotation=0\n",
-             w, h, fps, SLOTS, stride, DDCAM_DATA_OFFSET, size, w, h);
+             "size=%zu camera=fake facing=%s sensor=%ux%u rotation=0\n",
+             w, h, fps, SLOTS, stride, DDCAM_DATA_OFFSET, size, facing, w, h);
     int sent = say_with_fd(c, mfd, ok);
     close(mfd); /* the client has its own copy now */
     if (sent < 0) {

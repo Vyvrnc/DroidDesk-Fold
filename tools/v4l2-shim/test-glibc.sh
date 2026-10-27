@@ -14,7 +14,7 @@ mkdir -p tools/v4l2-shim/out
 # container gets a tmpfs there with a fake uevent.
 MSYS_NO_PATHCONV=1 docker run --rm --tmpfs /sys/dev/char -v "$(to_host "$PWD"):/repo" debian:trixie bash -c '
 set -e
-mkdir -p /sys/dev/char/81:0 && printf "MAJOR=81\nMINOR=0\nDEVNAME=video0\n" > /sys/dev/char/81:0/uevent
+for m in 0 1; do mkdir -p /sys/dev/char/81:$m && printf "MAJOR=81\nMINOR=$m\nDEVNAME=video$m\n" > /sys/dev/char/81:$m/uevent; done
 apt-get update -qq >/dev/null
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev v4l-utils ffmpeg socat >/dev/null 2>&1
 S=/repo/tools/v4l2-shim O=/repo/tools/v4l2-shim/out
@@ -67,6 +67,27 @@ grep -E "fps|RESULT|FAIL" /tmp/bridge.out
 n=$(grep -c "\[$CAP/.*camera bridge: ok v=1" $DROIDDESK_V4L2_LOG || true)
 echo "   $n of 4 streams from the bridge"
 [ "$n" = 4 ] || fail=1
+
+echo "== two devices: video0 = front, video1 = back (card names, facing sent to the bridge)"
+for d in 0 1; do
+  LD_PRELOAD=$P v4l2-ctl -d /dev/video$d --info 2>/dev/null | grep -E "Card type|Bus info" | sed "s/^/   video$d /"
+done
+LD_PRELOAD=$P v4l2-ctl -d /dev/video0 --info | grep -q "přední kamera" || fail=1
+LD_PRELOAD=$P v4l2-ctl -d /dev/video1 --info | grep -q "zadní kamera" || fail=1
+LD_PRELOAD=$P ffmpeg -hide_banner -loglevel error -f v4l2 -input_format yuv420p -video_size 640x480 \
+  -i /dev/video1 -frames:v 5 -f null - || fail=1
+tail -n 20 $DROIDDESK_V4L2_LOG | grep -q "open /dev/video1" || { echo "no open of video1"; fail=1; }
+tail -n 20 $DROIDDESK_V4L2_LOG | grep -q "camera bridge: ok v=1.*facing=back" || { echo "video1 not the back camera"; fail=1; }
+echo "-- switching cameras: video1 opens while video0 still streams, gets the camera when it is free"
+LD_PRELOAD=$P timeout 20 ffmpeg -hide_banner -loglevel error -f v4l2 -input_format yuv420p -video_size 640x480 \
+  -i /dev/video0 -frames:v 150 -f null - &
+FF0=$!
+sleep 1
+LD_PRELOAD=$P timeout 20 ffmpeg -hide_banner -loglevel error -f v4l2 -input_format yuv420p -video_size 640x480 \
+  -i /dev/video1 -frames:v 30 -f null - && echo "   video1 got its frames" || { echo "   video1 failed"; fail=1; }
+wait $FF0 || fail=1
+grep -q "camera busy (another stream), retrying" $DROIDDESK_V4L2_LOG || { echo "no busy retry in the log"; fail=1; }
+tail -n 30 $DROIDDESK_V4L2_LOG | grep -q "facing=back" || { echo "video1 did not get the back camera"; fail=1; }
 
 echo "== camera source: bridge lost mid-stream (app restart), reconnects, ffmpeg gets its 150 frames"
 LD_PRELOAD=$P timeout 30 ffmpeg -hide_banner -loglevel error -f v4l2 -input_format yuv420p -video_size 640x480 \

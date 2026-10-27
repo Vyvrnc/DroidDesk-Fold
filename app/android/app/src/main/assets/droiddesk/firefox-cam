@@ -4,7 +4,8 @@
 #
 #   firefox-cam [URL]             default URL: https://webcamtests.com/
 #
-#   DROIDDESK_CAMERA_FACING=back  back camera instead of the front one
+#   Two cameras: /dev/video0 = front, /dev/video1 = back; switch in the page's camera menu.
+#   DROIDDESK_CAMERA_FACING=back  back camera on both devices
 #   DROIDDESK_V4L2_SOURCE=pattern moving test pattern instead of the camera
 #   DROIDDESK_CAMERA_ROTATE=90|180|270, DROIDDESK_CAMERA_MIRROR=1  correct the picture by hand
 #
@@ -44,7 +45,7 @@ EOF
 
 export DROIDDESK_V4L2_SOURCE="${DROIDDESK_V4L2_SOURCE:-camera}"
 export LD_PRELOAD="$SHIM${LD_PRELOAD:+:$LD_PRELOAD}"
-echo "firefox-cam: source $DROIDDESK_V4L2_SOURCE, camera ${DROIDDESK_CAMERA_FACING:-as chosen with droiddesk-camera (front at first)}"
+echo "firefox-cam: source $DROIDDESK_V4L2_SOURCE, camera ${DROIDDESK_CAMERA_FACING:-video0 front, video1 back}"
 export MOZ_LOG="${MOZ_LOG:-CamerasParent:4,VideoEngine:4,webrtc_trace:3}"
 export MOZ_LOG_FILE="${MOZ_LOG_FILE:-$TMPDIR/firefox-cam-moz.log}"
 echo "firefox-cam: LD_PRELOAD=$LD_PRELOAD"

@@ -3,11 +3,11 @@
 
   droiddesk-camera              same as status
   droiddesk-camera status       idle, or the running stream (camera, size, rotation)
-  droiddesk-camera front        front camera (also switches a running call)
-  droiddesk-camera back         back camera
+  droiddesk-camera front        switch a running call to the front camera
+  droiddesk-camera back         switch a running call to the back camera
 
-The choice is remembered. Firefox gets the camera through firefox-cam; for one start
-only, DROIDDESK_CAMERA_FACING=back firefox-cam does the same.
+Firefox (firefox-cam) sees two cameras, "DroidDesk – přední kamera" (/dev/video0) and
+"DroidDesk – zadní kamera" (/dev/video1); pick one in the page's own camera menu.
 """
 import socket
 import sys

@@ -506,7 +506,7 @@ order in `LD_PRELOAD` does not matter (tested both).
   Firefox's capture path, but `close_range` in child-process setup is worth checking.
 - A blocking DQBUF (fd without O_NONBLOCK) racing a close from another thread is not safe
   yet (Firefox uses O_NONBLOCK).
-- Only `/dev/video0`, one stream at a time per open. Front/back = `/dev/video1` later;
+- One stream at a time per open. ~~Front/back = `/dev/video1` later~~ done in fold.81;
   Chromium under proot also needs the readdir/placeholder from §2 (a).
 - ~~The Android side (Camera2 → memfd ring → `@droiddesk.camera`) replaces `dd_pattern_source`;
   timing, rotation and the foreground rules from §3 are not addressed yet.~~ Done, see below.
@@ -618,9 +618,15 @@ control connections: "facing front|back" -> ok (switches a running stream, remem
 
 ### Facing
 
-`DROIDDESK_CAMERA_FACING=back firefox-cam` for one start; `droiddesk-camera back|front`
-switches a running stream (closes and reopens the camera, same V4L2 format) and is remembered
-for the next one; `droiddesk-camera` alone prints the status.
+Since fold.81 the shim fakes two devices: `/dev/video0` "DroidDesk – přední kamera"
+(bus `platform:droiddesk-camera-0`, opens the bridge with `facing=front`) and `/dev/video1`
+"DroidDesk – zadní kamera" (`-1`, `facing=back`), so Meet, Slack and other pages switch
+cameras in their own menu. `DROIDDESK_CAMERA_FACING=back|front` forces one camera for both
+devices. `droiddesk-camera back|front` still switches a running stream (closes and reopens
+the camera, same V4L2 format); `droiddesk-camera` alone prints the status. The bridge serves
+one stream at a time, so a page opening both devices at once gets `err busy` on the second
+(test pattern). A phone with one camera serves it on both devices (the bridge falls back to
+any usable camera).
 
 ### Tests (2026-10-27, no device)
 
