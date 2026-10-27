@@ -7,11 +7,12 @@
  *
  * Client -> server
  *   open v=1 width=W height=H fps=F format=I420 facing=front|back rotate=0|90|180|270 mirror=0|1
- *       Starts the camera. rotate is added to the automatic rotation (sensor orientation +
+ *       Starts the camera. facing is optional (default: the camera last chosen with "facing",
+ *       front at first). rotate is added to the automatic rotation (sensor orientation +
  *       display rotation), mirror flips the picture horizontally; both default to 0.
  *   close
  *       Stops the camera at once (closing the socket does the same).
- *   facing front|back    (on its own connection, or on the streaming one)
+ *   facing front|back    (on its own connection)
  *       Switches the running stream and makes that camera the default. Answer "ok" / "err".
  *   status               (on its own connection) -> "ok idle" or "ok streaming <fields>"
  *

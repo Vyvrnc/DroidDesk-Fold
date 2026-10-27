@@ -1366,8 +1366,8 @@ class LinuxRuntime(private val context: Context) {
             // Format and files: libdroiddesk_blk.so (LD_PRELOAD shim) and libdroiddesk_exfat.so
             // (exFAT files) from the APK into $PREFIX/lib, as a new inode whenever they
             // changed (running tools may still have the old one mapped). libdroiddesk_v4l2.so
-            // (fake /dev/video0, camera bridge prototype) is only copied; nothing preloads it
-            // unless the user starts Firefox through tools/v4l2-shim/firefox-cam.
+            // (fake /dev/video0 fed by CameraBridge) is only copied; nothing preloads it
+            // unless the user starts Firefox through firefox-cam (below).
             for (name in listOf("libdroiddesk_blk.so", "libdroiddesk_exfat.so", "libdroiddesk_ntfs.so",
                     "libdroiddesk_v4l2.so")) {
                 val source = File(context.applicationInfo.nativeLibraryDir, name)
@@ -1413,6 +1413,25 @@ class LinuxRuntime(private val context: Context) {
                         "exec \"${File(binDir, "python3").absolutePath}\" \"${netClient.absolutePath}\" \"${'$'}@\"\n",
                 )
                 netCommand.setExecutable(true, false)
+            }
+            // Phone camera for Linux programs: firefox-cam starts Termux Firefox with
+            // libdroiddesk_v4l2.so (fake /dev/video0 fed by CameraBridge, opt-in); droiddesk-camera
+            // front|back|status picks the camera. The asset's #!/usr/bin/env line becomes our bash.
+            File(binDir, "firefox-cam").let { launcher ->
+                val script = context.assets.open("droiddesk/firefox-cam").bufferedReader().use { it.readText() }
+                launcher.writeText("#!${File(binDir, "bash").absolutePath}\n" + script.substringAfter('\n'))
+                launcher.setExecutable(true, false)
+            }
+            val cameraClient = File(binDir, "droiddesk-camera.py")
+            context.assets.open("droiddesk/droiddesk-camera.py").use { input ->
+                cameraClient.outputStream().use(input::copyTo)
+            }
+            File(binDir, "droiddesk-camera").let { cameraCommand ->
+                cameraCommand.writeText(
+                    "#!${File(binDir, "bash").absolutePath}\n" +
+                        "exec \"${File(binDir, "python3").absolutePath}\" \"${cameraClient.absolutePath}\" \"${'$'}@\"\n",
+                )
+                cameraCommand.setExecutable(true, false)
             }
             // droiddesk-eth (Ethernet adapter taken over for diagnostics): a static Go binary from
             // the GitHub release, fetched on first use (tools/droiddesk-eth, pinned by sha256).

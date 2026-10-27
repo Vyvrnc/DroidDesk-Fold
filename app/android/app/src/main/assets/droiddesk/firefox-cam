@@ -44,7 +44,7 @@ EOF
 
 export DROIDDESK_V4L2_SOURCE="${DROIDDESK_V4L2_SOURCE:-camera}"
 export LD_PRELOAD="$SHIM${LD_PRELOAD:+:$LD_PRELOAD}"
-echo "firefox-cam: source $DROIDDESK_V4L2_SOURCE, ${DROIDDESK_CAMERA_FACING:-front} camera"
+echo "firefox-cam: source $DROIDDESK_V4L2_SOURCE, camera ${DROIDDESK_CAMERA_FACING:-as chosen with droiddesk-camera (front at first)}"
 export MOZ_LOG="${MOZ_LOG:-CamerasParent:4,VideoEngine:4,webrtc_trace:3}"
 export MOZ_LOG_FILE="${MOZ_LOG_FILE:-$TMPDIR/firefox-cam-moz.log}"
 echo "firefox-cam: LD_PRELOAD=$LD_PRELOAD"

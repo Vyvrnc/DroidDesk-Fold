@@ -130,11 +130,16 @@ static int connect_and_open(struct bridge *b) {
         errno = e;
         return -1;
     }
+    /* Without DROIDDESK_CAMERA_FACING the app picks the camera last chosen with
+     * "droiddesk-camera front|back" (front at first). */
+    const char *facing = getenv("DROIDDESK_CAMERA_FACING");
+    char facing_field[16] = "";
+    if (facing && *facing)
+        snprintf(facing_field, sizeof(facing_field), " facing=%s", strcmp(facing, "back") == 0 ? "back" : "front");
     char line[256];
     int len = snprintf(line, sizeof(line),
-                       "open v=%d width=%u height=%u fps=%u format=I420 facing=%s rotate=%d mirror=%d\n",
-                       DDCAM_VERSION, b->f.width, b->f.height, b->f.fps ? b->f.fps : 30,
-                       strcmp(env_or("DROIDDESK_CAMERA_FACING", "front"), "back") == 0 ? "back" : "front",
+                       "open v=%d width=%u height=%u fps=%u format=I420%s rotate=%d mirror=%d\n",
+                       DDCAM_VERSION, b->f.width, b->f.height, b->f.fps ? b->f.fps : 30, facing_field,
                        atoi(env_or("DROIDDESK_CAMERA_ROTATE", "0")),
                        strcmp(env_or("DROIDDESK_CAMERA_MIRROR", "0"), "1") == 0);
     if (send(s, line, (size_t)len, MSG_NOSIGNAL) != len) {

@@ -28,6 +28,10 @@ rm -f $DROIDDESK_V4L2_LOG
 P=/tmp/libdroiddesk_v4l2.so
 fail=0
 
+echo "== app side: camera_jni.c conversion (YUV_420_888 -> I420, rotation, crop, scale)"
+gcc -O2 -Wall -Wextra -Wno-unused-parameter -I$S/camera_jni_test/stub -o /tmp/camera_jni_test \
+  $S/camera_jni_test/test.c && /tmp/camera_jni_test || fail=1
+
 echo "== Firefox call sequence (no app: the camera source falls back to the test pattern)"
 LD_PRELOAD=$P /tmp/v4l2_capture_test 3 $O/glibc || fail=1
 

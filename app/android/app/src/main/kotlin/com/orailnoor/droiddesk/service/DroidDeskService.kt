@@ -23,6 +23,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.orailnoor.droiddesk.MainActivity
 import com.orailnoor.droiddesk.runtime.AndroidAppBridge
+import com.orailnoor.droiddesk.runtime.CameraBridge
 import com.orailnoor.droiddesk.runtime.LinuxRuntime
 import com.orailnoor.droiddesk.runtime.NetBridge
 import com.orailnoor.droiddesk.runtime.UsbBridge
@@ -142,6 +143,7 @@ class DroidDeskService : Service() {
         AndroidAppBridge.start(this)
         UsbBridge.start(this)
         NetBridge.start(this)
+        CameraBridge.start(this)
         running = true
         createNotificationChannel()
         acquireWakeLock()
@@ -197,6 +199,8 @@ class DroidDeskService : Service() {
             x11Bound = false
         }
         AndroidAppBridge.stop()
+        // The camera serves Firefox on the desktop and ends with it.
+        CameraBridge.stop()
         // A terminal (Claude Code without the desktop) keeps using droiddesk-usb/-eth/-net.
         if (!TerminalSessions.anyRunning()) {
             UsbBridge.stop()
