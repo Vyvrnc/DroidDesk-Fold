@@ -4,7 +4,10 @@ Goal: Google Meet / Slack huddles in a Linux browser inside DroidDesk-Fold (Term
 Debian Brave/Chromium/Electron under proot) use the phone/tablet camera. No root, so no
 v4l2loopback, no `/dev/video*`, no CUSE.
 
-Status: research, plus the Spike A prototype (fake V4L2 device with a test pattern, see "Prototype status" at the end). Claims marked **[unverified]** were not confirmed
+Status: research, the Spike A prototype (fake V4L2 device with a test pattern, verified in
+Termux Firefox 157 on the Tab S10 FE with fold.76, see "Prototype status") and the real camera
+source (CameraBridge in the app + the shim's camera source, see "Camera bridge status" at the
+end; tested without a device, not yet on one). Claims marked **[unverified]** were not confirmed
 against source or a device. Web content was treated as data.
 
 ## TL;DR
@@ -368,7 +371,7 @@ started through `tools/v4l2-shim/firefox-cam`.
 | `tools/build-v4l2-shim.sh` | NDK r28c / API 29 build (Docker, same image as `build-socket-hook.sh`) → `app/android/app/src/main/jniLibs/arm64-v8a/libdroiddesk_v4l2.so` + bionic test binary in `tools/v4l2-shim/out/`. |
 | `tools/v4l2-shim/test-bionic.sh` | Runs the bionic build in `termux/termux-docker:aarch64` (Android libc/linker under qemu), alone and stacked with `libsocket_hook.so` in both orders. |
 | `tools/v4l2-shim/test-glibc.sh` | glibc build in Debian trixie; the test program plus `v4l2-ctl` and `ffmpeg -f v4l2`. |
-| `tools/v4l2-shim/firefox-cam` | Launcher: own profile, `webgl.disabled`, `allow-pipewire=false`, `LD_PRELOAD`, `MOZ_LOG`. |
+| `tools/v4l2-shim/firefox-cam` | Launcher: own profile, `webgl.disabled`, `allow-pipewire=false`, `LD_PRELOAD`, `MOZ_LOG`. (Now `app/android/app/src/main/assets/droiddesk/firefox-cam`, installed as `$PREFIX/bin/firefox-cam`.) |
 | `LinuxRuntime.writeDeviceTools()` | Copies the `.so` to `$PREFIX/lib` like `libdroiddesk_blk.so` (copy only, nothing loads it). |
 
 `socket_hook.c` is unchanged. The two libraries chain through `dlsym(RTLD_NEXT)`, so the
@@ -505,5 +508,179 @@ order in `LD_PRELOAD` does not matter (tested both).
   yet (Firefox uses O_NONBLOCK).
 - Only `/dev/video0`, one stream at a time per open. Front/back = `/dev/video1` later;
   Chromium under proot also needs the readdir/placeholder from §2 (a).
-- The Android side (Camera2 → memfd ring → `@droiddesk.camera`) replaces `dd_pattern_source`;
-  timing, rotation and the foreground rules from §3 are not addressed yet.
+- ~~The Android side (Camera2 → memfd ring → `@droiddesk.camera`) replaces `dd_pattern_source`;
+  timing, rotation and the foreground rules from §3 are not addressed yet.~~ Done, see below.
+
+**Verified on device (fold.76, Galaxy Tab S10 FE):** Termux Firefox 157 with the shim finds
+"DroidDesk Camera" on all test pages; Meet's green room shows the pattern at 640x480 30 fps,
+720p at 15 fps, no crash (WebGL off). Capture runs in Firefox's parent process; Firefox
+negotiates YU12 640x480@30 for Meet. 720p stays at 15 fps (no MJPEG mode, decided).
+
+## Camera bridge status (real camera, 2026-10-27)
+
+The test pattern is replaced by the phone camera. Opt-in as before: only Firefox started
+through `firefox-cam` preloads the shim. Built and tested without a device (below); **not
+yet run on a device**.
+
+### Pieces
+
+| File | What |
+|---|---|
+| `tools/v4l2-shim/camera_bridge_protocol.h` | Protocol v1 and the shared-memory layout (the reference for both sides). |
+| `tools/v4l2-shim/frame_source_bridge.c` | Shim: the camera frame source (default). Falls back to the pattern per stream. |
+| `tools/v4l2-shim/fake_camera_bridge.c` | Test server: the protocol with the moving pattern, no Android. |
+| `tools/v4l2-shim/camera_jni_test/` | Host test of the app's conversion code (`camera_jni.c`). |
+| `app/.../runtime/CameraBridge.kt` | App: socket server, Camera2 session, permission, notifications. |
+| `app/.../cpp/camera_jni.c` | App: `ASharedMemory` ring, YUV_420_888 → I420 with rotation/crop/scale/mirror, seqlock. Library `libdroiddesk_camera.so` (CMake). |
+| `app/.../view/CameraPermissionActivity.kt` | App: shows Android's CAMERA dialog for the service (no UI of its own). |
+| `assets/droiddesk/firefox-cam`, `assets/droiddesk/droiddesk-camera.py` | Installed by `writeDeviceTools()` as `$PREFIX/bin/firefox-cam` and `droiddesk-camera`. |
+
+### Protocol (v1, abstract socket `@droiddesk.camera`, text lines)
+
+```
+client: open v=1 width=640 height=480 fps=30 format=I420 [facing=front|back] [rotate=0..270] [mirror=0|1]
+server: ok v=1 width=640 height=480 fps=30 format=I420 slots=3 slot_stride=462848 data_offset=4096
+           size=1392640 camera=1 facing=front sensor=640x480 rotation=0      + shared memory fd (SCM_RIGHTS)
+server: frame <slot> <seq> <timestamp_ns>        one per frame
+server: state paused <why> | state running      camera lost / back
+client: close                                    (or close the socket) camera stops at once
+errors: err busy | no-permission | no-camera | bad-request | camera-error <text>
+control connections: "facing front|back" -> ok (switches a running stream, remembered),
+                     "status" -> ok idle | ok streaming …
+```
+
+- **Shared memory:** `ASharedMemory_create` (ashmem or memfd), header (magic `DDCM`, version,
+  size, fourcc YU12, frame size, slots, slot stride, data offset, then `slot_seq[8]` and
+  `slot_ts[8]`) + 3 page-aligned slots of tightly packed I420 at exactly the size the shim
+  asked for. After the app maps it, `ASharedMemory_setProt(PROT_READ)` makes it read-only for
+  every later mapping, so the Linux side cannot write into it.
+- **No acks, seqlock per slot:** the app writes slots round-robin (`slot_seq = 0`, release
+  fence, pixels, `slot_seq = seq` release) and sends `frame slot seq ts`. The shim waits on the
+  socket (`poll`, ≤ 100 ms slices), copies the newest announced slot, re-reads `slot_seq` and
+  drops the copy if it changed (counted as "overwritten while copying" in the log). With
+  3 slots the reader has two frame periods (66 ms at 30 fps) for a ~0.5 ms copy.
+- **One client at a time.** A second `open` waits up to 1.5 s (a stream that is just ending,
+  as libwebrtc does STREAMOFF → STREAMON when the page changes the size), then gets `err busy`.
+- **Pacing:** the app sets the AE range with the asked fps as the top (lowest bottom ≥ fps/2,
+  e.g. [15, 30], so AE may slow down in the dark) and drops frames that come faster than
+  0.75 of the period; the shim does the same check again.
+- **Fallback in the shim:** `start()` only connects and sends `open` (it runs under the shim's
+  lock, so it must not block); the answer is awaited on the producer thread. No socket, an
+  `err …` answer or no answer within 35 s (the permission dialog may be up) → the test pattern
+  for that stream, with one log line saying why. A stream that breaks later (app restarted)
+  keeps the last frame and reconnects every 2 s. `DROIDDESK_V4L2_SOURCE=pattern` skips the
+  bridge.
+
+### Permission
+
+- Manifest: `android.permission.CAMERA`, `android.hardware.camera.any required=false`.
+- Not asked at app start (unlike the microphone): only when a Linux program first opens the
+  camera. The service starts `CameraPermissionActivity` (translucent, no layout, excluded from
+  recents; only Android's own dialog is visible) and waits up to 30 s for the answer.
+- If Android does not let the activity start within 3 s (DroidDesk not in the foreground,
+  background activity start rules) the client gets `err no-permission` and a notification
+  "Kamera pro Linux — Linuxová aplikace chce použít kameru. Klepnutím povolíte DroidDesk
+  přístup ke kameře, pak kameru v aplikaci zapněte znovu." opens the dialog.
+- If the user declines (or declined for good): `err no-permission` and a notification that
+  opens the app settings ("… v části Oprávnění povolte Fotoaparát."). The shim shows its test
+  pattern, so the browser does not hang.
+
+### Foreground / background (targetSdk 28)
+
+- Android 9+ gives the camera only to apps in the foreground. While `DesktopActivity` (the X
+  window) is visible, DroidDesk is the foreground app, which is the normal case during a call;
+  `DroidDeskService` (foreground service, `dataSync` type on Android 14+) keeps the process up.
+- When DroidDesk goes fully to the background, CameraService disconnects or errors the camera
+  **[expected, unverified on Android 16]**. The bridge then sends `state paused <why>`, closes
+  the camera and retries every 2 s; the shim keeps the last frame (the call shows a frozen
+  picture), and frames resume with `state running` once DroidDesk is visible again. Whether a
+  pre-R app's `dataSync` FGS keeps the camera in the background is the open question from §3;
+  the behaviour above is correct either way.
+- Another app taking the camera (higher priority, e.g. Android's camera app in split screen)
+  is handled the same way. The privacy switch (Android 12+ quick setting) shows as
+  `ERROR_CAMERA_DISABLED` or black frames **[unverified]**.
+- The camera runs only while a client streams: `STREAMOFF`/close in the browser → `close` →
+  `CameraDevice.close()`. `DroidDeskService.onDestroy` stops the bridge and every stream.
+
+### Rotation and mirroring
+
+- Clockwise rotation applied to the sensor image: front `(SENSOR_ORIENTATION − display) mod 360`,
+  back `(SENSOR_ORIENTATION + display) mod 360`, display = rotation of `Display.DEFAULT_DISPLAY`
+  (the phone's own screen, also under DeX) in degrees, followed with a `DisplayListener`, so
+  turning the device mid-call is applied on the next frame.
+- The V4L2 format stays landscape (1280x720 / 640x480). A portrait picture (phone held
+  upright) is centre-cropped to the landscape aspect; the app picks a sensor size large enough
+  that the crop needs no upscaling (smallest YUV size that covers the crop and runs at the
+  fps, by `getOutputMinFrameDuration`).
+- Not mirrored: the stream shows what others should see; browsers mirror the self-view.
+- Manual correction without a rebuild: `DROIDDESK_CAMERA_ROTATE=90|180|270` (added to the
+  automatic value) and `DROIDDESK_CAMERA_MIRROR=1`.
+
+### Facing
+
+`DROIDDESK_CAMERA_FACING=back firefox-cam` for one start; `droiddesk-camera back|front`
+switches a running stream (closes and reopens the camera, same V4L2 format) and is remembered
+for the next one; `droiddesk-camera` alone prints the status.
+
+### Tests (2026-10-27, no device)
+
+- `test-glibc.sh` (Debian trixie, x86_64): PASS.
+  - `camera_jni_test`: rotation 0/90/180/270, mirror, mirror + 90, centre crop, 2:1 scaling,
+    NV21-style interleaved chroma (pixel stride 2, row stride ≠ width) → exact values; too
+    small plane buffer rejected; seqlock word set.
+  - Capture test against `fake_camera_bridge`: YU12 1280x720@15 → 15.0 fps, YU12 640x480 →
+    30.0, YUYV 640x480 → 30.0 (I420→YUYV in the shim), NV12 1280x720 → 30.0; counter in the
+    image rises on every frame, 0 overwritten slots; all 4 streams from the bridge (none fell
+    back), including the STREAMOFF → STREAMON size changes.
+  - A second client while streaming gets `err busy`.
+  - Bridge killed mid-stream and restarted 2.5 s later: the shim logs "connection lost",
+    "reconnected", and `ffmpeg -f v4l2` still gets its 150 frames.
+  - `err no-permission` answer → test pattern, logged; no app at all → test pattern, logged.
+  - Earlier checks unchanged (v4l2-ctl, ffmpeg, passthrough).
+- `test-bionic.sh` (termux-docker aarch64 under qemu): PASS, including the bridge run with
+  the shim stacked after `libsocket_hook.so` (memfd over SCM_RIGHTS on bionic).
+- `camera_jni.c` builds with NDK r28c (API 29) and exports the five JNI functions;
+  `CameraBridge.kt` + `CameraPermissionActivity.kt` compile with kotlinc 2.2.20 against
+  `android-36/android.jar` (no warnings). The full APK build was not run.
+
+### On-device test
+
+1. Build and install the APK (the camera needs the new `libdroiddesk_camera.so`, manifest and
+   `CameraBridge`; the shim alone is not enough this time). Open the desktop once:
+   `writeDeviceTools()` copies `libdroiddesk_v4l2.so` and installs `firefox-cam` and
+   `droiddesk-camera` into `$PREFIX/bin`.
+2. In a desktop terminal: `droiddesk-camera` → `ok idle` (bridge up).
+3. `firefox-cam https://webrtc.github.io/samples/src/content/getusermedia/gum/`. On the first
+   camera use Android asks for the camera permission; allow it. If no dialog came (or the page
+   showed the test pattern), look for the "Kamera pro Linux" notification, allow, and restart
+   the camera on the page.
+4. Expect the front camera, upright, not mirrored in the stream (the page's self-view may be
+   mirrored by the page itself; check with text held up to the camera on
+   https://webcamtests.com/ or in the remote view of a call).
+5. Turn the tablet (landscape ↔ portrait): the picture stays upright (portrait = cropped).
+6. `droiddesk-camera back` while the page shows video: switches to the back camera within
+   about a second; `droiddesk-camera front` back again; `droiddesk-camera` shows the stream.
+7. Meet green room and a 2-party call (640x480@30; 720p@15), `about:webrtc` for the outgoing
+   fps. Switch to another Android app for 10 s and back: the picture freezes, then continues.
+8. Start a second Firefox with its own profile
+   (`FIREFOX_CAM_PROFILE=~/.mozilla-apps/camera-test2 firefox-cam`) while the first streams:
+   the second shows the test pattern (busy).
+9. Logs: `$TMPDIR/droiddesk-v4l2.log` (`camera bridge: ok v=1 … camera=… sensor=… rotation=…`,
+   `stop after N frames (M overwritten …)`, fallback reasons), `logcat -s CameraBridge`
+   (opening camera, size, fps range, rotation, paused/running), `$TMPDIR/firefox-cam-moz.log*`.
+   CPU: `top -H -p $(pidof com.orailnoor.droiddesk)` — the `camera-bridge-s` thread (Linux shortens thread names to 15 characters).
+
+### Open risks
+
+- **Rotation sign not verified on a device.** The formulas follow Android's camera
+  orientation documentation; if the picture is upside down or sideways on one of the devices,
+  `DROIDDESK_CAMERA_ROTATE` corrects it at once and the formula gets fixed.
+- Background behaviour of a targetSdk-28 app with a `dataSync` FGS on Android 16 (see above).
+- Conversion cost: bilinear per pixel in C, no NEON/libyuv; estimated 2–4 ms per 640x480 frame
+  and 6–10 ms per 720p frame (both cheap at 30/15 fps), the exact-size unrotated case is a
+  plain copy **[estimate, measure on device]**.
+- The fps-based size choice uses `getOutputMinFrameDuration`; some HALs report sizes that
+  still run slower in a repeating request. The log line shows the chosen size and range.
+- Camera + WebGL in the same Firefox tab still crashes; `firefox-cam` keeps WebGL off.
+- Only Termux Firefox through `firefox-cam`. Debian Brave/Chromium under proot need the glibc
+  shim build + `/dev/video0` placeholder (§2 (a), Spike B), not done.
