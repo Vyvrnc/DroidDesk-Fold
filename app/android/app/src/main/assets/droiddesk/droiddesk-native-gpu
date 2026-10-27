@@ -33,8 +33,10 @@ pkg_version() {
 firefox_hint() {
     cat <<EOF
 
-Firefox: hardwarový WebRender si zapne sám, když najde funkční OpenGL (ověříš v about:support,
-řádek „Compositing“). DroidDesk žádné předvolby Firefoxu nemění.
+Firefox: virgl považuje za softwarový ovladač („mesa/software-unknown“), takže sám zůstane
+u softwarového vykreslování. Hardwarový WebRender zapneš v about:config:
+gfx.webrender.all = true, a pak Firefox restartuj (ověříš v about:support, řádek
+„Compositing“ = WebRender). DroidDesk žádné předvolby Firefoxu nemění.
 Pozor, známá chyba: YouTube může Firefox přes virgl občas shodit (zpětné čtení plátna pro
 ambientní režim; v $LOG pak bývá „failed to export fence sync object“).
 Pomáhá vypnout v přehrávači YouTube Nastavení → Ambientní režim. Když Firefox padá dál,
@@ -43,9 +45,10 @@ EOF
 }
 
 socket_answers() {
-    [ -S "$LINK" ] || [ -S "$SOCKET" ] || return 1
+    local path
+    if [ -S "$LINK" ]; then path=$LINK; elif [ -S "$SOCKET" ]; then path=$SOCKET; else return 1; fi
     command -v python3 >/dev/null 2>&1 || return 0
-    python3 - "$LINK" <<'EOF' >/dev/null 2>&1
+    python3 - "$path" <<'EOF' >/dev/null 2>&1
 import socket, sys
 s = socket.socket(socket.AF_UNIX)
 s.settimeout(2)
@@ -133,7 +136,7 @@ cmd_status() {
         echo "  Bez balíčku mesa zůstává llvmpipe; spusť znovu droiddesk-native-gpu on."
     fi
     if socket_answers; then
-        echo "virgl server: odpovídá ($LINK)"
+        echo "virgl server: odpovídá"
     elif [ -S "$SOCKET" ]; then
         echo "virgl server: socket existuje, ale neodpovídá (log: $LOG)"
     else

@@ -40,7 +40,10 @@ object XfceMobileProfile {
                 File(panelDir, "launcher-21/droiddesk-terminal.desktop"),
                 name = "Terminal",
                 comment = "Open the Linux terminal",
-                exec = "xfce4-terminal",
+                // Own process per window: the single-instance server outlives a desktop
+                // restart (terminals are kept) and opened new windows with the old session's
+                // environment, e.g. llvmpipe after switching to virgl (Tab S10 FE).
+                exec = "xfce4-terminal --disable-server",
                 icon = "org.xfce.terminalemulator",
             )
             writeLauncher(

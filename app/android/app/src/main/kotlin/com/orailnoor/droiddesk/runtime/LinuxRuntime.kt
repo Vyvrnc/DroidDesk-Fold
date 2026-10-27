@@ -20,6 +20,12 @@ class LinuxRuntime(private val context: Context) {
 
     companion object {
         private const val TAG = "LinuxRuntime"
+        // Process-wide: the activities and the service each have a LinuxRuntime, and per
+        // instance every one of them started its own virgl server (three on one socket path
+        // after two desktop restarts, Tab S10 FE).
+        @Volatile private var virglServer: Process? = null
+        private val virglLock = Any()
+        @Volatile private var virglStarting = false
         private const val BOOTSTRAP_MARKER = ".bootstrap_extracted"
         // v4: also files/home, files/apps and cache, so existing installs get one more pass.
         private const val SHEBANG_MARKER = ".relocated_text_paths_v4"
@@ -398,7 +404,7 @@ class LinuxRuntime(private val context: Context) {
                 Type=Application
                 Name=Claude Code
                 Comment=Claude Code (Anthropic) v Debianu
-                Exec=xfce4-terminal --title "Claude Code" -x ${File(binDir, "claude-tmux").absolutePath}
+                Exec=xfce4-terminal --disable-server --title "Claude Code" -x ${File(binDir, "claude-tmux").absolutePath}
                 Icon=utilities-terminal
                 Categories=Development;
                 Terminal=false
@@ -3274,9 +3280,6 @@ class LinuxRuntime(private val context: Context) {
     }
 
     @Volatile private var debianSetupRunning = false
-    @Volatile private var virglServer: Process? = null
-    private val virglLock = Any()
-    @Volatile private var virglStarting = false
 
     /**
      * Hardware OpenGL for Debian programs on GPUs without KGSL (Mali, Xclipse; Galaxy Tab
@@ -3294,11 +3297,14 @@ class LinuxRuntime(private val context: Context) {
      * copy of the server points it at a same-length symlink.
      */
     private fun ensureVirglServerInBackground() {
-        if (File("/dev/kgsl-3d0").exists() || virglStarting || virglServer?.isAlive == true) return
+        if (File("/dev/kgsl-3d0").exists()) return
         val rootfs = debianRootfs(baseDir)
         val debianWants = File(rootfs, "etc/droiddesk/gpu-virgl").exists() && !File(rootfs, "etc/droiddesk/gpu-off").exists()
         if (!debianWants && !nativeVirglWanted()) return
-        virglStarting = true
+        synchronized(virglLock) {
+            if (virglStarting || virglServer?.isAlive == true) return
+            virglStarting = true
+        }
         // No server of ours is alive: a socket left by a killed app would answer nobody, and the
         // native session (nativeVirglActive) must not mistake it for a running server.
         virglSocket.delete()
@@ -3318,6 +3324,7 @@ class LinuxRuntime(private val context: Context) {
                         .start().waitFor()
                 }
                 val patched = prepareVirglServer(server, angle) ?: return@Thread
+                killStaleVirglServers(patched)
                 val socket = virglSocket
                 socket.delete()
                 // Termux's Mesa ignores VTEST_SOCKET_NAME and connects to $PREFIX/tmp/.virgl_test
@@ -3370,6 +3377,41 @@ class LinuxRuntime(private val context: Context) {
                 virglStarting = false
             }
         }, "virgl-server").apply { isDaemon = true }.start()
+    }
+
+    /**
+     * Servers started by an earlier app process (the app was killed or recreated) are not in
+     * virglServer and would keep running next to the new one on the same socket path. Called
+     * only when this process has no live server; only our own uid's processes are visible.
+     */
+    private fun killStaleVirglServers(patched: File) {
+        File("/proc").listFiles()?.forEach { dir ->
+            val pid = dir.name.toIntOrNull() ?: return@forEach
+            val argv0 = runCatching { File(dir, "cmdline").readBytes() }.getOrNull()
+                ?.takeWhile { it != 0.toByte() }?.toByteArray()?.toString(Charsets.UTF_8) ?: return@forEach
+            if (argv0 == patched.absolutePath) {
+                Log.i(TAG, "virgl: killing a stale server, pid $pid")
+                runCatching { android.os.Process.killProcess(pid) }
+            }
+        }
+    }
+
+    /**
+     * Panel launchers written before fold.82 start xfce4-terminal as a single-instance server,
+     * which outlives a desktop restart and opens new windows with the old session's
+     * environment (llvmpipe after switching to virgl, Tab S10 FE).
+     */
+    private fun repairTerminalLaunchers() {
+        File(homeDir, ".config/xfce4/panel").listFiles()?.forEach { dir ->
+            if (!dir.name.startsWith("launcher-")) return@forEach
+            dir.listFiles { f -> f.name.endsWith(".desktop") }?.forEach { file ->
+                runCatching {
+                    val text = file.readText()
+                    val fixed = text.replace(Regex("(?m)^Exec=xfce4-terminal$"), "Exec=xfce4-terminal --disable-server")
+                    if (fixed != text) file.writeText(fixed)
+                }
+            }
+        }
     }
 
     /** A copy of the server with ANGLE's compiled-in com.termux directory replaced. */
@@ -4197,6 +4239,7 @@ class LinuxRuntime(private val context: Context) {
             }
         }
 
+        repairTerminalLaunchers()
         if (selectedDesktop == "xfce4") {
             XfceMobileProfile.install(
                 context = context,
