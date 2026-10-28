@@ -315,6 +315,20 @@ YouTube's ambient mode, or start Firefox with `GALLIUM_DRIVER=llvmpipe LIBGL_ALW
 Next: find why the fence export fails (ANGLE's EGL sync on Xclipse, `EGL_ANDROID_native_fence_sync`)
 before this can become a default.
 
+Night test 2026-10-28 (Tab S10 FE, Firefox with gfx.webrender.all on virpipe, Mesa 26.2.5,
+20 s YouTube starts): 13 of 16 starts failed at t≈7–10 s, the player's start, mostly
+SIGSEGV (NULL deref, si_addr 0x4) in Firefox's Renderer thread inside libgallium under
+libEGL_mesa (EGL entry point on the drisw/X11 path; DRI3 is unavailable), sometimes as
+WebRender "OutOfMemory" → software fallback; often after YouTube's 300x150 4x MSAA WebGL
+FBO comes back incomplete (0x8cd6). Not a leak (virgl child fd/RSS/dmabuf flat, ≥1.9 GB
+free) and not a static caps gap (the same FBO formats/samples are complete in a standalone
+EGL test). `webgl.msaa-samples=0` does not help. With `webgl.disabled=true`: 0 of 26
+failures, 5 min runs stable, so the hint recommends that pair. Video still costs about the
+same CPU as llvmpipe (Firefox ~400 % + virgl ~78 %); the gain is scrolling and UI.
+Next: Termux Mesa with debug info for a symbolized backtrace of the EGL crash.
+Also seen once in 29 starts: Firefox hangs at start without a window (3 % CPU, only the
+startup Mesa lines in its log), probably glxtest or the virgl connect; unexplained.
+
 Other limits: if the server dies, apps started from the running XFCE keep `virpipe` until the
 desktop restarts (the app removes the socket, so new terminals and the next session use llvmpipe).
 

@@ -34,13 +34,15 @@ firefox_hint() {
     cat <<EOF
 
 Firefox: virgl považuje za softwarový ovladač („mesa/software-unknown“), takže sám zůstane
-u softwarového vykreslování. Hardwarový WebRender zapneš v about:config:
-gfx.webrender.all = true, a pak Firefox restartuj (ověříš v about:support, řádek
-„Compositing“ = WebRender). DroidDesk žádné předvolby Firefoxu nemění.
-Pozor, známá chyba: YouTube může Firefox přes virgl občas shodit (zpětné čtení plátna pro
-ambientní režim; v $LOG pak bývá „failed to export fence sync object“).
-Pomáhá vypnout v přehrávači YouTube Nastavení → Ambientní režim. Když Firefox padá dál,
-spusť ho softwarově: GALLIUM_DRIVER=llvmpipe LIBGL_ALWAYS_SOFTWARE=true firefox
+u softwarového vykreslování. Hardwarový WebRender zapneš v about:config dvojicí:
+  gfx.webrender.all = true
+  webgl.disabled = true
+a pak Firefox restartuj (ověříš v about:support, řádek „Compositing“ = WebRender).
+Bez vypnutého WebGL Firefox přes virgl padá: na Tab S10 FE 13 z 16 startů YouTube spadlo
+do 10 s (pád v Mesa EGL), s vypnutým WebGL 0 z 26. Stránky, které WebGL potřebují (mapy,
+3D), pak nefungují. Úspora je hlavně při posouvání a v UI (zhruba polovina CPU), u videa ne.
+DroidDesk žádné předvolby Firefoxu nemění. Když Firefox padá dál, spusť ho softwarově:
+GALLIUM_DRIVER=llvmpipe LIBGL_ALWAYS_SOFTWARE=true firefox
 EOF
 }
 
