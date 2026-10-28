@@ -608,15 +608,40 @@ DIR *opendir(const char *name) {
     return real_opendir(rewrite_path(name, buf, sizeof(buf)));
 }
 
+/*
+ * The log line below reads dlerror(), which clears it, so the caller's own dlerror() got NULL:
+ * Chromium copies it into a std::string and crashed in strlen(NULL) on a failed optional
+ * library (optimization_guide_internal, Fold 7). The message is kept per thread and handed
+ * out once by the dlerror() below, as libdl would.
+ */
+static __thread char dl_error[512];
+static __thread int dl_error_pending;
+static char *(*real_dlerror)(void) = NULL;
+
 void *dlopen(const char *filename, int flag) {
     setup();
     char buf[1024];
     const char *new_path = rewrite_path(filename, buf, sizeof(buf));
     void *ret = real_dlopen(new_path, flag);
+    if (!real_dlerror) real_dlerror = dlsym(RTLD_NEXT, "dlerror");
     if (!ret) {
-        __android_log_print(ANDROID_LOG_ERROR, "LorieNative Hook", "dlopen failed for %s -> %s: %s", filename, new_path, dlerror());
+        const char *error = real_dlerror ? real_dlerror() : NULL;
+        snprintf(dl_error, sizeof(dl_error), "%s", error ? error : "dlopen failed");
+        dl_error_pending = 1;
+        __android_log_print(ANDROID_LOG_ERROR, "LorieNative Hook", "dlopen failed for %s -> %s: %s", filename, new_path, dl_error);
+    } else {
+        dl_error_pending = 0;
     }
     return ret;
+}
+
+char *dlerror(void) {
+    if (dl_error_pending) {
+        dl_error_pending = 0;
+        return dl_error;
+    }
+    if (!real_dlerror) real_dlerror = dlsym(RTLD_NEXT, "dlerror");
+    return real_dlerror ? real_dlerror() : NULL;
 }
 
 /*

@@ -33,4 +33,9 @@ gcc -shared -fPIC -O2 -I/tmp/stub -DNEW_PREFIX='"/tmp/files/usr"' -o /tmp/hook2.
 mkdir -p /tmp/files/usr /tmp/files/home && echo HOMEFILE > /tmp/files/home/.bashrc
 out=$(LD_PRELOAD=/tmp/hook2.so TMPDIR=/tmp /bin/cat /data/data/com.termux/files/home/.bashrc 2>&1); echo "home -> $out"
 echo "$out" | grep -q HOMEFILE || fail=1
+# A failed dlopen must leave its message for the caller's dlerror() (Chromium: strlen(NULL)).
+printf '#include <dlfcn.h>\n#include <stdio.h>\nint main(void){ void *h = dlopen("libdoesnotexist_xyz.so", RTLD_NOW); const char *e = dlerror(); printf("%%s %%s %%s\\n", h ? "loaded" : "failed", e ? "msg" : "NULL", dlerror() ? "again" : "cleared"); return 0; }\n' > /tmp/dl.c
+gcc -O2 -o /tmp/dl /tmp/dl.c -ldl
+out=$(LD_PRELOAD=/tmp/hook.so /tmp/dl 2>&1); echo "dlerror -> $out"
+[ "$out" = "failed msg cleared" ] || fail=1
 [ $fail = 0 ] && echo HOOK_OK || echo HOOK_FAILED
