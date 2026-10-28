@@ -137,6 +137,13 @@ cmd_status() {
     if [ -f "$MARKER" ] && [ -z "$mesa" ]; then
         echo "  Bez balíčku mesa zůstává llvmpipe; spusť znovu droiddesk-native-gpu on."
     fi
+    # Termux's Mesa ignores VTEST_SOCKET_NAME and connects only through $LINK; without it every
+    # GL client fails ("lost connection to rendering server") while the server is fine.
+    if [ -S "$SOCKET" ] && [ "$(readlink "$LINK" 2>/dev/null)" != "$SOCKET" ]; then
+        mkdir -p "$(dirname "$LINK")" && rm -f "$LINK" && ln -s "$SOCKET" "$LINK" \
+            && echo "Odkaz $LINK chyběl, vytvořen znovu (bez něj OpenGL programy nepoběží)." \
+            || echo "Odkaz $LINK chybí a nejde vytvořit: OpenGL programy nepoběží (restartuj desktop)."
+    fi
     if socket_answers; then
         echo "virgl server: odpovídá"
     elif [ -S "$SOCKET" ]; then
