@@ -33,15 +33,17 @@ pkg_version() {
 firefox_hint() {
     cat <<EOF
 
-Firefox: virgl považuje za softwarový ovladač („mesa/software-unknown“), takže sám zůstane
-u softwarového vykreslování. Hardwarový WebRender zapneš v about:config dvojicí:
-  gfx.webrender.all = true
-  webgl.disabled = true
-a pak Firefox restartuj (ověříš v about:support, řádek „Compositing“ = WebRender).
-Bez vypnutého WebGL Firefox přes virgl padá: na Tab S10 FE 13 z 16 startů YouTube spadlo
-do 10 s (pád v Mesa EGL), s vypnutým WebGL 0 z 26. Stránky, které WebGL potřebují (mapy,
-3D), pak nefungují. Úspora je hlavně při posouvání a v UI (zhruba polovina CPU), u videa ne.
-DroidDesk žádné předvolby Firefoxu nemění. Když Firefox padá dál, spusť ho softwarově:
+Firefox má na virgl dva bezpečné režimy (DroidDesk žádné předvolby Firefoxu nemění):
+ 1) Výchozí nastavení (nic neměň): stránky kreslí softwarově, ale WebGL (mapy, 3D, Google
+    Earth) běží na grafice, na Tab S10 FE 10–30× rychleji než bez GPU (Aquarium 34 FPS
+    místo 2). YouTube a ostatní stránky beze změny.
+ 2) Úspora CPU při posouvání a v UI (zhruba polovina): v about:config
+      gfx.webrender.all = true
+      webgl.disabled = true
+    a restart Firefoxu. Stránky, které WebGL potřebují, pak nefungují.
+Nikdy nezapínej gfx.webrender.all se zapnutým WebGL: Firefox přes virgl padá na první
+stránce s WebGL (na Tab S10 FE 15 z 16 startů, pád v Mesa EGL).
+Když Firefox padá i tak, spusť ho softwarově:
 GALLIUM_DRIVER=llvmpipe LIBGL_ALWAYS_SOFTWARE=true firefox
 EOF
 }

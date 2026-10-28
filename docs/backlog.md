@@ -332,6 +332,16 @@ EGL test). `webgl.msaa-samples=0` does not help. With `webgl.disabled=true`: 0 o
 failures, 5 min runs stable, so the hint recommends that pair. Video still costs about the
 same CPU as llvmpipe (Firefox ~400 % + virgl ~78 %); the gain is scrolling and UI.
 Next: Termux Mesa with debug info for a symbolized backtrace of the EGL crash.
+WebGL matrix (same night): the crash is HW WebRender + WebGL in one process, not YouTube:
+every WebGL page (webglreport, get.webgl.org, aquarium, three.js, Google Earth) crashed with
+gfx.webrender.all (15 of 16 starts), none with Firefox's default (software WebRender, WebGL
+on virgl): aquarium 34 FPS vs 2 on llvmpipe, three.js 16-20 vs 0-1, YouTube 3/3 fine. The
+hint now offers two modes: the default (WebGL on the GPU) or webrender.all + webgl.disabled
+(UI and scrolling).
+Meet with background blur (WebGL + camera) still crashes the tab on the Fold 7 (zink) and
+the tablet (llvmpipe) at the moment Meet creates its second GL context; minimal repros (two
+contexts, camera -> texImage2D, VideoFrame, a failed lod shader) do not crash. Needs a gdb
+backtrace of the content process.
 Also seen once in 29 starts: Firefox hangs at start without a window (3 % CPU, only the
 startup Mesa lines in its log), probably glxtest or the virgl connect; unexplained.
 
