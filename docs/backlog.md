@@ -145,6 +145,12 @@ Craft test round on the ScreenMate with fold.70 (root-09, 2026-10-22):
 
 ## Display scaling (tablet, 2026-10-26)
 
+- **Windows do not follow a rotation into the work area** (Fold 7, fold.82): after turning the
+  folded phone to portrait (1968×2184), Firefox stayed at 0,204 1968x1952 (bottom ≈2156 px)
+  while the panel starts at ≈2053 px, so Meet's control bar was hidden behind the panel. xfwm4
+  does not re-place unmaximized windows on a RandR change; options: re-fit windows that
+  overlap the panel after the screen change (wmctrl/xdotool in the display-change hook), or
+  open browsers maximized on phones.
 - **Sharp zoom.** The zoom button (Wide/Phone/Monitor 125–200 %) lowers the X resolution and
   stretches it (`DisplayProfile.kt`: X resolution = window / scale, `displayStretch`), so anything
   above 100 % is blurry; 125–175 % even more (non-integer stretch). Workaround that works:
