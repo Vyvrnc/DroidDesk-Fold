@@ -2578,9 +2578,15 @@ class LinuxRuntime(private val context: Context) {
         if (patched > 0) Log.i(TAG, "Absolute DT_NEEDED replaced in $patched files")
     }
 
+    /*
+     * Read-only first: opening every scanned file for writing made exec of it fail with ETXTBSY
+     * while the desktop started (the panel's battery script on the Fold 7 showed "Text file
+     * busy"). Only a file that really names an absolute dependency is opened for writing.
+     */
     private fun patchNeededIn(file: File): Boolean {
         if (file.length() < 64) return false
-        java.io.RandomAccessFile(file, "rw").use { elf ->
+        val writes = mutableListOf<Pair<Long, ByteArray>>()
+        java.io.RandomAccessFile(file, "r").use { elf ->
             val head = ByteArray(64)
             elf.readFully(head)
             if (head[0] != ELFMAG0 || head[1] != ELFMAG1 || head[2] != ELFMAG2 || head[3] != ELFMAG3 ||
@@ -2623,7 +2629,6 @@ class LinuxRuntime(private val context: Context) {
             val load = loads.firstOrNull { strtab >= it.second && strtab < it.second + it.third } ?: return false
             val strOffset = load.first + (strtab - load.second)
             val prefix = "/data/data/com.termux/files/usr/lib/"
-            var changed = false
             for (name in needed) {
                 if (name < 0 || name >= strsz) continue
                 elf.seek(strOffset + name)
@@ -2635,12 +2640,17 @@ class LinuxRuntime(private val context: Context) {
                 val bare = current.substringAfterLast('/').toByteArray(Charsets.UTF_8)
                 val replacement = ByteArray(length)  // the rest stays NUL
                 System.arraycopy(bare, 0, replacement, 0, bare.size)
-                elf.seek(strOffset + name)
-                elf.write(replacement)
-                changed = true
+                writes.add(strOffset + name to replacement)
             }
-            return changed
         }
+        if (writes.isEmpty()) return false
+        java.io.RandomAccessFile(file, "rw").use { elf ->
+            for ((at, replacement) in writes) {
+                elf.seek(at)
+                elf.write(replacement)
+            }
+        }
+        return true
     }
 
     // ── ELF RUNPATH/RPATH Patching ──
