@@ -341,7 +341,13 @@ hint now offers two modes: the default (WebGL on the GPU) or webrender.all + web
 Meet with background blur (WebGL + camera) still crashes the tab on the Fold 7 (zink) and
 the tablet (llvmpipe) at the moment Meet creates its second GL context; minimal repros (two
 contexts, camera -> texImage2D, VideoFrame, a failed lod shader) do not crash. Needs a gdb
-backtrace of the content process.
+backtrace of the content process. **Done (Fold 7, fold.82):** not GL at all. The tab dies on
+`MOZ_RELEASE_ASSERT(moduleIndex.found())` in SpiderMonkey, `js/src/wasm/WasmTypeDef.h`
+`TypeContext::indexOf()` (libxul offset 0x7ba3118, Termux Firefox 157 buildID
+20260930193253): with WebGL on, Meet loads its effects WASM, and the type lookup fails while
+decoding/validating, before any tier compiles (wasm_optimizingjit/baselinejit/lazy_tiering/
+caching off: still crashes; WASM fully off: Meet turns the camera off). Not found on
+Bugzilla. Recheck with the next Termux Firefox; otherwise report to Mozilla with the module.
 Also seen once in 29 starts: Firefox hangs at start without a window (3 % CPU, only the
 startup Mesa lines in its log), probably glxtest or the virgl connect; unexplained.
 
