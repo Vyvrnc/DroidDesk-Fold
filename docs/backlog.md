@@ -317,3 +317,30 @@ before this can become a default.
 
 Other limits: if the server dies, apps started from the running XFCE keep `virpipe` until the
 desktop restarts (the app removes the socket, so new terminals and the next session use llvmpipe).
+
+## Path audit of the Termux prefix (tablet, night 2026-10-27/28, fold.81)
+
+Breaks now:
+- **Samba**: 96 `lib*-private-samba.so` live only in `$PREFIX/lib/samba` and are found through
+  RUNPATH `/data/data/com.termux/…/lib/samba`, which the linker does not rewrite: testparm,
+  smbclient, smbd, net, rpcclient, ldb* fail with CANNOT LINK EXECUTABLE. Fix like pulseaudio:
+  symlinks into `$PREFIX/lib` (or a RUNPATH patch with patchelf) after install.
+- **graphviz** `gvpack`: `libgvplugin_neato_layout.so` only in `$PREFIX/lib/graphviz`, same fix.
+- **termux-tools**: termux-setup-storage, termux-wake-lock, termux-reload-settings and
+  termux-api-start send intents to `com.termux`; termux-backup/restore `tar -C
+  /data/data/com.termux/files` (chdir is not hooked). Hide or replace with DroidDesk versions.
+- xkeystone needs nickle (not installed, the same in upstream Termux), ignore.
+
+Only works with the hook (fine inside the session, low priority):
+- CPAN scripts outside dpkg (mimetype, mimeopen) keep `#!/data/data/com.termux/…/perl`;
+  relocate-shebangs only walks dpkg-owned files.
+- Config files with com.termux paths: nanorc, bash.bashrc, sshd_config, ssh_config, my.cnf,
+  gtk immodules.cache, X11 Compose includes.
+
+Cosmetic: 898 `.pc` files with the com.termux prefix; 19 broken symlinks (16 Fluent icons, 2
+termux-services svlogger, the tmp virgl link while no server runs). Debian `/etc` clean; no
+PT_INTERP points at com.termux; all 86 Termux `.desktop` entries resolve.
+
+Camera: without the Android CAMERA permission the bridge waits ~30 s for the permission dialog
+before the shim shows the test pattern. When the permission is permanently denied (no dialog
+possible), answer `err no-permission` at once.
