@@ -41,7 +41,9 @@ export DROIDDESK_V4L2_SOURCE="${DROIDDESK_V4L2_SOURCE:-camera}"
 export LD_PRELOAD="$SHIM${LD_PRELOAD:+:$LD_PRELOAD}"
 echo "chromium-cam: source $DROIDDESK_V4L2_SOURCE, camera ${DROIDDESK_CAMERA_FACING:-video0 front, video1 back}"
 echo "chromium-cam: shim log $TMPDIR/droiddesk-v4l2.log"
-flags=(--no-sandbox --test-type --no-first-run --no-default-browser-check --user-data-dir="$PROFILE")
+# basic: there is no Secret Service in Termux (a keyring dialog for every new profile).
+flags=(--no-sandbox --test-type --no-first-run --no-default-browser-check --password-store=basic
+       --start-maximized --user-data-dir="$PROFILE")
 if [ "$app" = 1 ]; then
     exec chromium-browser "${flags[@]}" --app="$url"
 fi
