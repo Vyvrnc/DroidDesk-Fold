@@ -348,6 +348,21 @@ backtrace of the content process. **Done (Fold 7, fold.82):** not GL at all. The
 decoding/validating, before any tier compiles (wasm_optimizingjit/baselinejit/lazy_tiering/
 caching off: still crashes; WASM fully off: Meet turns the camera off). Not found on
 Bugzilla. Recheck with the next Termux Firefox; otherwise report to Mozilla with the module.
+virgl server log (tablet, same night) shows what kills a client: not a crash, virglrenderer
+drops the whole vtest client after a command fails on the host, so every context of that
+process dies (the client sees "lost connection to rendering server … -1 104"):
+- **Fixed in fold.86:** GL_EXT_multisampled_render_to_texture. A color texture attached with
+  glFramebufferTexture2DMultisampleEXT plus a multisampled D24S8 renderbuffer is complete in
+  the guest but INCOMPLETE_MULTISAMPLE (0x8D56) on the host (ANGLE on Vulkan); the CLEAR then
+  fails (1286) → "Illegal command buffer" → VTEST_CLIENT_ERROR_COMMAND_DISPATCH. Chromium's
+  GPU process died on WebGL pages that way. The extension is hidden from Mesa clients with
+  MESA_EXTENSION_OVERRIDE (native virgl session and Debian); Chromium 3/3 fine afterwards,
+  no regression in Firefox's default mode or glmark2. 190 ordinary format/sample combinations
+  were all consistent. Repro on the tablet: home/dd-msrtt.c. Worth reporting to virglrenderer.
+- **Open:** Firefox gfx.webrender.all + WebGL: "vrend_renderer_transfer_iov: Illegal resource"
+  on TRANSFER3D → the same client drop. Probably a resource shared between the WebGL and the
+  WebRender context of one process, which the host context was never attached to. Until
+  fixed, the hint keeps "never webrender.all with WebGL on".
 Also seen once in 29 starts: Firefox hangs at start without a window (3 % CPU, only the
 startup Mesa lines in its log), probably glxtest or the virgl connect; unexplained.
 
