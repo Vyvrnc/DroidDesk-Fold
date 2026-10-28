@@ -359,6 +359,11 @@ process dies (the client sees "lost connection to rendering server … -1 104"):
   MESA_EXTENSION_OVERRIDE (native virgl session and Debian); Chromium 3/3 fine afterwards,
   no regression in Firefox's default mode or glmark2. 190 ordinary format/sample combinations
   were all consistent. Repro on the tablet: home/dd-msrtt.c. Worth reporting to virglrenderer.
+- **S3TC natively, left as is:** three.js webgl_loader_texture_dds on virpipe misses 4 of 13
+  objects in Firefox and Chromium (host glTexImage2D 0x502 on some DXT formats, as in
+  Debian), no crash. Hiding S3TC natively (Debian's list) changes nothing in Firefox and makes
+  Chromium's GPU process die (client drop), so the native override stays msrtt only. A real
+  fix belongs on the host side (DXT upload in virglrenderer/ANGLE).
 - **Open:** Firefox gfx.webrender.all + WebGL: "vrend_renderer_transfer_iov: Illegal resource"
   on TRANSFER3D → the same client drop. Probably a resource shared between the WebGL and the
   WebRender context of one process, which the host context was never attached to. Until
