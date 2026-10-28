@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# chromium-cam — Termux Chromium with the DroidDesk camera (the same fake V4L2 devices as
+# firefox-cam), in its own profile. Meet's background blur and effects work here: Firefox
+# crashes on Meet's effects WebAssembly (a SpiderMonkey assert), Chromium's V8 does not
+# (Fold 7, about 1.3 cores for a Meet call with blur).
+#
+#   chromium-cam [URL]            a normal browser window, default URL https://meet.google.com/
+#   chromium-cam --app [URL]      the page as an app window without tabs and address bar
+#
+#   Two cameras: /dev/video0 = front, /dev/video1 = back; switch in the page's camera menu.
+#   DROIDDESK_CAMERA_FACING=back, DROIDDESK_V4L2_SOURCE=pattern, DROIDDESK_CAMERA_ROTATE,
+#   DROIDDESK_CAMERA_MIRROR: as for firefox-cam.
+#
+# Chromium needs --no-sandbox in Termux (no user namespaces for its sandbox). Install it with
+# "pkg install chromium". Shim log: $TMPDIR/droiddesk-v4l2.log.
+# DroidDesk installs this script as $PREFIX/bin/chromium-cam.
+set -eu
+PREFIX=${PREFIX:-/data/user/0/com.orailnoor.droiddesk/files/usr}
+TMPDIR=${TMPDIR:-$PREFIX/tmp}
+SHIM=$PREFIX/lib/libdroiddesk_v4l2.so
+PROFILE=${CHROMIUM_CAM_PROFILE:-$HOME/.config/chromium-cam}
+
+if ! command -v chromium-browser >/dev/null 2>&1; then
+    echo "Chromium není nainstalovaný: pkg install chromium" >&2
+    exit 1
+fi
+if [ ! -f "$SHIM" ]; then
+    echo "missing $SHIM (DroidDesk copies it at desktop start)" >&2
+    exit 1
+fi
+
+app=0
+if [ "${1:-}" = "--app" ]; then
+    app=1
+    shift
+fi
+url=${1:-https://meet.google.com/}
+
+mkdir -p "$PROFILE"
+export DROIDDESK_V4L2_SOURCE="${DROIDDESK_V4L2_SOURCE:-camera}"
+export LD_PRELOAD="$SHIM${LD_PRELOAD:+:$LD_PRELOAD}"
+echo "chromium-cam: source $DROIDDESK_V4L2_SOURCE, camera ${DROIDDESK_CAMERA_FACING:-video0 front, video1 back}"
+echo "chromium-cam: shim log $TMPDIR/droiddesk-v4l2.log"
+flags=(--no-sandbox --test-type --no-first-run --no-default-browser-check --user-data-dir="$PROFILE")
+if [ "$app" = 1 ]; then
+    exec chromium-browser "${flags[@]}" --app="$url"
+fi
+exec chromium-browser "${flags[@]}" "$url"

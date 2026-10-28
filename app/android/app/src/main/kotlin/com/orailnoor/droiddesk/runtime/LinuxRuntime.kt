@@ -1476,6 +1476,13 @@ class LinuxRuntime(private val context: Context) {
                 launcher.writeText("#!${File(binDir, "bash").absolutePath}\n" + script.substringAfter('\n'))
                 launcher.setExecutable(true, false)
             }
+            // The same camera for Termux Chromium (Meet's background blur works there, not in
+            // Firefox).
+            File(binDir, "chromium-cam").let { launcher ->
+                val script = context.assets.open("droiddesk/chromium-cam").bufferedReader().use { it.readText() }
+                launcher.writeText("#!${File(binDir, "bash").absolutePath}\n" + script.substringAfter('\n'))
+                launcher.setExecutable(true, false)
+            }
             // Experimental hardware OpenGL for the native desktop without Adreno (virgl), opt-in.
             File(binDir, "droiddesk-native-gpu").let { command ->
                 val script = context.assets.open("droiddesk/droiddesk-native-gpu").bufferedReader().use { it.readText() }
