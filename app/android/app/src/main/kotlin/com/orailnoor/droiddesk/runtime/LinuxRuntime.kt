@@ -17,6 +17,42 @@ import java.util.zip.ZipInputStream
  * and Unix socket connections from /data/data/com.termux/files/usr to DroidDesk's prefix.
  */
 class LinuxRuntime(private val context: Context) {
+    /**
+     * Every writeText in this class goes through here (a member extension wins over kotlin.io's).
+     * Scripts in $PREFIX/bin are rewritten at each start while XFCE may already run them: writing
+     * into the same inode made exec fail with ETXTBSY ("Text file busy", the battery in the
+     * panel and claude-tmux on the Fold 7). Unchanged content is not written at all; changed
+     * content goes to a new inode by rename, so running programs keep the old one. Symlinks are
+     * written through, as before.
+     */
+    private fun File.writeText(text: String) = writeAtomically(this, text.toByteArray(Charsets.UTF_8))
+
+    private fun writeAtomically(file: File, bytes: ByteArray) {
+        val path = file.toPath()
+        if (java.nio.file.Files.isSymbolicLink(path)) {
+            java.io.FileOutputStream(file).use { it.write(bytes) }
+            return
+        }
+        if (file.isFile && file.length() == bytes.size.toLong() && file.readBytes().contentEquals(bytes)) return
+        val wasExecutable = file.isFile && file.canExecute()
+        val tmp = File(file.parentFile, ".${file.name}.${android.os.Process.myPid()}.tmp")
+        try {
+            java.io.FileOutputStream(tmp).use { it.write(bytes) }
+            if (wasExecutable) tmp.setExecutable(true, false)
+            if (!tmp.renameTo(file)) {
+                // Another filesystem or a directory in the way: the old in-place write.
+                java.io.FileOutputStream(file).use { it.write(bytes) }
+            }
+        } finally {
+            tmp.delete()
+        }
+    }
+
+    /** An asset copied with writeAtomically (Python helpers that may be running). */
+    private fun copyAssetAtomically(asset: String, target: File) {
+        writeAtomically(target, context.assets.open(asset).use { it.readBytes() })
+    }
+
 
     companion object {
         private const val TAG = "LinuxRuntime"
@@ -1379,9 +1415,7 @@ class LinuxRuntime(private val context: Context) {
         // USB flash drives and card readers through UsbBridge.
         runCatching {
             val usbClient = File(binDir, "droiddesk-usb.py")
-            context.assets.open("droiddesk/droiddesk-usb.py").use { input ->
-                usbClient.outputStream().use(input::copyTo)
-            }
+            copyAssetAtomically("droiddesk/droiddesk-usb.py", usbClient)
             File(binDir, "droiddesk-usb").let { usbCommand ->
                 usbCommand.writeText(
                     "#!${File(binDir, "bash").absolutePath}\n" +
@@ -1406,9 +1440,7 @@ class LinuxRuntime(private val context: Context) {
             }
             // WebDAV for Thunar (dav:// through gvfs), started per held disk by the tray.
             val davServer = File(binDir, "droiddesk-usb-dav.py")
-            context.assets.open("droiddesk/droiddesk-usb-dav.py").use { input ->
-                davServer.outputStream().use(input::copyTo)
-            }
+            copyAssetAtomically("droiddesk/droiddesk-usb-dav.py", davServer)
             File(binDir, "droiddesk-usb-dav").let { davCommand ->
                 davCommand.writeText(
                     "#!${File(binDir, "bash").absolutePath}\n" +
@@ -1418,9 +1450,7 @@ class LinuxRuntime(private val context: Context) {
             }
             // USB serial adapters as a pty (/tmp/ttyUSB0) through UsbBridge "serial".
             val serialClient = File(binDir, "droiddesk-serial.py")
-            context.assets.open("droiddesk/droiddesk-serial.py").use { input ->
-                serialClient.outputStream().use(input::copyTo)
-            }
+            copyAssetAtomically("droiddesk/droiddesk-serial.py", serialClient)
             File(binDir, "droiddesk-serial").let { serialCommand ->
                 serialCommand.writeText(
                     "#!${File(binDir, "bash").absolutePath}\n" +
@@ -1430,9 +1460,7 @@ class LinuxRuntime(private val context: Context) {
             }
             // Networks Android does not route to (Ethernet dock in a closed VLAN) through NetBridge.
             val netClient = File(binDir, "droiddesk-net.py")
-            context.assets.open("droiddesk/droiddesk-net.py").use { input ->
-                netClient.outputStream().use(input::copyTo)
-            }
+            copyAssetAtomically("droiddesk/droiddesk-net.py", netClient)
             File(binDir, "droiddesk-net").let { netCommand ->
                 netCommand.writeText(
                     "#!${File(binDir, "bash").absolutePath}\n" +
@@ -1455,9 +1483,7 @@ class LinuxRuntime(private val context: Context) {
                 command.setExecutable(true, false)
             }
             val cameraClient = File(binDir, "droiddesk-camera.py")
-            context.assets.open("droiddesk/droiddesk-camera.py").use { input ->
-                cameraClient.outputStream().use(input::copyTo)
-            }
+            copyAssetAtomically("droiddesk/droiddesk-camera.py", cameraClient)
             File(binDir, "droiddesk-camera").let { cameraCommand ->
                 cameraCommand.writeText(
                     "#!${File(binDir, "bash").absolutePath}\n" +
@@ -1497,9 +1523,7 @@ class LinuxRuntime(private val context: Context) {
                 ethCommand.setExecutable(true, false)
             }
             val netWindow = File(binDir, "droiddesk-net-window.py")
-            context.assets.open("droiddesk/droiddesk-net-window.py").use { input ->
-                netWindow.outputStream().use(input::copyTo)
-            }
+            copyAssetAtomically("droiddesk/droiddesk-net-window.py", netWindow)
             val netWindowCommand = File(binDir, "droiddesk-net-window")
             netWindowCommand.writeText(
                 "#!${File(binDir, "bash").absolutePath}\n" +
@@ -1584,9 +1608,7 @@ class LinuxRuntime(private val context: Context) {
             isClaudeCodeInstalled()
             // "USB": icon in the dock's systray and a window (GTK 3 through pygobject).
             val trayClient = File(binDir, "droiddesk-usb-tray.py")
-            context.assets.open("droiddesk/droiddesk-usb-tray.py").use { input ->
-                trayClient.outputStream().use(input::copyTo)
-            }
+            copyAssetAtomically("droiddesk/droiddesk-usb-tray.py", trayClient)
             val trayCommand = File(binDir, "droiddesk-usb-tray")
             trayCommand.writeText(
                 "#!${File(binDir, "bash").absolutePath}\n" +
