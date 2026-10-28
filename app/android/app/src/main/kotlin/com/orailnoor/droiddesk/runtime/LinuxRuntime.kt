@@ -1058,7 +1058,10 @@ class LinuxRuntime(private val context: Context) {
                 export MESA_GLSL_VERSION_OVERRIDE=430
                 # virgl advertises S3TC, ANGLE on a mobile GPU has no BCn: textures the
                 # driver compresses (OrcaSlicer's labels and view cube) failed with 0x502.
-                export MESA_EXTENSION_OVERRIDE="-GL_EXT_texture_compression_s3tc -GL_S3_s3tc -GL_EXT_texture_compression_dxt1 -GL_ANGLE_texture_compression_dxt3 -GL_ANGLE_texture_compression_dxt5"
+                # EXT_multisampled_render_to_texture with a multisampled depth buffer is
+                # incomplete on the host (ANGLE), and virglrenderer then drops the whole
+                # client: the Chromium GPU process died on WebGL pages (Tab S10 FE).
+                export MESA_EXTENSION_OVERRIDE="-GL_EXT_texture_compression_s3tc -GL_S3_s3tc -GL_EXT_texture_compression_dxt1 -GL_ANGLE_texture_compression_dxt3 -GL_ANGLE_texture_compression_dxt5 -GL_EXT_multisampled_render_to_texture -GL_EXT_multisampled_render_to_texture2"
             fi
             droiddesk_mesa=/opt/mesa-kgsl
             droiddesk_lib=${'$'}droiddesk_mesa/lib/aarch64-linux-gnu
@@ -3048,6 +3051,10 @@ class LinuxRuntime(private val context: Context) {
             // virgl server ($PREFIX/tmp/.virgl_test links to it). No LIBGL_ALWAYS_SOFTWARE and
             // no llvmpipe override, or Mesa never loads virpipe.
             env["GALLIUM_DRIVER"] = "virpipe"
+            // EXT_multisampled_render_to_texture with a multisampled depth buffer is incomplete
+            // on the host (ANGLE), and virglrenderer then drops the whole client: Chromium's
+            // GPU process died on WebGL pages (Tab S10 FE).
+            env["MESA_EXTENSION_OVERRIDE"] = "-GL_EXT_multisampled_render_to_texture -GL_EXT_multisampled_render_to_texture2"
         } else {
             env["LIBGL_ALWAYS_SOFTWARE"] = "true"
             env["MESA_LOADER_DRIVER_OVERRIDE"] = "llvmpipe"
