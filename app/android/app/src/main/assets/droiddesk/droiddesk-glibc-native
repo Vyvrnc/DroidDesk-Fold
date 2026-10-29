@@ -79,16 +79,46 @@ setup() {
 setup_data() {
     local dir link target locale input stage
     mkdir -p "$N/locale"
-    # ld.so opens libraries internally, so interposition cannot fix these links.
+    # ld.so opens libraries internally, so interposition cannot fix these links. Only when a
+    # library directory changed since the last pass (apt adds libraries; the directory mtime
+    # changes): resolving every link took about 27 s on each setup (Tab S10 FE). One python
+    # process resolves all of them.
+    local -a dirs=() changed=()
     for dir in "$R/lib/aarch64-linux-gnu" "$R/usr/lib/aarch64-linux-gnu"; do
         [[ -d $dir ]] || continue
-        while IFS= read -r -d '' link; do
-            target=$(readlink "$link")
-            [[ $target == /* ]] || continue
-            target=$(resolve "$link")
-            [[ ! -f $target ]] || ln -sfn "$target" "$N/lib/$(basename "$link")"
-        done < <(find "$dir" -maxdepth 1 -type l -print0)
+        dirs+=("$dir")
+        [[ -f $N/lib/.links && ! $dir -nt $N/lib/.links ]] || changed+=("$dir")
     done
+    if [[ ${#changed[@]} -gt 0 ]]; then
+        python3 - "$R" "$N/lib" "${dirs[@]}" <<'PYEOF' || printf 'Varování: Odkazy knihoven se nepodařilo aktualizovat.\n' >&2
+import os, sys
+root, out, dirs = sys.argv[1], sys.argv[2], sys.argv[3:]
+
+def resolve(path):
+    # Follow links inside the rootfs: absolute targets are relative to the rootfs.
+    for _ in range(40):
+        if not os.path.islink(path):
+            return path
+        target = os.readlink(path)
+        path = root + target if target.startswith('/') else os.path.join(os.path.dirname(path), target)
+    return None
+
+for d in dirs:
+    for name in os.listdir(d):
+        link = os.path.join(d, name)
+        if not os.path.islink(link) or not os.readlink(link).startswith('/'):
+            continue
+        target = resolve(link)
+        if target and os.path.isfile(target):
+            dest = os.path.join(out, name)
+            tmp = dest + '.new'
+            if os.path.lexists(tmp):
+                os.remove(tmp)
+            os.symlink(target, tmp)
+            os.replace(tmp, dest)
+PYEOF
+        touch "$N/lib/.links"
+    fi
     # LOCPATH bypasses locale-archive; localedef must publish directory locales.
     for locale in C.UTF-8 "${LANG:-C.UTF-8}" cs_CZ.UTF-8 en_US.UTF-8; do
         [[ $locale != C && $locale != POSIX && $locale != */* ]] || continue

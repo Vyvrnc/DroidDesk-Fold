@@ -63,7 +63,7 @@ __attribute__((constructor)) static void find_self_exe(void) {
 }
 static int is_proc_self_exe(const char *p) {
     if (!p) return 0;
-    if (!strcmp(p, "/proc/self/exe")) return 1;
+    if (!strcmp(p, "/proc/self/exe") || !strcmp(p, "/proc/thread-self/exe")) return 1;
     char mine[64];
     snprintf(mine, sizeof mine, "/proc/%d/exe", (int)getpid());
     return !strcmp(p, mine);
