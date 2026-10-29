@@ -489,6 +489,16 @@ class DesktopActivity : Activity() {
                 val enable = !preferences.getBoolean("pointer_capture", false)
                 setPointerCapture(enable)
                 text = if (enable) "Myš: zachycená" else "Myš: volná"
+                if (enable) {
+                    Toast.makeText(this@DesktopActivity, "Rychlost myši: podržte tlačítko", Toast.LENGTH_SHORT).show()
+                }
+            }
+            // Speed of the captured mouse for this screen (a DeX monitor wants another one).
+            setOnLongClickListener {
+                val speed = DisplayProfile.cycleMouseSpeed(this@DesktopActivity, screen)
+                applyDisplayProfile()
+                Toast.makeText(this@DesktopActivity, "Rychlost myši (${screen.label}): $speed %", Toast.LENGTH_SHORT).show()
+                true
             }
         }
         this.captureButton = captureButton

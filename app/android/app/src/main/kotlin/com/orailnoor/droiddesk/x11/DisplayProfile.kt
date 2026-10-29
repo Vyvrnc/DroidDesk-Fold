@@ -27,6 +27,9 @@ object DisplayProfile {
 
     val SCALES = listOf(100, 125, 150, 175, 200)
 
+    /** Speed of a captured (physical) mouse in percent, per screen. */
+    val MOUSE_SPEEDS = listOf(50, 75, 100, 150, 200, 300)
+
     private const val PREFS = "droiddesk_display"
 
     fun detect(activity: Activity): Screen {
@@ -55,6 +58,17 @@ object DisplayProfile {
         return next
     }
 
+    fun mouseSpeedFor(context: Context, screen: Screen): Int =
+        prefs(context).getInt("${screen.key}_mouse", 100)
+
+    /** Moves the current screen to the next mouse speed and persists it. */
+    fun cycleMouseSpeed(context: Context, screen: Screen): Int {
+        val current = mouseSpeedFor(context, screen)
+        val next = MOUSE_SPEEDS.getOrElse(MOUSE_SPEEDS.indexOf(current) + 1) { MOUSE_SPEEDS.first() }
+        prefs(context).edit().putInt("${screen.key}_mouse", next).apply()
+        return next
+    }
+
     /** Must run before LorieView is measured so the X server starts at the chosen resolution. */
     fun apply(context: Context, screen: Screen) {
         val scale = scaleFor(context, screen)
@@ -63,6 +77,7 @@ object DisplayProfile {
             displayScale.put(scale)
             displayStretch.put(true)
             scaleTouchpad.put(true)
+            capturedPointerSpeedFactor.put(mouseSpeedFor(context, screen))
         }
     }
 

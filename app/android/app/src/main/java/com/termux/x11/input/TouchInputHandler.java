@@ -901,8 +901,13 @@ public class TouchInputHandler {
                             break;
                     }
 
-                    x *= mInjector.capturedPointerSpeedFactor * mMetrics.density;
-                    y *= mInjector.capturedPointerSpeedFactor * mMetrics.density;
+                    // Raw mouse counts times the display density: on a DeX monitor (density
+                    // about 1) the mouse was 2-3 times slower than on the phone, and XFCE's
+                    // acceleration does not apply to these moves. Density floor 2; the speed
+                    // per screen comes from DisplayProfile.
+                    float density = Math.max(mMetrics.density, 2f);
+                    x *= mInjector.capturedPointerSpeedFactor * density;
+                    y *= mInjector.capturedPointerSpeedFactor * density;
 
                     mInjector.sendCursorMove(x, y, true);
                     if (axis_relative_x && mTouchpadHandler != null)
