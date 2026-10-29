@@ -41,6 +41,13 @@ printf 'int marker;\n' | gcc -shared -fPIC -x c - -o "$work/empty.so"
 export PATH=/usr/bin:/bin
 exec 63<"$root/etc/native-test"
 "$loader" --library-path "$libs" --preload "$work/hook.so" "$root/usr/bin/probe"
+# Self re-exec through /proc/self/exe and through the loader (bun's embedded ripgrep).
+gcc -O2 -Wall -Wextra -Werror -o "$root/usr/bin/selfexec" /repo/tools/glibc-native/selfexec.c
+for how in proc loader; do
+    out=$("$work/plib/ld.so" --library-path "$libs" --preload "$work/hook.so" --argv0 selfexec "$root/usr/bin/selfexec" "$how")
+    [[ $out == "selfexec child --no-config exe-ok" ]] || { echo "self re-exec ($how): $out" >&2; exit 1; }
+done
+echo "self re-exec checks OK"
 # Source only launcher functions; exercise the same code as the shipped commands.
 (
     export PREFIX=$work/termux

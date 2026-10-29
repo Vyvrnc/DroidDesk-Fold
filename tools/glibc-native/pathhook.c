@@ -20,6 +20,61 @@
 #include <sys/syscall.h>
 extern char **environ;
 
+/* The program this process really runs. Started as "ld.so --library-path ... --preload ...
+ * --argv0 NAME PROGRAM ARGS", /proc/self/exe is the loader; programs that re-execute
+ * themselves (bun runs its embedded ripgrep as /proc/self/exe with argv0 "rg", so Claude
+ * Code's Grep and Glob found nothing, Tab S10 FE) must get PROGRAM instead. Read once from
+ * /proc/self/cmdline, which keeps the loader's original command line. */
+static char self_exe[PATH_MAX];
+static int ld_option_with_value(const char *a) {
+    return !strcmp(a, "--library-path") || !strcmp(a, "--preload") || !strcmp(a, "--argv0") ||
+           !strcmp(a, "--audit") || !strcmp(a, "--inhibit-rpath") || !strcmp(a, "--glibc-hwcaps-prepend") ||
+           !strcmp(a, "--glibc-hwcaps-mask");
+}
+static int ld_option(const char *a) {
+    return ld_option_with_value(a) || !strcmp(a, "--inhibit-cache") || !strcmp(a, "--list") ||
+           !strcmp(a, "--verify") || !strcmp(a, "--help") || !strcmp(a, "--version") ||
+           !strcmp(a, "--list-tunables") || !strcmp(a, "--list-diagnostics");
+}
+static int is_loader(const char *path) {
+    const char *plib = getenv("DD_PLIB");
+    char want[PATH_MAX];
+    if (!plib || !path || snprintf(want, sizeof want, "%s/ld.so", plib) >= (int)sizeof want) return 0;
+    return !strcmp(path, want);
+}
+__attribute__((constructor)) static void find_self_exe(void) {
+    int fd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    char buf[8192];
+    ssize_t n = 0, r;
+    while (n < (ssize_t)sizeof buf - 1 && (r = read(fd, buf + n, sizeof buf - 1 - (size_t)n)) > 0) n += r;
+    close(fd);
+    if (n <= 0) return;
+    buf[n] = 0;
+    char *a = buf, *end = buf + n;
+    if (!is_loader(a)) return;
+    for (a += strlen(a) + 1; a < end; a += strlen(a) + 1) {
+        if (ld_option_with_value(a)) { a += strlen(a) + 1; continue; }
+        if (!strcmp(a, "--")) { a += strlen(a) + 1; break; }
+        if (ld_option(a)) continue;
+        break;
+    }
+    if (a < end && *a && strlen(a) < sizeof self_exe) strcpy(self_exe, a);
+}
+static int is_proc_self_exe(const char *p) {
+    if (!p) return 0;
+    if (!strcmp(p, "/proc/self/exe")) return 1;
+    char mine[64];
+    snprintf(mine, sizeof mine, "/proc/%d/exe", (int)getpid());
+    return !strcmp(p, mine);
+}
+static ssize_t copy_self_exe(char *b, size_t n) {
+    size_t len = strlen(self_exe);
+    if (len > n) len = n;
+    memcpy(b, self_exe, len);
+    return (ssize_t)len;
+}
+
 /* Each invocation owns its buffers; nested calls and two-path operations cannot
  * overwrite another mapping. Symbol caches use atomic publication. */
 static int pre(const char *p, const char *d) {
@@ -143,8 +198,10 @@ int statx(int d, const char *p, int f, unsigned m, struct statx *s) { REAL(statx
 int access(const char *p, int m) { REAL(access, int, const char *, int); return real_access(map(p, 0), m); }
 int faccessat(int d, const char *p, int m, int f) { REAL(faccessat, int, int, const char *, int, int); return real_faccessat(d, map(p, f & AT_SYMLINK_NOFOLLOW), m, f); }
 DIR *opendir(const char *p) { REAL(opendir, DIR *, const char *); return real_opendir(map(p, 0)); }
-ssize_t readlink(const char *p, char *b, size_t n) { REAL(readlink, ssize_t, const char *, char *, size_t); return real_readlink(map(p, 1), b, n); }
-ssize_t readlinkat(int d, const char *p, char *b, size_t n) { REAL(readlinkat, ssize_t, int, const char *, char *, size_t); return real_readlinkat(d, map(p, 1), b, n); }
+ssize_t readlink(const char *p, char *b, size_t n) { if (*self_exe && is_proc_self_exe(p)) return copy_self_exe(b, n);
+    REAL(readlink, ssize_t, const char *, char *, size_t); return real_readlink(map(p, 1), b, n); }
+ssize_t readlinkat(int d, const char *p, char *b, size_t n) { if (*self_exe && is_proc_self_exe(p)) return copy_self_exe(b, n);
+    REAL(readlinkat, ssize_t, int, const char *, char *, size_t); return real_readlinkat(d, map(p, 1), b, n); }
 char *realpath(const char *p, char *r) { REAL(realpath, char *, const char *, char *); return unmap(real_realpath(map(p, 0), r)); }
 int mkdir(const char *p, mode_t m) { REAL(mkdir, int, const char *, mode_t); return real_mkdir(map(p, 1), m); }
 int unlink(const char *p) { REAL(unlink, int, const char *); return real_unlink(map(p, 1)); }
@@ -312,6 +369,9 @@ static int inspect(const char *file, char interp[PATH_MAX], char script[256]) {
 }
 static int prepare(const char *file, char *const argv[], char *const env[], struct command *c, int depth) {
     if (depth > 8) { errno = ELOOP; return -1; }
+    if (*self_exe && (is_proc_self_exe(file) ||
+                      (is_loader(file) && !(count(argv) > 1 && ld_option(argv[1])))))
+        file = self_exe;
     char path[PATH_MAX], interp[PATH_MAX], script[256];
     const char *target = mapped(file, path, 0);
     if (!target) return -1;
