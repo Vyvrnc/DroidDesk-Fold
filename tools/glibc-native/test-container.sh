@@ -68,6 +68,11 @@ for how in proc loader; do
     [[ $out == "selfexec child --no-config exe-ok" ]] || { echo "self re-exec ($how): $out" >&2; exit 1; }
 done
 echo "self re-exec checks OK"
+# accept under a filter that kills the accept syscall (Android): the hook must use accept4.
+gcc -O2 -Wall -Wextra -Werror -o "$work/acceptseccomp" /repo/tools/glibc-native/acceptseccomp.c
+[[ $(LD_PRELOAD="$work/hook.so" "$work/acceptseccomp") == "accept ok" ]]
+if "$work/acceptseccomp" >/dev/null 2>&1; then echo "accept was not blocked without the hook" >&2; exit 1; fi
+echo "accept via accept4 under seccomp checks OK"
 # Source only launcher functions; exercise the same code as the shipped commands.
 (
     export PREFIX=$work/termux

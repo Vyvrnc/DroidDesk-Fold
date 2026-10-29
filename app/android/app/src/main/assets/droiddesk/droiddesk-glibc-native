@@ -494,7 +494,11 @@ native_reset() {
     program_name_valid "$1" || fail 'Zadejte samotný název programu bez cesty.'
     need_python
     proot_list_update remove "$1"
-    printf 'Naučený fallback byl odstraněn: %s\n' "$1"
+    if [[ $1 == --all ]]; then
+        printf 'Všechny naučené fallbacky byly odstraněny.\n'
+    else
+        printf 'Naučený fallback byl odstraněn: %s\n' "$1"
+    fi
 }
 
 native_target_into() {

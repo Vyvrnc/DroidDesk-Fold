@@ -235,6 +235,11 @@ static int nss_read(FILE *f, int group, void *entry, char *buf, size_t size, voi
     } else {
         struct passwd *out = NULL;
         rc = fgetpwent_r(f, entry, buf, size, &out);
+        /* proot-distro gives the app user /sbin/nologin; natively tmux and others then
+         * started panes with it (SHELL=/sbin/nologin, Tab S10 FE). */
+        if (!rc && out && out->pw_uid == getuid() && out->pw_shell &&
+            (strstr(out->pw_shell, "nologin") || strstr(out->pw_shell, "/false")))
+            out->pw_shell = (char *)"/bin/bash";
         *result = out;
     }
     if (rc == ERANGE && fsetpos(f, &pos)) return errno;
@@ -498,6 +503,9 @@ int bind(int fd, const struct sockaddr *addr, socklen_t len) {
     addr = socket_address(addr, &len, &out);
     return real_bind(fd, addr, len);
 }
+/* Android's seccomp kills accept (202) but allows accept4: the tmux server died as soon as a
+ * client connected (Tab S10 FE). accept() is accept4() without flags. */
+int accept(int fd, struct sockaddr *addr, socklen_t *len) { return accept4(fd, addr, len, 0); }
 ssize_t sendto(int fd, const void *buf, size_t size, int flags, const struct sockaddr *addr, socklen_t len) {
     REAL(sendto, ssize_t, int, const void *, size_t, int, const struct sockaddr *, socklen_t);
     struct sockaddr_un out;
