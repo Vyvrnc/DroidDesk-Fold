@@ -12,33 +12,48 @@ LIBPATH=$PLIB:$N/lib:$R/lib/aarch64-linux-gnu:$R/usr/lib/aarch64-linux-gnu
 fail() { printf 'Chyba: %s\n' "$*" >&2; exit 1; }
 need_python() { command -v python3 >/dev/null || fail 'Chybí Termux Python. Spusťte: pkg install python'; }
 
-# Resolve Debian absolute symlinks inside its root, without following them on Android.
-resolve() {
-    python3 - "$R" "$1" <<'PY'
-import os, sys
-root, path = sys.argv[1:]
-for _ in range(40):
-    parts = os.path.normpath(path).split('/')
-    current = '/'
-    for i, part in enumerate(parts):
-        if not part:
-            continue
-        current = os.path.join(current, part)
-        if os.path.islink(current):
-            target = os.readlink(current)
-            if target.startswith('/'):
-                target = root + target if current.startswith(root + '/') and not target.startswith(root + '/') else target
-            else:
-                target = os.path.join(os.path.dirname(current), target)
-            path = os.path.join(target, *parts[i + 1:])
-            break
-    else:
-        print(current)
-        break
-else:
-    sys.exit('Příliš mnoho symbolických odkazů: ' + path)
-PY
+# Walk components before handling .., so links behave as they do inside Debian.
+# REPLY avoids a command-substitution fork for every PATH candidate. Only actual
+# symlinks require readlink; absolute targets stay rooted in the Debian rootfs.
+resolve_into() {
+    local pending=$1 current= floor= part candidate link links=0
+    REPLY=
+    [[ $pending == /* ]] || pending=$PWD/$pending
+    case $pending in
+        "$R"|"$R"/*) current=$R floor=$R; pending=${pending#"$R"} ;;
+    esac
+    while [[ -n $pending ]]; do
+        part=${pending%%/*}
+        if [[ $pending == */* ]]; then pending=${pending#*/}; else pending=; fi
+        case $part in
+            ''|.) continue ;;
+            ..)
+                if [[ $current != "$floor" ]]; then current=${current%/*}; fi
+                continue ;;
+        esac
+        candidate=$current/$part
+        # A host-side link may enter the rootfs before a later Debian link.
+        [[ $candidate != "$R" ]] || floor=$R
+        if [[ -L $candidate ]]; then
+            if (( ++links > 40 )); then
+                printf 'Příliš mnoho symbolických odkazů: %s\n' "$1" >&2
+                return 1
+            fi
+            link=$(readlink -- "$candidate") || return 1
+            case $link in
+                "$R"|"$R"/*) current=$R floor=$R; link=${link#"$R"} ;;
+                /*)
+                    current=$floor ;;
+            esac
+            pending=$link${pending:+/$pending}
+        else
+            [[ -z $pending || -d $candidate ]] || return 1
+            current=$candidate
+        fi
+    done
+    REPLY=${current:-/}
 }
+resolve() { resolve_into "$1" && printf '%s\n' "$REPLY"; }
 
 setup() {
     need_python
@@ -51,7 +66,7 @@ setup() {
     [[ -f $ld && -f $libc ]] || fail 'Chybí Debian glibc. Nejdříve nainstalujte Debian v aplikaci.'
     mkdir -p "$PLIB" "$N/bin" "$N/lib"
     signature=$({ sha256sum "$ld" "$libc" "$SHARE/patch-glibc.py" "$SHARE/pathhook.so"; [[ ! -f $uv ]] || sha256sum "$uv"; } | sha256sum)
-    if [[ -f $N/stamp && $(cat "$N/stamp") == "$signature" && -f $PLIB/ld.so && -f $PLIB/libc.so.6 && -f $N/lib/pathhook.so ]] && { [[ ! -f $uv ]] || [[ -f $PLIB/libuv.so.1 ]]; }; then
+    if [[ -f $N/stamp && $(< "$N/stamp") == "$signature" && -f $PLIB/ld.so && -f $PLIB/libc.so.6 && -f $N/lib/pathhook.so ]] && { [[ ! -f $uv ]] || [[ -f $PLIB/libuv.so.1 ]]; }; then
         setup_data
         printf 'Nativní glibc je aktuální.\n'
         return
@@ -77,49 +92,36 @@ setup() {
 }
 
 setup_libraries() {
-    local dir
-    # ld.so opens libraries internally, so interposition cannot fix these links. Only when a
-    # library directory changed since the last pass (apt adds libraries; the directory mtime
-    # changes): resolving every link took about 27 s on each setup (Tab S10 FE). One python
-    # process resolves all of them.
+    local dir entry target stage
     local -a dirs=() changed=()
+    # The normal launch checks only directory mtimes. Refresh absolute library
+    # links only after apt changes a directory; never start Python on this path.
     for dir in "$R/lib/aarch64-linux-gnu" "$R/usr/lib/aarch64-linux-gnu"; do
         [[ -d $dir ]] || continue
         dirs+=("$dir")
         [[ -f $N/lib/.links && ! $dir -nt $N/lib/.links ]] || changed+=("$dir")
     done
-    if [[ ${#changed[@]} -gt 0 ]]; then
-        python3 - "$R" "$N/lib" "${dirs[@]}" <<'PYEOF' || { printf 'Varování: Odkazy knihoven se nepodařilo aktualizovat.\n' >&2; return 1; }
-import fcntl, os, sys
-root, out, dirs = sys.argv[1], sys.argv[2], sys.argv[3:]
-
-def resolve(path):
-    # Follow links inside the rootfs: absolute targets are relative to the rootfs.
-    for _ in range(40):
-        if not os.path.islink(path):
-            return path
-        target = os.readlink(path)
-        path = root + target if target.startswith('/') else os.path.join(os.path.dirname(path), target)
-    return None
-
-with open(os.path.join(out, '.links.lock'), 'a') as lock:
-    fcntl.flock(lock, fcntl.LOCK_EX)
-    for d in dirs:
-        for name in os.listdir(d):
-            link = os.path.join(d, name)
-            if not os.path.islink(link) or not os.readlink(link).startswith('/'):
-                continue
-            target = resolve(link)
-            if target and os.path.isfile(target):
-                dest = os.path.join(out, name)
-                tmp = dest + '.new'
-                if os.path.lexists(tmp):
-                    os.remove(tmp)
-                os.symlink(target, tmp)
-                os.replace(tmp, dest)
-PYEOF
-        touch "$N/lib/.links"
-    fi
+    [[ ${#changed[@]} -gt 0 ]] || return 0
+    stage=$(mktemp -d "$N/lib/.links.XXXXXX") || return 1
+    # Timestamp before scanning so concurrent apt changes cause another pass.
+    touch "$stage/stamp" || { rmdir "$stage"; return 1; }
+    for dir in "${dirs[@]}"; do
+        for entry in "$dir"/*; do
+            [[ -L $entry ]] || continue
+            target=$(readlink -- "$entry") || continue
+            [[ $target == /* ]] || continue
+            resolve_into "$entry" || continue
+            [[ -f $REPLY ]] || continue
+            # Each refresher has private staging names; publication is atomic.
+            if ! ln -s "$REPLY" "$stage/${entry##*/}" ||
+               ! mv -f "$stage/${entry##*/}" "$N/lib/${entry##*/}"; then
+                rm -rf "$stage"
+                printf 'Varování: Odkazy knihoven se nepodařilo aktualizovat.\n' >&2
+                return 1
+            fi
+        done
+    done
+    mv -f "$stage/stamp" "$N/lib/.links" && rmdir "$stage"
 }
 
 setup_data() {
@@ -145,34 +147,62 @@ setup_data() {
     fi
 }
 
-native_locale() {
-    local locale=${1:-${LANG:-C.UTF-8}} normalized
-    normalized=${locale//UTF-8/utf8}
-    if [[ $locale == C || $locale == POSIX || ( $locale != */* && ( -d $N/locale/$locale || -d $N/locale/$normalized ) ) ]]; then
-        printf '%s\n' "$locale"
+native_locale_into() {
+    local requested=${1:-${LANG:-C.UTF-8}} normalized
+    normalized=${requested//UTF-8/utf8}
+    if [[ $requested == C || $requested == POSIX || ( $requested != */* && ( -d $N/locale/$requested || -d $N/locale/$normalized ) ) ]]; then
+        REPLY=$requested
     else
-        printf 'C.UTF-8\n'
+        REPLY=C.UTF-8
     fi
+}
+native_locale() { native_locale_into "${1:-}"; printf '%s\n' "$REPLY"; }
+
+native_timezone() {
+    REPLY=${TZ:-}
+    [[ -z $REPLY ]] || return 0
+    local now stamp= cached= file=$N/timezone.cache temporary
+    if [[ -n ${EPOCHSECONDS:-} ]]; then now=$EPOCHSECONDS
+    else printf -v now '%(%s)T' -1; fi
+    if [[ -r $file ]]; then
+        { IFS= read -r stamp && IFS= read -r cached; } < "$file" || stamp=
+    fi
+    if [[ -n $stamp && $stamp != *[!0-9]* && ${#stamp} -le 12 ]] &&
+       (( now >= 10#$stamp && now - 10#$stamp < 3600 )); then
+        REPLY=$cached
+        return 0
+    fi
+    REPLY=$(/system/bin/getprop persist.sys.timezone 2>/dev/null) || REPLY=
+    # Cache even an empty result. A private file keeps concurrent readers from
+    # observing half a record; cache failure never prevents launching a command.
+    temporary=$file.$BASHPID
+    { printf '%s\n%s\n' "$now" "$REPLY" > "$temporary" && mv -f "$temporary" "$file"; } 2>/dev/null || true
 }
 
 ready() {
     [[ -f $N/stamp && -x $PLIB/ld.so && -f $N/lib/pathhook.so ]] || fail 'Nejdříve spusťte: droiddesk-glibc-native setup'
 }
 
-source_path() {
+source_path_into() {
     local path=$1 dir
+    REPLY=
     case $path in
-        /root|/root/*|/home|/home/*|/usr/*|/etc/*|/var/*|/opt/*|/lib/*|/bin/*|/sbin/*) path=$R$path ;;
+        /root|/root/*|/home|/home/*|/usr|/usr/*|/etc|/etc/*|/var|/var/*|/opt|/opt/*|/lib|/lib/*|/bin|/bin/*|/sbin|/sbin/*) path=$R$path ;;
         /*) ;;
         */*) path=$PWD/$path ;;
         *)
             for dir in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do
-                path=$(resolve "$R$dir/$1")
-                if [[ -f $path && -x $path ]]; then printf '%s\n' "$path"; return; fi
+                resolve_into "$R$dir/$1" || continue
+                [[ -f $REPLY && -x $REPLY ]] && return 0
             done
-            fail "Program nebyl nalezen v Debianu: $1" ;;
+            REPLY=
+            return 1 ;;
     esac
-    resolve "$path"
+    resolve_into "$path"
+}
+source_path() {
+    source_path_into "$1" || fail "Program nebyl nalezen v Debianu: $1"
+    printf '%s\n' "$REPLY"
 }
 
 patch_one() {
@@ -236,15 +266,20 @@ run_native() {
     ready
     [[ $# -gt 0 ]] || fail 'Použití: droiddesk-glibc-native run PŘÍKAZ [ARGUMENTY]'
     local saved_preload=${LD_PRELOAD-} saved_library=${LD_LIBRARY_PATH-} saved_path=${PATH-}
-    local timezone=${TZ:-} variable locale
-    local -a desktop=() extra=()
-    # Only exported names and explicitly requested names enter the clean environment.
+    local timezone variable locale
+    local -a desktop=() extra=() saved=("DD_SAVED_PREFIX=$PREFIX")
+    # Prefix expansion enumerates names in this shell. Indirect attribute
+    # expansion filters exported variables without compgen subprocesses/pipes.
     read -r -a extra <<< "${DD_NATIVE_PASS:-}"
-    while IFS= read -r variable; do
+    for variable in DISPLAY DBUS_SESSION_BUS_ADDRESS COLORTERM GALLIUM_DRIVER \
+        GBM_BACKENDS_PATH "${!MESA_@}" "${!LIBGL_@}" "${!VK_@}" "${!__GLX_@}" \
+        "${!__EGL_@}" "${!LC_@}" "${!TERMUX_@}"; do
+        [[ -v $variable && ${!variable@a} == *x* ]] || continue
         case $variable in
-            DISPLAY|DBUS_SESSION_BUS_ADDRESS|COLORTERM|GALLIUM_DRIVER|MESA_*|LIBGL_*|VK_*|__GLX_*|__EGL_*|GBM_BACKENDS_PATH|LC_*) extra+=("$variable") ;;
+            TERMUX_*) saved+=("DD_SAVED_$variable=${!variable}") ;;
+            *) extra+=("$variable") ;;
         esac
-    done < <(compgen -e)
+    done
     for variable in "${extra[@]}"; do
         [[ $variable =~ ^[a-zA-Z_][a-zA-Z_0-9]*$ && -v $variable ]] || continue
         case $variable in
@@ -253,20 +288,12 @@ run_native() {
         # A Termux GUI session can export bionic driver/module paths.
         [[ ${!variable} != *"$PREFIX"* ]] || continue
         case $variable in
-            LC_*) desktop+=("$variable=$(native_locale "${!variable}")") ;;
+            LC_*) native_locale_into "${!variable}"; desktop+=("$variable=$REPLY") ;;
             *) desktop+=("$variable=${!variable}") ;;
         esac
     done
-    local -a saved=("DD_SAVED_PREFIX=$PREFIX")
-    while IFS= read -r variable; do
-        saved+=("DD_SAVED_$variable=${!variable}")
-    done < <(compgen -e | while IFS= read -r variable; do
-        case $variable in TERMUX_*) printf '%s\n' "$variable" ;; esac
-    done)
-    if [[ -z $timezone ]]; then
-        timezone=$(/system/bin/getprop persist.sys.timezone 2>/dev/null || true)
-    fi
-    locale=$(native_locale)
+    native_timezone; timezone=$REPLY
+    native_locale_into; locale=$REPLY
     exec 63< "$R/etc/resolv.conf"
     # Debian bash applies the GUI policy, then delegates PATH and shebangs to the hook.
     exec "$PREFIX/bin/env" -i \
@@ -277,7 +304,7 @@ run_native() {
         "SSL_CERT_FILE=$R/etc/ssl/certs/ca-certificates.crt" "GCONV_PATH=$R/usr/lib/aarch64-linux-gnu/gconv" \
         'DISPLAY=:0' 'DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session' "${desktop[@]}" \
         "TMPDIR=$T" 'GLIBC_TUNABLES=glibc.pthread.rseq=0' \
-        "DD_ROOTFS=$R" "DD_TMP=$T" "DD_PLIB=$PLIB" "DD_LIBPATH=$LIBPATH" \
+        'DD_NATIVE_ACTIVE=1' "DD_ROOTFS=$R" "DD_TMP=$T" "DD_PLIB=$PLIB" "DD_LIBPATH=$LIBPATH" \
         "DD_SAVED_LD_PRELOAD=$saved_preload" "DD_SAVED_LD_LIBRARY_PATH=$saved_library" "DD_SAVED_PATH=$saved_path" \
         "$PLIB/ld.so" --library-path "$LIBPATH" --preload "$N/lib/pathhook.so" \
         "$R/usr/bin/bash" -c '
@@ -347,6 +374,14 @@ PY
 
 program_name_valid() { [[ -n $1 && $1 != */* && $1 != *[[:cntrl:]]* ]]; }
 
+native_learn() {
+    [[ $# == 1 ]] || fail 'Použití: droiddesk-glibc-native learn NÁZEV'
+    program_name_valid "$1" && [[ $1 != --all ]] || fail 'Zadejte samotný název programu bez cesty.'
+    need_python
+    proot_list_update add "$1"
+    printf 'Fallback na proot byl uložen: %s\n' "$1"
+}
+
 native_reset() {
     [[ $# == 1 ]] || fail 'Použití: droiddesk-glibc-native reset NÁZEV|--all'
     program_name_valid "$1" || fail 'Zadejte samotný název programu bez cesty.'
@@ -355,12 +390,16 @@ native_reset() {
     printf 'Naučený fallback byl odstraněn: %s\n' "$1"
 }
 
-native_target() {
-    if [[ $1 == */* && $1 != /* ]]; then resolve "$R/root/$1"
-    else source_path "$1"; fi
+native_target_into() {
+    if [[ $1 == */* && $1 != /* ]]; then resolve_into "$R/root/$1"
+    else source_path_into "$1"; fi
 }
+native_target() { native_target_into "$1" && printf '%s\n' "$REPLY"; }
 
-native_program() {
+native_program_into() {
+    local resolved_command=$1 resolved_target=$2 target
+    shift 2
+    REPLY=
     # These wrappers are generic: never learn a fallback for env, bash or electron-run.
     while [[ $# -gt 0 ]]; do
         case ${1##*/} in
@@ -372,12 +411,22 @@ native_program() {
     done
     [[ $# -gt 0 ]] || return 1
     case ${1##*/} in bash|sh|dash|zsh|fish|tmux|xterm|xfce4-terminal) return 1 ;; esac
-    local target
-    target=$(native_target "$1" 2>/dev/null) || return 1
+    if [[ $1 == "$resolved_command" ]]; then target=$resolved_target
+    else native_target_into "$1" 2>/dev/null || return 1; target=$REPLY; fi
     [[ $target == "$R/"* && -f $target && -x $target ]] || return 1
     case ${target##*/} in env|gpu-run|electron-run|bash|sh|dash|zsh|fish|tmux|xterm|xfce4-terminal) return 1 ;; esac
     program_name_valid "${target##*/}" || return 1
-    printf '%s\n' "${target##*/}"
+    REPLY=${target##*/}
+}
+native_program() { native_program_into '' '' "$@" && printf '%s\n' "$REPLY"; }
+
+native_is_learned() {
+    local learned
+    [[ -r $N/proot-list ]] || return 1
+    while IFS= read -r learned || [[ -n $learned ]]; do
+        [[ $learned != "$1" ]] || return 0
+    done < "$N/proot-list"
+    return 1
 }
 
 request_proot() {
@@ -394,23 +443,30 @@ proot_only() {
 }
 
 native_decision() {
-    local log=${TMPDIR:-$T}/droiddesk-native.log name=${3##*/}
+    local log=${TMPDIR:-$T}/droiddesk-native.log name=${3##*/} contents LC_ALL=C
     # One bounded line; never record arguments or control characters from a command name.
     name=${name//[^a-zA-Z0-9_.+-]/_}; name=${name:0:128}
-    { mkdir -p "${log%/*}"
-      if [[ -f $log ]] && (( $(wc -c < "$log") > 65536 )); then
-          tail -c 32768 "$log" > "$log.old" && mv -f "$log.old" "$log"
+    { [[ -d ${log%/*} ]] || mkdir -p "${log%/*}"
+      if [[ -f $log ]]; then
+          # Stop at the byte limit or a NUL. Plain read -N ignores NUL bytes,
+          # which would let a binary/corrupted log bypass the size bound.
+          if IFS= read -r -d '' -n 65537 contents < "$log"; then
+              if (( ${#contents} > 65536 )); then
+                  tail -c 32768 "$log" > "$log.old" && mv -f "$log.old" "$log"
+              else
+                  : > "$log"
+              fi
+          fi
       fi
       printf '%s %s %s\n' "$1" "$2" "$name" >> "$log"
     } 2>/dev/null || true
 }
 
 try_native() {
-    local cmd=${1:-} reason= target word body program= gui=0 status started
+    local cmd=${1:-} reason= target= word body program= gui=0 status started launch_target=
     local -a words=()
     if ! native_enabled; then reason=disabled
     elif ! native_ready; then reason=not-ready
-    elif ! command -v python3 >/dev/null; then reason=no-python
     elif [[ -z $cmd ]]; then reason=no-command
     elif proot_only "$cmd"; then reason=proot-only
     else
@@ -426,14 +482,15 @@ try_native() {
             done
         fi
         if [[ -z $reason ]]; then
-            target=$(native_target "$cmd" 2>/dev/null) || reason=not-found
+            if native_target_into "$cmd" 2>/dev/null; then target=$REPLY
+            else reason=not-found; fi
             [[ -n $reason || ( -f $target && -x $target ) ]] || reason=not-found
             [[ -n $reason || $target == "$R/"* ]] || reason=outside-rootfs
             if [[ -z $reason ]]; then
-                program=$(native_program "$@") || program=
+                if native_program_into "$cmd" "$target" "$@"; then program=$REPLY; fi
                 if [[ -n $program ]]; then
                     if proot_only "$program"; then reason=proot-only
-                    elif [[ -f $N/proot-list ]] && grep -Fxq -- "$program" "$N/proot-list"; then reason=learned; fi
+                    elif native_is_learned "$program"; then reason=learned; fi
                 fi
             fi
         fi
@@ -449,6 +506,7 @@ try_native() {
         native_decision proot libraries "${program:-$cmd}"; request_proot; return 3
     fi
     native_decision native ready "${program:-$cmd}"
+    launch_target=$target
     if [[ $gui != 1 ]]; then native_launch "$@"; return; fi
     started=$SECONDS
     if (native_launch "$@"); then status=0; else status=$?; fi
@@ -471,7 +529,8 @@ native_launch() {
     if [[ $cmd == */* && $cmd != /* ]]; then
         # Relative symlinks with absolute Debian targets cannot be opened by Android.
         # Use the resolved file while retaining the requested argv0 (multicall tools).
-        target=$(native_target "$cmd")
+        if [[ -n ${launch_target:-} ]]; then target=$launch_target
+        else native_target_into "$cmd" || return 1; target=$REPLY; fi
         shift
         run_native /bin/bash -lc 'cd ~; exec -a "$0" "$@"' "$cmd" "$target" "$@"
     fi
@@ -543,7 +602,8 @@ case $command in
     try) try_native "$@" ;;
     on|off|status) native_switch "$command" ;;
     reset) native_reset "$@" ;;
+    learn) native_learn "$@" ;;
     claude) claude_native "$@" ;;
     selftest) selftest ;;
-    *) fail 'Použití: droiddesk-glibc-native {setup|on|off|status|reset NÁZEV|--all|try PŘÍKAZ [ARGUMENTY]|patch PROGRAM...|app ADRESÁŘ PROGRAM|run PŘÍKAZ [ARGUMENTY]|claude [ARGUMENTY]|selftest}' ;;
+    *) fail 'Použití: droiddesk-glibc-native {setup|on|off|status|learn NÁZEV|reset NÁZEV|--all|try PŘÍKAZ [ARGUMENTY]|patch PROGRAM...|app ADRESÁŘ PROGRAM|run PŘÍKAZ [ARGUMENTY]|claude [ARGUMENTY]|selftest}' ;;
 esac

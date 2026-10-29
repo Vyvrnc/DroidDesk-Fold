@@ -609,7 +609,7 @@ class LinuxRuntime(private val context: Context) {
                     for s in ${'$'}d/*.sock; do [ -e "${'$'}s" ] || continue; p=${'$'}{s##*/}; kill -0 ${'$'}{p%.sock} 2>/dev/null || rm -f "${'$'}s"; done
                     exec claude --messaging-socket-path "${'$'}d/${'$'}${'$'}.sock" "${'$'}@"' claude "${'$'}@"
                 native_status=${'$'}?
-                native_fallback=${'$'}(cat "${'$'}native_result")
+                native_fallback=${'$'}(< "${'$'}native_result")
                 rm -f "${'$'}native_result"
                 [ "${'$'}native_fallback" = proot ] || exit "${'$'}native_status"
             fi
@@ -652,7 +652,7 @@ class LinuxRuntime(private val context: Context) {
             if [ -x "${'$'}native" ] && native_result=${'$'}(mktemp "${'$'}TMPDIR/droiddesk-native-result.XXXXXX"); then
                 DD_NATIVE_RESULT="${'$'}native_result" "${'$'}native" try bash -lc 'mkdir -p ~/projekty/Claude; cd ~/projekty/Claude || cd ~; exec codex --no-daemon "${'$'}@"' codex "${'$'}@"
                 native_status=${'$'}?
-                native_fallback=${'$'}(cat "${'$'}native_result")
+                native_fallback=${'$'}(< "${'$'}native_result")
                 rm -f "${'$'}native_result"
                 [ "${'$'}native_fallback" = proot ] || exit "${'$'}native_status"
             fi
@@ -686,9 +686,15 @@ class LinuxRuntime(private val context: Context) {
             # starts it with COMMAND first. The session outlives the terminal and the XFCE
             # desktop, so another terminal (the app's or XFCE's) can take it over.
             name="${'$'}1"
-            if [ -z "${'$'}name" ]; then echo "Usage: debian-tmux NAME [COMMAND...]" >&2; exit 2; fi
+            if [ -z "${'$'}name" ]; then echo "Použití: debian-tmux NÁZEV [PŘÍKAZ...]" >&2; exit 2; fi
             shift
             log="${tmpDir.absolutePath}/droiddesk-tmux-${'$'}name.log"
+            # The shell wrapper hides tmux from generic native command learning.
+            if grep -Fxq tmux "${File(prefixDir, "opt/glibc-native/proot-list").absolutePath}" 2>/dev/null; then
+                export DD_NATIVE=0
+            fi
+            native_failure=${'$'}(mktemp "${tmpDir.absolutePath}/droiddesk-tmux-result.XXXXXX") || exit 1
+            trap 'rm -f "${'$'}native_failure"' EXIT
             # proot-distro kills the proot when its first process exits (--kill-on-exit), and the
             # tmux server with it, so a detached host keeps a proot of its own while the session
             # lives, with a tmux server of its own (-L): ending one session leaves the others. The app's uid goes along: the server runs as proot's fake root, clients
@@ -698,25 +704,29 @@ class LinuxRuntime(private val context: Context) {
             echo "=== ${'$'}(date "+%Y-%m-%d %H:%M:%S") debian-tmux ${'$'}name ===" >> "${'$'}log"
             setsid nohup "${binDir.absolutePath}/debian-run" bash -c '
                 name=${'$'}1 uid=${'$'}2 gid=${'$'}3 uname=${'$'}4; shift 4
-                command -v tmux >/dev/null || { echo "tmux is missing: apt-get install tmux"; exit 1; }
+                command -v tmux >/dev/null || { echo "Chybí tmux: apt-get install tmux"; exit 1; }
                 tmux -L "droiddesk-${'$'}name" has-session -t "=${'$'}name" 2>/dev/null && exit 0
-                # server-access takes a user name only (tmux 3.5 resolves it with getpwnam), so the
-                # app uid needs a passwd entry. proot-distro adds aid_<name> at install; give it a
-                # moment, then add the entry the way proot-distro does (fake root may write).
                 user=
-                for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-                    user=${'$'}(getent passwd "${'$'}uid" | cut -d: -f1)
-                    [ -n "${'$'}user" ] && break
-                    sleep 0.2
-                done
-                if [ -z "${'$'}user" ] && [ "${'$'}uid" != 0 ]; then
-                    user=aid_${'$'}{uname:-droiddesk${'$'}uid}
-                    getent passwd "${'$'}user" >/dev/null && user=droiddesk${'$'}uid
-                    if echo "${'$'}user:x:${'$'}uid:${'$'}gid:Termux:/:/sbin/nologin" >> /etc/passwd; then
-                        echo "added ${'$'}user (uid ${'$'}uid) to /etc/passwd for tmux server-access"
-                    else
-                        echo "no passwd entry for uid ${'$'}uid, tmux may refuse the client"
-                        user=
+                # Only fake-root proot needs a passwd entry and server-access.
+                if [ "${'$'}(id -u)" != "${'$'}uid" ]; then
+                    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+                        user=${'$'}(getent passwd "${'$'}uid" | cut -d: -f1)
+                        [ -n "${'$'}user" ] && break
+                        sleep 0.2
+                    done
+                    if [ -z "${'$'}user" ] && [ "${'$'}uid" != 0 ] && ! grep -q ":x:${'$'}uid:" /etc/passwd; then
+                        user=aid_${'$'}{uname:-droiddesk${'$'}uid}
+                        getent passwd "${'$'}user" >/dev/null && user=droiddesk${'$'}uid
+                        if echo "${'$'}user:x:${'$'}uid:${'$'}gid:Termux:/:/sbin/nologin" >> /etc/passwd; then
+                            echo "Uživatel ${'$'}user (uid ${'$'}uid) byl přidán do /etc/passwd pro tmux server-access."
+                        else
+                            echo "V passwd chybí uid ${'$'}uid, tmux může odmítnout klienta."
+                            user=
+                        fi
+                    fi
+                    # NSS may miss an existing entry; read its name without appending it again.
+                    if [ -z "${'$'}user" ]; then
+                        user=${'$'}(grep ":x:${'$'}uid:" /etc/passwd | head -n 1 | cut -d: -f1)
                     fi
                 fi
                 conf=${'$'}HOME/.config/droiddesk/tmux.conf
@@ -751,10 +761,18 @@ class LinuxRuntime(private val context: Context) {
                     tmux -L "droiddesk-${'$'}1" has-session -t "=${'$'}1" 2>/dev/null && exec tmux -L "droiddesk-${'$'}1" attach -t "=${'$'}1"
                     sleep 0.2
                 done
-                echo "tmux session ${'$'}1 did not start, see ${'$'}2" >&2
+                echo "Relace tmux ${'$'}1 se nespustila, viz ${'$'}2." >&2
+                if [ "${'$'}{DD_NATIVE_ACTIVE:-0}" = 1 ]; then printf "native\n" > "${'$'}3"; fi
                 exit 1
-            ' droiddesk-tmux-attach "${'$'}name" "${'$'}log"
+            ' droiddesk-tmux-attach "${'$'}name" "${'$'}log" "${'$'}native_failure"
             status=${'$'}?
+            if [ "${'$'}status" -ne 0 ] && [ "${'$'}{DD_NATIVE:-1}" != 0 ] && grep -Fxq native "${'$'}native_failure"; then
+                echo "Nativní relace tmux ${'$'}name se nespustila; opakuji start přes proot." | tee -a "${'$'}log" >&2
+                "${binDir.absolutePath}/droiddesk-glibc-native" learn tmux >> "${'$'}log" 2>&1 || echo "Varování: fallback tmux se nepodařilo uložit." >&2
+                rm -f "${'$'}native_failure"
+                trap - EXIT
+                DD_NATIVE=0 exec "${'$'}0" "${'$'}name" "${'$'}@"
+            fi
             # XFCE runs this with xfce4-terminal -x, whose window closes with the process:
             # an error has to stay on screen until it is read.
             if [ "${'$'}status" -ne 0 ]; then
@@ -806,7 +824,7 @@ class LinuxRuntime(private val context: Context) {
             if [ -x "${'$'}native" ] && native_result=${'$'}(mktemp "${'$'}TMPDIR/droiddesk-native-result.XXXXXX"); then
                 DD_NATIVE_RESULT="${'$'}native_result" "${'$'}native" try "${'$'}@"
                 native_status=${'$'}?
-                native_fallback=${'$'}(cat "${'$'}native_result")
+                native_fallback=${'$'}(< "${'$'}native_result")
                 rm -f "${'$'}native_result"
                 [ "${'$'}native_fallback" = proot ] || exit "${'$'}native_status"
             fi

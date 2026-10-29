@@ -21,6 +21,9 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <stddef.h>
+#include <pwd.h>
+#include <grp.h>
+#include <pthread.h>
 extern char **environ;
 
 /* The program this process really runs. Started as "ld.so --library-path ... --preload ...
@@ -176,6 +179,193 @@ static char *unmap(char *p) {
     if (!mp) { return _Generic((result_type)0, \
         FILE *: NULL, DIR *: NULL, char *: NULL, void *: NULL, default: -1); } mp; })
 #define map(p, f) mapbuf(p, pathbuf, f)
+
+/* NSS files opens paths internally, bypassing open/fopen interposition. Use the
+ * glibc file parsers on streams opened with real fopen, without consulting NSS.
+ * Each lookup owns its stream; enumeration and non-reentrant results are per
+ * thread. The key destructor closes streams and frees growing result buffers. */
+struct nss_state {
+    FILE *pw_file, *gr_file;
+    struct passwd pw;
+    struct group gr;
+    char *pw_buf, *gr_buf;
+    size_t pw_size, gr_size;
+};
+static pthread_key_t nss_key;
+static pthread_once_t nss_once = PTHREAD_ONCE_INIT;
+static int nss_key_error;
+static void nss_destroy(void *ptr) {
+    struct nss_state *s = ptr;
+    if (s->pw_file) fclose(s->pw_file);
+    if (s->gr_file) fclose(s->gr_file);
+    free(s->pw_buf); free(s->gr_buf); free(s);
+}
+static void nss_key_init(void) { nss_key_error = pthread_key_create(&nss_key, nss_destroy); }
+static struct nss_state *nss_state(void) {
+    int rc = pthread_once(&nss_once, nss_key_init);
+    if (rc || nss_key_error) { errno = rc ? rc : nss_key_error; return NULL; }
+    struct nss_state *s = pthread_getspecific(nss_key);
+    if (!s) {
+        s = calloc(1, sizeof(*s));
+        if (!s) return NULL;
+        rc = pthread_setspecific(nss_key, s);
+        if (rc) { free(s); errno = rc; return NULL; }
+    }
+    return s;
+}
+static FILE *nss_open(int group) {
+    REAL(fopen, FILE *, const char *, const char *);
+    const char *root = getenv("DD_ROOTFS");
+    if (snprintf(pathbuf, sizeof pathbuf, "%s/etc/%s", root, group ? "group" : "passwd") >= (int)sizeof pathbuf) {
+        errno = ENAMETOOLONG; return NULL;
+    }
+    return real_fopen(pathbuf, "re");
+}
+/* Return ENOENT at end of enumeration, as fget*ent_r does. Rewind a record on
+ * ERANGE so callers can grow their buffer and retry without losing an entry. */
+static int nss_read(FILE *f, int group, void *entry, char *buf, size_t size, void **result) {
+    fpos_t pos;
+    *result = NULL;
+    if (fgetpos(f, &pos)) return errno;
+    int rc;
+    if (group) {
+        struct group *out = NULL;
+        rc = fgetgrent_r(f, entry, buf, size, &out);
+        *result = out;
+    } else {
+        struct passwd *out = NULL;
+        rc = fgetpwent_r(f, entry, buf, size, &out);
+        *result = out;
+    }
+    if (rc == ERANGE && fsetpos(f, &pos)) return errno;
+    return rc;
+}
+static int nss_lookup(int group, const char *name, unsigned long id,
+                      void *entry, char *buf, size_t size, void **result) {
+    *result = NULL;
+    FILE *f = nss_open(group);
+    if (!f) return errno;
+    int rc;
+    while (!(rc = nss_read(f, group, entry, buf, size, result))) {
+        if (!*result) break;
+        const char *found = group ? ((struct group *)entry)->gr_name : ((struct passwd *)entry)->pw_name;
+        unsigned long number = group ? ((struct group *)entry)->gr_gid : ((struct passwd *)entry)->pw_uid;
+        if (name ? !strcmp(name, found) : id == number) break;
+        *result = NULL;
+    }
+    if (rc) *result = NULL;
+    fclose(f);
+    return rc == ENOENT ? 0 : rc;
+}
+#define NSS_LOOKUP(name, type, keytype, group, name_key, id_key) \
+int name##_r(keytype key, struct type *entry, char *buf, size_t size, struct type **result) { \
+    REAL(name##_r, int, keytype, struct type *, char *, size_t, struct type **); \
+    if (!getenv("DD_ROOTFS")) return real_##name##_r(key, entry, buf, size, result); \
+    void *out = NULL; \
+    int rc = nss_lookup(group, name_key, id_key, entry, buf, size, &out); \
+    *result = out; return rc; \
+}
+NSS_LOOKUP(getpwnam, passwd, const char *, 0, key, 0)
+NSS_LOOKUP(getpwuid, passwd, uid_t, 0, NULL, key)
+NSS_LOOKUP(getgrnam, group, const char *, 1, key, 0)
+NSS_LOOKUP(getgrgid, group, gid_t, 1, NULL, key)
+
+static int nss_grow(char **buf, size_t *size) {
+    size_t next = *size ? *size * 2 : 1024;
+    if (next < *size) { errno = ENOMEM; return -1; }
+    char *p = realloc(*buf, next);
+    if (!p) return -1;
+    *buf = p; *size = next; return 0;
+}
+#define NSS_STATIC(name, type, keytype, field) \
+struct type *name(keytype key) { \
+    REAL(name, struct type *, keytype); \
+    if (!getenv("DD_ROOTFS")) return real_##name(key); \
+    struct nss_state *s = nss_state(); \
+    if (!s) return NULL; \
+    struct type *out; int rc; \
+    do { \
+        if (!s->field##_buf && nss_grow(&s->field##_buf, &s->field##_size)) return NULL; \
+        rc = name##_r(key, &s->field, s->field##_buf, s->field##_size, &out); \
+        if (rc == ERANGE && nss_grow(&s->field##_buf, &s->field##_size)) return NULL; \
+    } while (rc == ERANGE); \
+    if (rc) errno = rc; \
+    return out; \
+}
+NSS_STATIC(getpwnam, passwd, const char *, pw)
+NSS_STATIC(getpwuid, passwd, uid_t, pw)
+NSS_STATIC(getgrnam, group, const char *, gr)
+NSS_STATIC(getgrgid, group, gid_t, gr)
+
+#define NSS_ENUM(type, field, group) \
+void end##field##ent(void) { \
+    REAL(end##field##ent, void, void); \
+    if (!getenv("DD_ROOTFS")) { real_end##field##ent(); return; } \
+    struct nss_state *s = nss_state(); \
+    if (s && s->field##_file) { fclose(s->field##_file); s->field##_file = NULL; } \
+} \
+void set##field##ent(void) { \
+    REAL(set##field##ent, void, void); \
+    if (!getenv("DD_ROOTFS")) { real_set##field##ent(); return; } \
+    end##field##ent(); \
+    struct nss_state *s = nss_state(); \
+    if (s) s->field##_file = nss_open(group); \
+} \
+struct type *get##field##ent(void) { \
+    REAL(get##field##ent, struct type *, void); \
+    if (!getenv("DD_ROOTFS")) return real_get##field##ent(); \
+    struct nss_state *s = nss_state(); \
+    if (!s) return NULL; \
+    if (!s->field##_file && !(s->field##_file = nss_open(group))) return NULL; \
+    void *out; int rc; \
+    do { \
+        if (!s->field##_buf && nss_grow(&s->field##_buf, &s->field##_size)) return NULL; \
+        rc = nss_read(s->field##_file, group, &s->field, s->field##_buf, s->field##_size, &out); \
+        if (rc == ERANGE && nss_grow(&s->field##_buf, &s->field##_size)) return NULL; \
+    } while (rc == ERANGE); \
+    if (rc && rc != ENOENT) errno = rc; \
+    return out; \
+}
+NSS_ENUM(passwd, pw, 0)
+NSS_ENUM(group, gr, 1)
+
+int getgrouplist(const char *user, gid_t base, gid_t *groups, int *ngroups) {
+    REAL(getgrouplist, int, const char *, gid_t, gid_t *, int *);
+    if (!getenv("DD_ROOTFS")) return real_getgrouplist(user, base, groups, ngroups);
+    int capacity = *ngroups, count = 1, rc = 0;
+    gid_t *ids = malloc(sizeof(*ids));
+    if (!ids) return -1;
+    ids[0] = base;
+    FILE *f = nss_open(1);
+    if (!f) { free(ids); return -1; }
+    struct group entry;
+    char *buf = NULL; size_t size = 0; void *out;
+    while (1) {
+        if (!buf && nss_grow(&buf, &size)) { rc = errno; break; }
+        rc = nss_read(f, 1, &entry, buf, size, &out);
+        if (rc == ERANGE) { if (nss_grow(&buf, &size)) { rc = errno; break; } continue; }
+        if (rc || !out) break;
+        int member = 0, duplicate = 0;
+        for (char **m = entry.gr_mem; *m; ++m) if (!strcmp(*m, user)) member = 1;
+        for (int i = 0; i < count; ++i) if (ids[i] == entry.gr_gid) duplicate = 1;
+        if (!member || duplicate) continue;
+        if (count == INT_MAX) { rc = EOVERFLOW; break; }
+        gid_t *next = realloc(ids, ((size_t)count + 1) * sizeof(*ids));
+        if (!next) { rc = ENOMEM; break; }
+        ids = next; ids[count++] = entry.gr_gid;
+    }
+    fclose(f); free(buf);
+    if (rc && rc != ENOENT) { free(ids); errno = rc; return -1; }
+    for (int i = 0; i < count && i < capacity; ++i) groups[i] = ids[i];
+    free(ids); *ngroups = count;
+    return capacity < count ? -1 : count;
+}
+int initgroups(const char *user, gid_t group) {
+    REAL(initgroups, int, const char *, gid_t);
+    if (!getenv("DD_ROOTFS")) return real_initgroups(user, group);
+    /* Android owns supplementary groups; never call seccomp-blocked setgroups. */
+    return 0;
+}
 
 static int open_nofollow(int flags) {
     return (flags & O_NOFOLLOW) || (flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL);
@@ -338,12 +528,12 @@ static int envkey(const char *entry, const char *key) {
     size_t n = strlen(key); return !strncmp(entry, key, n) && entry[n] == '=';
 }
 static char **child_env(char *const env[], int bionic) {
-    const char *runtime[] = {"DD_ROOTFS", "DD_TMP", "DD_PLIB", "DD_LIBPATH",
+    const char *runtime[] = {"DD_NATIVE_ACTIVE", "DD_ROOTFS", "DD_TMP", "DD_PLIB", "DD_LIBPATH",
         "DD_SAVED_LD_PRELOAD", "DD_SAVED_LD_LIBRARY_PATH", "DD_SAVED_PATH", NULL};
     size_t n = count(env), k = 0;
     size_t saved = 0;
     for (char **e = environ; *e; ++e) if (!strncmp(*e, "DD_SAVED_", 9)) ++saved;
-    char **v = calloc(n + 12 + 2 * saved, sizeof(*v));
+    char **v = calloc(n + 13 + 2 * saved, sizeof(*v));
     if (!v) return NULL;
     for (size_t i = 0; i < n; ++i) {
         int config = 0;

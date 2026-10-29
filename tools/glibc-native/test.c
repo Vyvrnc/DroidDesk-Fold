@@ -6,6 +6,8 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
+#include <pwd.h>
+#include <grp.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,6 +29,128 @@ static void check(int ok, const char *what) {
 static void restored(const char *key, const char *saved) {
     const char *actual = getenv(key), *expected = getenv(saved);
     check(expected && (expected[0] ? actual && !strcmp(actual, expected) : !actual || !actual[0]), key);
+}
+static void *nss_thread(void *unused) {
+    (void)unused;
+    for (int i = 0; i < 100; ++i) {
+        struct passwd *p = getpwnam("dd-bob");
+        check(p && p->pw_uid == 42421 && !strcmp(p->pw_dir, "/home/bob"), "thread passwd");
+        struct group *g = getgrnam("dd-other");
+        check(g && g->gr_gid == 42423 && !strcmp(g->gr_mem[0], "dd-bob"), "thread group");
+    }
+    return NULL;
+}
+static void *nss_enumeration_thread(void *unused) {
+    (void)unused;
+    setpwent(); setgrent();
+    struct passwd *p = getpwent(); struct group *g = getgrent();
+    check(p && !strcmp(p->pw_name, "dd-alice") && g && !strcmp(g->gr_name, "dd-primary"),
+          "thread enumeration starts independently");
+    p = getpwent(); g = getgrent();
+    check(p && !strcmp(p->pw_name, "dd-bob") && g && !strcmp(g->gr_name, "dd-shared"),
+          "thread enumeration advances independently");
+    endpwent(); endgrent();
+    return NULL;
+}
+static void nss(void) {
+    struct passwd pw, *p = NULL;
+    struct group gr, *g = NULL;
+    char buf[4096], tiny[1];
+    check(!getpwnam_r("dd-alice", &pw, buf, sizeof(buf), &p) && p == &pw &&
+          pw.pw_uid == 42420 && pw.pw_gid == 42420 && !strcmp(pw.pw_gecos, "Alice Example") &&
+          !strcmp(pw.pw_dir, "/home/alice") && !strcmp(pw.pw_shell, "/bin/bash"), "getpwnam_r rootfs");
+    check(!getpwuid_r(42421, &pw, buf, sizeof(buf), &p) && p &&
+          !strcmp(p->pw_name, "dd-bob"), "getpwuid_r rootfs");
+    check(getpwnam_r("dd-alice", &pw, tiny, sizeof(tiny), &p) == ERANGE && !p,
+          "getpwnam_r small buffer");
+    check(getpwuid_r(42420, &pw, tiny, sizeof(tiny), &p) == ERANGE && !p,
+          "getpwuid_r small buffer");
+    check(!getpwnam_r("dd-missing", &pw, buf, sizeof(buf), &p) && !p, "missing passwd name");
+    check(!getpwuid_r(42499, &pw, buf, sizeof(buf), &p) && !p, "missing passwd uid");
+    check(!getgrnam_r("dd-shared", &gr, buf, sizeof(buf), &g) && g == &gr &&
+          g->gr_gid == 42422 && !strcmp(g->gr_mem[0], "dd-alice") &&
+          !strcmp(g->gr_mem[1], "dd-bob") && !g->gr_mem[2], "getgrnam_r rootfs members");
+    check(!getgrgid_r(42420, &gr, buf, sizeof(buf), &g) && g &&
+          !strcmp(g->gr_name, "dd-primary"), "getgrgid_r rootfs");
+    check(getgrnam_r("dd-shared", &gr, tiny, sizeof(tiny), &g) == ERANGE && !g,
+          "getgrnam_r small buffer");
+    check(getgrgid_r(42422, &gr, tiny, sizeof(tiny), &g) == ERANGE && !g,
+          "getgrgid_r small buffer");
+    check(!getgrnam_r("dd-missing", &gr, buf, sizeof(buf), &g) && !g, "missing group name");
+    check(!getgrgid_r(42499, &gr, buf, sizeof(buf), &g) && !g, "missing group gid");
+    check(!getpwnam("dd-missing") && !getpwuid(42499) &&
+          !getgrnam("dd-missing") && !getgrgid(42499), "non-r missing entries");
+    p = getpwuid(42420); g = getgrgid(42420);
+    check(p && g && !strcmp(p->pw_name, "dd-alice") && !strcmp(g->gr_name, "dd-primary"),
+          "non-r uid/gid lookup");
+    pthread_t workers[4];
+    for (int i = 0; i < 4; ++i)
+        check(!pthread_create(&workers[i], NULL, nss_thread, NULL), "NSS pthread_create");
+    for (int i = 0; i < 4; ++i) check(!pthread_join(workers[i], NULL), "NSS pthread_join");
+    check(!strcmp(p->pw_name, "dd-alice") && !strcmp(g->gr_name, "dd-primary"), "non-r thread local storage");
+    setpwent(); setgrent();
+    check(getpwent() && getgrent(), "main thread enumeration starts");
+    check(!pthread_create(&workers[0], NULL, nss_enumeration_thread, NULL) &&
+          !pthread_join(workers[0], NULL), "NSS enumeration thread");
+    p = getpwent(); g = getgrent();
+    check(p && !strcmp(p->pw_name, "dd-bob") && g && !strcmp(g->gr_name, "dd-shared"),
+          "thread end does not reset main enumeration");
+    endpwent(); endgrent();
+    setpwent();
+    p = getpwent(); check(p && !strcmp(p->pw_name, "dd-alice"), "passwd enumeration first");
+    p = getpwent(); check(p && !strcmp(p->pw_name, "dd-bob"), "passwd enumeration second");
+    check(!getpwent(), "passwd enumeration EOF");
+    setpwent(); p = getpwent();
+    check(p && !strcmp(p->pw_name, "dd-alice"), "passwd enumeration reset");
+    endpwent(); p = getpwent();
+    check(p && !strcmp(p->pw_name, "dd-alice"), "passwd enumeration reopen"); endpwent();
+    setgrent();
+    int count = 0; while (getgrent()) ++count;
+    check(count == 4, "group enumeration skips malformed");
+    setgrent(); g = getgrent();
+    check(g && !strcmp(g->gr_name, "dd-primary"), "group enumeration reset");
+    endgrent(); g = getgrent();
+    check(g && !strcmp(g->gr_name, "dd-primary"), "group enumeration reopen"); endgrent();
+    gid_t groups[4] = {0}; int size = 0;
+    check(getgrouplist("dd-alice", 42420, NULL, &size) == -1 && size == 2,
+          "getgrouplist capacity query and dedup");
+    size = 1;
+    check(getgrouplist("dd-alice", 42420, groups, &size) == -1 && size == 2,
+          "getgrouplist insufficient capacity");
+    size = 4;
+    check(getgrouplist("dd-alice", 42420, groups, &size) == 2 && size == 2 &&
+          groups[0] == 42420 && groups[1] == 42422, "getgrouplist primary and membership");
+    size = 4;
+    check(getgrouplist("dd-missing", 42499, groups, &size) == 1 && size == 1 &&
+          groups[0] == 42499, "getgrouplist unknown user primary");
+    int before = getgroups(0, NULL);
+    check(before >= 0, "read supplementary group count");
+    gid_t *saved_groups = calloc((size_t)before + 1, sizeof(*saved_groups));
+    gid_t *after_groups = calloc((size_t)before + 1, sizeof(*after_groups));
+    check(saved_groups && after_groups && getgroups(before, saved_groups) == before,
+          "save supplementary groups");
+    check(!initgroups("dd-alice", 42420) && getgroups(0, NULL) == before &&
+          getgroups(before, after_groups) == before &&
+          !memcmp(saved_groups, after_groups, (size_t)before * sizeof(*saved_groups)), "initgroups no-op");
+    free(saved_groups); free(after_groups);
+    char *root = strdup(getenv("DD_ROOTFS")); check(root != NULL, "save NSS rootfs");
+    unsetenv("DD_ROOTFS");
+    p = getpwuid(getuid()); check(p != NULL, "unset rootfs real passwd");
+    uid_t uid = p->pw_uid;
+    check(!getpwnam_r(p->pw_name, &pw, buf, sizeof(buf), &p) && p && p->pw_uid == uid,
+          "unset rootfs real passwd_r");
+    g = getgrgid(getgid()); check(g != NULL, "unset rootfs real group");
+    gid_t gid = g->gr_gid;
+    check(!getgrnam_r(g->gr_name, &gr, buf, sizeof(buf), &g) && g && g->gr_gid == gid,
+          "unset rootfs real group_r");
+    check(!getpwnam("dd-alice") && !getgrnam("dd-shared"), "unset rootfs excludes fake NSS");
+    check(!setenv("DD_ROOTFS", "/dd-no-such-nss-rootfs", 1), "missing NSS rootfs");
+    check(getpwnam_r("dd-alice", &pw, buf, sizeof(buf), &p) == ENOENT && !p,
+          "missing passwd file");
+    check(getgrnam_r("dd-shared", &gr, buf, sizeof(buf), &g) == ENOENT && !g,
+          "missing group file");
+    check(!setenv("DD_ROOTFS", root, 1), "restore NSS rootfs"); free(root);
+    puts("NSS lookup, enumeration, groups and thread checks OK");
 }
 static void mapped_file(void) {
     char b[16] = {0}; int fd = open("/etc/native-test", O_RDONLY);
@@ -128,8 +252,10 @@ static void unix_sockets(void) {
     puts("unix socket checks OK");
 }
 int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "nss")) { nss(); return 0; }
     if (argc > 1 && !strcmp(argv[1], "unix")) { unix_sockets(); return 0; }
     if (argc > 1 && !strcmp(argv[1], "context")) {
+        check(getenv("DD_NATIVE_ACTIVE") && !strcmp(getenv("DD_NATIVE_ACTIVE"), "1"), "native active marker");
         char cwd[PATH_MAX], home[PATH_MAX];
         snprintf(home, sizeof(home), "%s/root", getenv("DD_ROOTFS"));
         check(getenv("HOME") && !strcmp(getenv("HOME"), home), "try Debian HOME");
@@ -191,6 +317,8 @@ int main(int argc, char **argv) {
     }
     mapped_file();
     if (argc > 1 && !strcmp(argv[1], "child")) {
+        check(getenv("DD_NATIVE_ACTIVE") && !strcmp(getenv("DD_NATIVE_ACTIVE"), "1"),
+              "native active marker survives custom envp");
         check(!getenv("LD_PRELOAD") && !getenv("LD_LIBRARY_PATH"), "glibc environment stripped");
         check(getenv("DD_SAVED_PREFIX") && getenv("DD_SAVED_TERMUX__TEST"), "saved Termux env survives custom envp");
         check(fcntl(63, F_GETFD) >= 0, "fd63 survived exec");

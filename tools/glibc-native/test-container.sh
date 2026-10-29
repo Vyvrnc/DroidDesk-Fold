@@ -8,6 +8,18 @@ root=$work/rootfs
 mkdir -p "$root"/{etc,var,usr/bin,root,opt/search/probe} "$work"/{tmp,plib} /system/bin
 ln -s usr/bin "$root/bin"
 printf 'mapped\n' > "$root/etc/native-test"
+cat > "$root/etc/passwd" <<'PASSWD'
+malformed-passwd-entry
+dd-alice:x:42420:42420:Alice Example:/home/alice:/bin/bash
+dd-bob:x:42421:42421:Bob Example:/home/bob:/bin/sh
+PASSWD
+cat > "$root/etc/group" <<'GROUP'
+malformed-group-entry
+dd-primary:x:42420:dd-alice
+dd-shared:x:42422:dd-alice,dd-bob
+dd-shared-duplicate:x:42422:dd-alice
+dd-other:x:42423:dd-bob
+GROUP
 ln -s /etc/native-test "$root/etc/absolute-file"
 ln -s /etc "$root/opt/absolute-dir"
 ln -s ../etc "$root/opt/relative-dir"
@@ -34,7 +46,7 @@ cp "$root/usr/bin/probe" "$root/usr/bin/patched"
 patchelf --force-rpath --set-rpath "$libs" "$root/usr/bin/patched"
 patchelf --set-interpreter "$work/plib/ld.so" "$root/usr/bin/patched"
 patchelf --add-needed "$work/hook.so" "$root/usr/bin/patched"
-export DD_ROOTFS=$root DD_TMP=$work/tmp DD_PLIB=$work/plib DD_LIBPATH=$libs
+export DD_ROOTFS=$root DD_TMP=$work/tmp DD_PLIB=$work/plib DD_LIBPATH=$libs DD_NATIVE_ACTIVE=1
 export DD_SAVED_PREFIX=/termux/usr DD_SAVED_TERMUX_VERSION=0.118 DD_SAVED_TERMUX__TEST="value with spaces"
 export DD_SAVED_PATH=/termux/bin DD_SAVED_LD_LIBRARY_PATH=$libs DD_SAVED_LD_PRELOAD=$work/empty.so
 printf 'int marker;\n' | gcc -shared -fPIC -x c - -o "$work/empty.so"
@@ -42,6 +54,7 @@ export PATH=/usr/bin:/bin
 exec 63<"$root/etc/native-test"
 "$loader" --library-path "$libs" --preload "$work/hook.so" "$root/usr/bin/probe"
 "$loader" --library-path "$libs" --preload "$work/hook.so" "$root/usr/bin/probe" unix
+"$loader" --library-path "$libs" --preload "$work/hook.so" "$root/usr/bin/probe" nss
 # Self re-exec through /proc/self/exe and through the loader (bun's embedded ripgrep).
 gcc -O2 -Wall -Wextra -Werror -o "$root/usr/bin/selfexec" /repo/tools/glibc-native/selfexec.c
 for how in proc loader; do
@@ -78,6 +91,87 @@ echo "self re-exec checks OK"
     [[ $(source_path /root) == "$root/root" ]]
     mkdir -p "$root/home/test"
     [[ $(source_path /home/test) == "$root/home/test" ]]
+    # Resolve each component before processing its following dot-dot component.
+    mkdir -p "$root/opt/resolve-test/target/deep" "$root/opt/resolve-test/space target"
+    printf 'resolved\n' > "$root/opt/resolve-test/target/marker"
+    printf 'spaces\n' > "$root/opt/resolve-test/space target/file with spaces"
+    ln -s /opt/resolve-test/target "$root/opt/resolve-test/absolute"
+    ln -s target "$root/opt/resolve-test/relative"
+    ln -s target/deep "$root/opt/resolve-test/deep-link"
+    ln -s 'space target' "$root/opt/resolve-test/space link"
+    resolve_into "$root/opt/resolve-test/absolute/marker"
+    [[ $REPLY == "$root/opt/resolve-test/target/marker" ]]
+    # A physical link from outside Debian must adopt its root before nested links.
+    ln -s "$root/opt/resolve-test/absolute/marker" "$N/external-resolve-link"
+    resolve_into "$N/external-resolve-link"
+    [[ $REPLY == "$root/opt/resolve-test/target/marker" ]]
+    resolve_into "$root/opt/resolve-test/relative/marker"
+    [[ $REPLY == "$root/opt/resolve-test/target/marker" ]]
+    resolve_into "$root/opt/resolve-test/deep-link/../marker"
+    [[ $REPLY == "$root/opt/resolve-test/target/marker" ]]
+    resolve_into "$root/opt/resolve-test/space link/file with spaces"
+    [[ $REPLY == "$root/opt/resolve-test/space target/file with spaces" ]]
+    (cd "$root/opt/resolve-test"; resolve_into ./relative/marker
+     [[ $REPLY == "$root/opt/resolve-test/target/marker" ]])
+    resolve_into "$root/../../etc/native-test"
+    [[ $REPLY == "$root/etc/native-test" ]]
+    # Exactly forty symlinks are valid; forty-one and cycles must fail.
+    for ((link = 40; link >= 1; --link)); do
+        target=chain-$((link + 1)); [[ $link != 40 ]] || target=target/marker
+        ln -s "$target" "$root/opt/resolve-test/chain-$link"
+    done
+    resolve_into "$root/opt/resolve-test/chain-1"
+    [[ $REPLY == "$root/opt/resolve-test/target/marker" ]]
+    ln -s chain-1 "$root/opt/resolve-test/chain-0"
+    ln -s cycle "$root/opt/resolve-test/cycle"
+    if (resolve_into "$root/opt/resolve-test/chain-0") >/dev/null 2>&1; then
+        echo 'resolver accepted 41 symlinks' >&2; exit 1
+    fi
+    if (resolve_into "$root/opt/resolve-test/cycle") >/dev/null 2>&1; then
+        echo 'resolver accepted symlink cycle' >&2; exit 1
+    fi
+    echo 'component-wise shell resolver checks OK'
+    (
+        unset TZ
+        timezone_calls=$work/timezone-calls
+        : > "$timezone_calls"
+        test_timezone=Europe/Prague
+        function /system/bin/getprop {
+            [[ $# == 1 && $1 == persist.sys.timezone ]] || return 2
+            printf 'getprop\n' >> "$timezone_calls"
+            printf '%s\n' "$test_timezone"
+        }
+        rm -f "$N/timezone.cache"
+        native_timezone
+        [[ $REPLY == Europe/Prague && $(wc -l < "$timezone_calls") == 1 ]]
+        mapfile -t timezone_cache < "$N/timezone.cache"
+        [[ ${#timezone_cache[@]} == 2 && ${timezone_cache[0]} =~ ^[0-9]+$ && ${timezone_cache[1]} == Europe/Prague ]]
+        test_timezone=Europe/Paris
+        # A fresh cache also works in a newly sourced launcher process.
+        cached_timezone=$(source <(sed '/^command=/,$d' /repo/app/android/app/src/main/assets/droiddesk/droiddesk-glibc-native)
+                          native_timezone; printf '%s' "$REPLY")
+        [[ $cached_timezone == Europe/Prague && $(wc -l < "$timezone_calls") == 1 ]]
+        printf '%s\n%s\n' "$((EPOCHSECONDS - 3601))" Europe/Prague > "$N/timezone.cache"
+        native_timezone
+        [[ $REPLY == Europe/Paris && $(wc -l < "$timezone_calls") == 2 ]]
+        TZ=Pacific/Honolulu native_timezone
+        [[ $REPLY == Pacific/Honolulu && $(wc -l < "$timezone_calls") == 2 ]]
+        mapfile -t timezone_cache < "$N/timezone.cache"
+        [[ ${timezone_cache[1]} == Europe/Paris ]]
+        printf 'not-an-epoch\nEurope/Prague\n' > "$N/timezone.cache"
+        native_timezone
+        [[ $REPLY == Europe/Paris && $(wc -l < "$timezone_calls") == 3 ]]
+        test_timezone=
+        rm -f "$N/timezone.cache"
+        native_timezone
+        [[ -z $REPLY && $(wc -l < "$timezone_calls") == 4 ]]
+        mapfile -t timezone_cache < "$N/timezone.cache"
+        [[ ${#timezone_cache[@]} == 2 && -z ${timezone_cache[1]} ]]
+        test_timezone=Europe/Prague
+        native_timezone
+        [[ -z $REPLY && $(wc -l < "$timezone_calls") == 4 ]]
+        echo 'hourly timezone cache and explicit TZ checks OK'
+    )
     mkdir -p "$root/opt/dummy"
     cp "$root/usr/bin/probe" "$root/opt/dummy/brave"
     cp "$root/usr/bin/probe" "$root/opt/dummy/chrome_crashpad_handler"
@@ -100,6 +194,30 @@ echo "self re-exec checks OK"
      export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/custom-bus
      export DD_NATIVE_PASS='CUSTOM PREFIX TERMUX_VERSION LD_PRELOAD LD_LIBRARY_PATH'
      run_native /usr/bin/probe desktop)
+
+    # Successful launches and a required library refresh must never invoke Python.
+    cp /usr/bin/true "$root/usr/bin/true"
+    (
+        python_calls=$work/hot-path-python-calls
+        : > "$python_calls"
+        python3() { printf 'python3\n' >> "$python_calls"; return 99; }
+        ln -s /opt/native-test.so "$root/usr/lib/aarch64-linux-gnu/libhot-path.so"
+        rm -f "$N/lib/.links"
+        (try_native /usr/bin/true)
+        [[ $(readlink "$N/lib/libhot-path.so") == "$root/opt/native-test.so" ]]
+        (run_native /usr/bin/true)
+        # Repeat with an already refreshed mirror to exercise the normal fast path.
+        (run_native /usr/bin/true)
+        [[ ! -s $python_calls ]]
+        start_us=${EPOCHREALTIME/./}
+        for ((iteration = 0; iteration < 20; ++iteration)); do (try_native /usr/bin/true); done
+        elapsed_us=$((${EPOCHREALTIME/./} - start_us))
+        average_us=$((elapsed_us / 20))
+        printf '20x try /usr/bin/true average: %d.%03d ms (informational)\n' \
+            "$((average_us / 1000))" "$((average_us % 1000))"
+        [[ ! -s $python_calls ]]
+        echo 'Python-free successful native launch and library refresh checks OK'
+    )
 
     expect_proot() {
         if (try_native "$@"); then echo 'try unexpectedly ran a command' >&2; exit 1
@@ -142,6 +260,14 @@ echo "self re-exec checks OK"
     head -c 70000 /dev/zero > "$T/droiddesk-native.log"
     expect_proot apt
     [[ $(wc -c < "$T/droiddesk-native.log") -lt 66000 ]]
+    # Rotation keeps recent readable decisions and discards the old large prefix.
+    { printf 'old-prefix\n'; head -c 70000 /dev/zero | tr '\0' x
+      printf '\nrecent-decision\n'; } > "$T/droiddesk-native.log"
+    expect_proot apt
+    [[ $(wc -c < "$T/droiddesk-native.log") -lt 66000 ]]
+    ! grep -q '^old-prefix$' "$T/droiddesk-native.log"
+    grep -q '^recent-decision$' "$T/droiddesk-native.log"
+    grep -q '^proot proot-only apt$' "$T/droiddesk-native.log"
     echo 'native decision and desktop environment checks OK'
 
     # Extract the actual generated launchers, not hand-maintained copies of their logic.
@@ -161,6 +287,18 @@ body = body.replace('${tmpDir.absolutePath}', str(tmp)).replace('${binDir.absolu
 body = re.sub(r'\$\{File\(binDir, "([^"]+)"\)\.absolutePath\}', lambda m: str(prefix / 'bin' / m[1]), body)
 body = re.sub(r'\$\{File\(prefixDir, "([^"]+)"\)\.absolutePath\}', lambda m: str(prefix / m[1]), body)
 (prefix / 'bin/debian-run').write_text(body + '\n')
+body = text.split('val tmuxLauncher =', 1)[1].split('"""', 2)[1]
+body = textwrap.dedent(body).lstrip('\n').replace("${'$'}", '$')
+body = body.replace('${tmpDir.absolutePath}', str(tmp)).replace('${binDir.absolutePath}', str(prefix / 'bin'))
+body = re.sub(r'\$\{File\(binDir, "([^"]+)"\)\.absolutePath\}', lambda m: str(prefix / 'bin' / m[1]), body)
+body = re.sub(r'\$\{File\(prefixDir, "([^"]+)"\)\.absolutePath\}', lambda m: str(prefix / m[1]), body)
+(prefix / 'bin/debian-tmux').write_text(body + '\n')
+(prefix / 'bin/debian-tmux').chmod(0o755)
+# Isolate the actual host body and redirect its passwd access to a test fixture.
+host = body.split(" bash -c '\n", 1)[1].split("' droiddesk-tmux-host", 1)[0]
+assert "'" not in host, 'host body must remain safe inside single-quoted bash -c'
+host = host.replace('/etc/passwd', '"$TEST_PASSWD"')
+(tmp / 'tmux-host.sh').write_text(host + '\n')
 assert 'Exec=env DD_NATIVE_GUI=1' in text
 assert '99droiddesk-menu-sync' in text
 PY
@@ -226,6 +364,23 @@ PY
     grep -Fxq parallel-b "$N/proot-list"
     native_reset --all
     [[ ! -s $N/proot-list ]]
+    native_learn tmux
+    native_learn tmux
+    [[ $(grep -Fxc tmux "$N/proot-list") == 1 ]]
+    for invalid in '' /usr/bin/tmux '../tmux' '--all'; do
+        if (native_learn "$invalid") >/dev/null 2>&1; then
+            echo "learn accepted invalid name: $invalid" >&2; exit 1
+        fi
+    done
+    if (native_learn tmux extra) >/dev/null 2>&1; then
+        echo 'learn accepted extra arguments' >&2; exit 1
+    fi
+    native_reset tmux
+    launcher=/repo/app/android/app/src/main/assets/droiddesk/droiddesk-glibc-native
+    PREFIX=$PREFIX bash "$launcher" learn tmux
+    grep -Fxq tmux "$N/proot-list"
+    PREFIX=$PREFIX bash "$launcher" reset tmux
+    ! grep -Fxq tmux "$N/proot-list"
     python3 - "$root" "$T" "$feedback" <<'PY'
 import os, pty, subprocess, sys
 root, tmp, feedback = sys.argv[1:]
@@ -271,6 +426,85 @@ SH
     [[ $status == 17 && $(grep -c '^native$' "$TEST_LAUNCH_LOG") == 1 && $(grep -c '^proot$' "$TEST_LAUNCH_LOG") == 1 ]]
     [[ -z $(find "$T" -name 'droiddesk-native-result.*' -print -quit) ]]
     echo 'unambiguous single-restart launcher protocol checks OK'
+
+    # Exercise the generated tmux wrapper with the native timeout side channel.
+    bash -n "$PREFIX/bin/debian-tmux"
+    cat > "$PREFIX/bin/debian-run" <<'SH'
+#!/bin/bash
+[[ $4 == droiddesk-tmux-host ]] && exit 0
+printf 'attach %s\n' "${DD_NATIVE:-1}" >> "$TEST_LAUNCH_LOG"
+if [[ ${DD_NATIVE:-1} != 0 ]]; then
+    [[ $TEST_TMUX_MARKER == 1 ]] && printf 'native\n' > "$7"
+    exit 1
+fi
+exit "$TEST_TMUX_PROOT_STATUS"
+SH
+    cat > "$PREFIX/bin/droiddesk-glibc-native" <<'SH'
+#!/bin/bash
+[[ $1 == learn && $2 == tmux && $# == 2 ]] || exit 2
+printf 'learn tmux\n' >> "$TEST_LAUNCH_LOG"
+printf 'tmux\n' > "$PREFIX/opt/glibc-native/proot-list"
+SH
+    chmod 755 "$PREFIX/bin/debian-run" "$PREFIX/bin/droiddesk-glibc-native"
+    export TEST_TMUX_MARKER=1 TEST_TMUX_PROOT_STATUS=0
+    : > "$N/proot-list"; : > "$TEST_LAUNCH_LOG"
+    bash "$PREFIX/bin/debian-tmux" test-session 'argument with spaces' </dev/null
+    [[ $(cat "$TEST_LAUNCH_LOG") == $'attach 1\nlearn tmux\nattach 0' ]]
+    [[ -z $(find "$T" -name 'droiddesk-tmux-result.*' -print -quit) ]]
+    # Learned tmux starts in proot, and even a failed retry cannot recurse.
+    : > "$TEST_LAUNCH_LOG"
+    status=0
+    TEST_TMUX_PROOT_STATUS=17 bash "$PREFIX/bin/debian-tmux" test-session </dev/null || status=$?
+    [[ $status == 17 && $(cat "$TEST_LAUNCH_LOG") == 'attach 0' ]]
+    # An ordinary attach error never learns or retries without the native marker.
+    : > "$N/proot-list"; : > "$TEST_LAUNCH_LOG"
+    status=0
+    TEST_TMUX_MARKER=0 bash "$PREFIX/bin/debian-tmux" test-session </dev/null || status=$?
+    [[ $status == 1 && $(cat "$TEST_LAUNCH_LOG") == 'attach 1' && ! -s $N/proot-list ]]
+    [[ -z $(find "$T" -name 'droiddesk-tmux-result.*' -print -quit) ]]
+    echo 'generated tmux single-retry and learning checks OK'
+
+    # Run the real generated host body with fake identity/NSS and a private passwd.
+    cat > "$T/tmux-host-test.sh" <<'SH'
+#!/bin/bash
+id() { [[ $1 == -u ]] || return 2; printf '%s\n' "$TEST_REAL_UID"; }
+getent() { printf 'getent\n' >> "$TEST_GETENT_LOG"; return 2; }
+sleep() { :; }
+tmux() {
+    local arg
+    for arg in "$@"; do
+        [[ $arg == has-session ]] && return 1
+        [[ $arg == new-session ]] && return 0
+    done
+    return 2
+}
+source "$TEST_HOST_SCRIPT" host-session 42420 42420 android-user 'command with spaces'
+SH
+    export TEST_PASSWD=$T/tmux-passwd TEST_GETENT_LOG=$T/tmux-getent.log
+    export TEST_HOST_SCRIPT=$T/tmux-host.sh
+    host_home=$work/tmux-host-home
+    mkdir -p "$host_home"
+    bash -n "$TEST_HOST_SCRIPT"
+    bash -n "$T/tmux-host-test.sh"
+    printf 'existing:x:42420:42420:Existing:/:/bin/sh\n' > "$TEST_PASSWD"
+    before=$(sha256sum "$TEST_PASSWD")
+    : > "$TEST_GETENT_LOG"
+    HOME=$host_home TEST_REAL_UID=42420 bash "$T/tmux-host-test.sh"
+    [[ $(sha256sum "$TEST_PASSWD") == "$before" && ! -s $TEST_GETENT_LOG ]]
+    ! grep -q 'server-access' "$host_home/.config/droiddesk/tmux.conf"
+    # NSS misses the existing user under fake root; the file prevents duplicates.
+    HOME=$host_home TEST_REAL_UID=0 bash "$T/tmux-host-test.sh"
+    [[ $(sha256sum "$TEST_PASSWD") == "$before" && -s $TEST_GETENT_LOG ]]
+    grep -Fxq 'server-access -a existing' "$host_home/.config/droiddesk/tmux.conf"
+    # A missing proot entry is appended exactly once, even when NSS keeps missing.
+    printf 'other:x:42421:42421:Other:/:/bin/sh\n' > "$TEST_PASSWD"
+    HOME=$host_home TEST_REAL_UID=0 bash "$T/tmux-host-test.sh"
+    [[ $(grep -c ':x:42420:' "$TEST_PASSWD") == 1 ]]
+    grep -Fxq 'server-access -a aid_android-user' "$host_home/.config/droiddesk/tmux.conf"
+    before=$(sha256sum "$TEST_PASSWD")
+    HOME=$host_home TEST_REAL_UID=0 bash "$T/tmux-host-test.sh"
+    [[ $(sha256sum "$TEST_PASSWD") == "$before" ]]
+    echo 'generated tmux native passwd guard and proot duplicate checks OK'
 )
 # Exercise patcher failure and success without needing an Android device.
 python3 - "$work" <<'PY'
@@ -287,7 +521,33 @@ for kind, words, tail in [('ld', [0xd2800c68, 0xd4000001], b''),
     src.write_bytes(header + struct.pack('<%dI' % len(words), *words) + tail)
     subprocess.run(['python3', patch, kind, str(src), str(dst)], check=True)
     assert dst.read_bytes() != src.read_bytes()
-src.write_bytes(header + bytes(64))
-assert subprocess.run(['python3', patch, 'ld', str(src), str(dst)]).returncode != 0
+blocked = {143: 'setregid', 144: 'setgid', 145: 'setreuid', 146: 'setuid',
+           149: 'setresgid', 151: 'setfsuid', 152: 'setfsgid', 159: 'setgroups'}
+def svc(nr):
+    return struct.pack('<II', 0xd2800008 | (nr << 5), 0xd4000001)
+for kind in ('ld', 'libc'):
+    src, dst = w / (kind + '-setid.src'), w / (kind + '-setid.dst')
+    code = svc(99) + b''.join(svc(nr) for nr in blocked) + svc(147)
+    src.write_bytes(header + code + (b'/etc/resolv.conf\0' if kind == 'libc' else b''))
+    result = subprocess.run(['python3', patch, kind, str(src), str(dst)],
+                            check=True, capture_output=True, text=True)
+    patched = dst.read_bytes()
+    assert struct.unpack_from('<I', patched, 68)[0] == 0x928004a0
+    for i, (nr, name) in enumerate(blocked.items(), 1):
+        offset = 68 + i * 8
+        expected = 0x928004a0 if kind == 'libc' else 0xd4000001
+        assert struct.unpack_from('<I', patched, offset)[0] == expected, (kind, nr)
+        line = f'{kind} {hex(offset)} {name}'
+        assert (line in result.stdout.splitlines()) == (kind == 'libc'), (line, result.stdout)
+    assert struct.unpack_from('<I', patched, 68 + 9 * 8)[0] == 0xd4000001, 'setresuid stays allowed'
+    assert len(result.stdout.splitlines()) == (10 if kind == 'libc' else 1)
+    # New set*id sites cannot satisfy the original required glibc-site check.
+    for body in (bytes(64), b''.join(svc(nr) for nr in blocked)):
+        src.write_bytes(header + body + (b'/etc/resolv.conf\0' if kind == 'libc' else b''))
+        dst.unlink(missing_ok=True)
+        assert subprocess.run(['python3', patch, kind, str(src), str(dst)],
+                              capture_output=True).returncode != 0
+        assert not dst.exists(), 'failed patch must not create output'
+print('synthetic seccomp patch checks OK')
 PY
 printf 'GLIBC_NATIVE_OK\n'

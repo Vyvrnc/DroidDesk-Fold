@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Patch copies of Debian arm64 glibc (ld.so, libc.so.6) and libuv for Android app seccomp.
 - glibc: every inline `mov x8,#NR ... svc #0` (svc within 12 instructions, x8 not rewritten in between)
-  with NR in BLOCK -> the svc becomes `movn x0,#37` (x0 = -ENOSYS).
+  for robust-list/rseq, plus Android-blocked set*id calls in libc only -> the svc becomes
+  `movn x0,#37` (x0 = -ENOSYS). Variable-number setxid broadcasts are not covered.
 - libc: "/etc/resolv.conf\\0" -> "/proc/self/fd/63\\0" (same length); the launcher opens fd 63 on the real file.
 - libuv: `mov x0,#NR; bl syscall@plt` with NR in io_uring_* -> the bl becomes `movn x0,#0` (returns -1).
 Usage: patch-glibc.py ld|libc|libuv SRC DST
@@ -13,7 +14,10 @@ Usage: patch-glibc.py ld|libc|libuv SRC DST
 import struct, sys
 
 BLOCK = {99: 'set_robust_list', 100: 'get_robust_list', 293: 'rseq',
+         143: 'setregid', 144: 'setgid', 145: 'setreuid', 146: 'setuid',
+         149: 'setresgid', 151: 'setfsuid', 152: 'setfsgid', 159: 'setgroups',
          425: 'io_uring_setup', 426: 'io_uring_enter', 427: 'io_uring_register'}
+LIBC_SETID = {143, 144, 145, 146, 149, 151, 152, 159}
 SVC0 = 0xD4000001
 ENOSYS_X0 = 0x928004A0      # movn x0,#37  -> -38
 MINUS1_X0 = 0x92800000      # movn x0,#0   -> -1
@@ -69,6 +73,9 @@ def main():
         if not hits:
             sys.exit('Chyba: nebyly nalezeny instrukce pro úpravu glibc; výstup nebyl zapsán.')
         if kind == 'libc':
+            # Require the original glibc sites above even if set*id sites exist.
+            # Variable-number syscalls in the setxid broadcast cannot be matched.
+            hits += patch_svc(b, LIBC_SETID)
             old, new = b'/etc/resolv.conf\0', b'/proc/self/fd/63\0'
             n = b.count(old)
             if n != 1:

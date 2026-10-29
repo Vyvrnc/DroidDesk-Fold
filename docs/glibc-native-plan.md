@@ -61,8 +61,20 @@ python 6.7–10.8 CPU-s under proot against 0.16–0.38 native; Brave, 85 s with
 
 Blocked calls that matter: the set*uid/gid family except setresuid (apt drops to `_apt`, sudo),
 `accept` (accept4 works; servers using plain accept), SysV IPC (shm/sem/msg), POSIX mqueues,
-keyctl, io_uring, futex2, the mount API. So `apt`, `sudo`, and servers stay on proot; returning
-0 instead of ENOSYS for set*id is a possible later step (a design decision: it hides failures).
+keyctl, io_uring, futex2, the mount API. So `apt`, `sudo`, and unsupported servers stay on proot.
+The libc patch also replaces inline immediate-number syscall sites for setregid (143),
+setgid (144), setreuid (145), setuid (146), setresgid (149), setfsuid (151), setfsgid (152)
+and setgroups (159) with `movn x0,#37` (-ENOSYS). setresuid (147) remains allowed and unpatched.
+The native tmux client on Tab S10 FE (fold.95) was killed by SIGSYS at setfsuid; tmux ignores
+that return value, so no success emulation is needed. Every patched site is reported.
+The loader still requires its original robust-list/rseq sites; libc must also match at
+least one original site before any new set*id sites count as success.
+
+This is not complete setxid emulation: in multithreaded glibc, setuid/setgid and related
+calls broadcast to other threads. Those threads issue a syscall with a variable number,
+which the immediate `movz x8,#NR ... svc #0` patch cannot reach. Such callers can still get
+SIGSYS (or fail glibc setxid consistency checks) and must use proot. Direct syscalls outside
+the patched libc are also unaffected.
 
 ## How to use (step 1)
 
@@ -92,7 +104,16 @@ select another configuration HOME; `/root` and `/home` arguments map into the ro
 Installation lookup remains in the default Debian home.
 `getcwd` and `realpath` remove the rootfs prefix only for mapped system directories, preserving
 the physical HOME. Mapping covers interposable libc calls; direct syscalls, static programs,
-libc-internal calls are outside this hook. For mapped paths (including physical rootfs paths),
+libc-internal calls are outside the path wrappers. NSS is handled separately: getpwnam,
+getpwuid, getgrnam, getgrgid and their `_r` variants parse `$DD_ROOTFS/etc/passwd` and
+`/etc/group` with glibc file parsers and the real fopen, bypassing libc-internal NSS opens.
+getpwent/setpwent/endpwent and getgrent/setgrent/endgrent use independent per-thread streams;
+non-`_r` lookup results use per-thread buffers, grown on ERANGE and released at thread exit.
+getgrouplist includes the primary group once and deduplicates supplementary gids, reporting
+the required capacity when too small. initgroups succeeds without changing Android-owned
+supplementary groups or calling blocked setgroups. With DD_ROOTFS unset these functions
+delegate to libc. This files-only view does not consult LDAP, other NSS modules or shadow.
+For mapped paths (including physical rootfs paths),
 the hook walks components and resolves absolute links relative to the Debian root, relative
 links from their parent directory, with a 40-link limit. Final links are preserved for
 lstat/readlink/unlink/rename/symlink creation and other no-follow operations. Buffers belong
@@ -112,8 +133,11 @@ Because LOCPATH disables locale-archive, setup runs Debian localedef natively wi
 cs_CZ.UTF-8 and en_US.UTF-8 when their sources/charmap are installed. Existing directory
 locales are reused; the rootfs C.utf8 directory is linked as a C.UTF-8 fallback. LOCPATH
 searches `N/locale` then the rootfs locale directory. A missing requested LANG silently
-falls back to C.UTF-8; C and POSIX remain valid. Empty TZ uses Android
-`getprop persist.sys.timezone`, while an explicit TZ wins.
+falls back to C.UTF-8; C and POSIX remain valid. An explicit TZ wins. When TZ is empty,
+Android `getprop persist.sys.timezone` is cached for one hour in `N/timezone.cache`
+(epoch seconds and timezone on separate lines). Reading a fresh cache uses only Bash
+builtins. Empty results are cached too; a missing/invalid/expired record is refreshed
+and published by renaming a private file. Cache write failures do not block a launch.
 
 For a binary that re-executes `/proc/self/exe`, install Termux patchelf with `pkg install
 patchelf`, then run `droiddesk-glibc-native patch /usr/bin/PROGRAM`. It prints the path of a
@@ -215,8 +239,8 @@ by this change: rebuild the hook with `tools/glibc-native/build.sh` before the A
   the same virpipe/zink/llvmpipe policy and GPU off switch as Debian login shells, replacing
   any inherited Termux driver selection. Debian GPU library paths become physical rootfs
   entries in `DD_LIBPATH`; `LD_PRELOAD` and `LD_LIBRARY_PATH` are removed before dispatch.
-- `try CMD ...` returns 3 before running CMD for disabled/unprepared native mode, missing
-  Termux Python, a proot-only command, or an unresolved/non-executable command. Bare names
+- `try CMD ...` returns 3 before running CMD for disabled/unprepared native mode,
+  a proot-only command, or an unresolved/non-executable command. Bare names
   use `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`; symlinks resolve inside
   Debian, and relative command paths start in Debian root home. Commands outside the rootfs
   are declined. For `bash -c/-lc`, only the first simple command word is checked (also after
@@ -229,8 +253,10 @@ by this change: rebuild the hook with `tools/glibc-native/build.sh` before the A
   Claude keeps its private messaging socket logic, harmless with the real app uid too.
   Native sessions put that directory in physical TMPDIR instead of the much longer Debian
   HOME path, which can exceed the Unix socket pathname limit. Proot keeps its cache path.
-  tmux still ensures a passwd entry, but only emits `server-access` when server/client uids
-  differ. Existing proot tmux servers use a different uid socket directory; switching mode
+  Native tmux skips passwd creation and `server-access` when real uid equals the app uid.
+  Proot still ensures an entry, checking `grep -q ":x:$uid:" /etc/passwd` before appending
+  even when getent misses it, and reads the existing name for `server-access`.
+  Existing proot tmux servers use a different uid socket directory; switching mode
   requires starting/attaching sessions in the selected mode.
 - Native/proot decisions append reason and command basename only to
   `$TMPDIR/droiddesk-native.log` (about 64 KiB, retaining the last 32 KiB on rotation).
@@ -254,11 +280,50 @@ DD_NATIVE=0 debian-run apt-get update  # Force proot for one invocation
 ```
 
 Explicit `run`, `claude`, patching and self-tests remain available for native diagnostics.
+`run_native` exports `DD_NATIVE_ACTIVE=1` into its clean environment and the hook preserves
+it across child exec/spawn. If debian-tmux times out waiting for a session on that path,
+it records the failure in its log, calls `droiddesk-glibc-native learn tmux` and retries the
+whole launcher once with `DD_NATIVE=0`. A private result file carries this signal back to
+the Termux caller; a normal command exit status alone cannot trigger it. Future debian-tmux
+starts consult the same learned list before launching either host or client. Failed proot
+starts and failures attaching to an already started session do not trigger another retry.
+`droiddesk-glibc-native reset tmux` allows another native attempt.
 The container suite now covers pathname stream/datagram sockets, abstract sockets, overlong
 mapping fallback, desktop environment filtering, Debian GPU profile application, on/off and
 preflight decisions, command symlinks, login HOME/cwd/profile and bounded argument-free logs.
 Android seccomp, X/DBus/virgl connections, real-uid tmux, Bun and Electron self-reexec still
 need the device matrix in E; preflight cannot establish support for every program syscall.
+
+### Native launch overhead
+
+On Tab S10 FE, `debian-run true` took 0.53-0.55 seconds natively versus 0.51-0.53 seconds
+under proot, although the native program itself takes milliseconds. The launcher target
+is below 100 ms; the changes below require a new device measurement before claiming it.
+
+- `try` and `run` no longer need Python for command resolution. Bash walks path components,
+  preserving relative links and rooting absolute Debian links in the rootfs, with a limit
+  of 40 followed links. Only actual symlinks invoke `readlink`. Internal helpers return
+  values in `REPLY`, avoiding command-substitution forks for PATH candidates, locale
+  selection and program classification. Classification reuses the preflight target.
+- Readiness checks use file tests, including `N/stamp`; hashing remains confined to explicit
+  `setup`. Library refresh checks directory mtimes and runs only after changes. Refresh
+  also uses the Bash resolver, with private staging files and atomic link publication.
+- Exported desktop and Termux variables are enumerated with Bash prefix/attribute
+  expansions. No `compgen` subprocesses or pipelines are needed. Native decisions read
+  the learned list and bounded log with builtins; external log commands run only on
+  directory creation or rotation. Generated callers read fallback files with `$(< file)`.
+- Timezone lookup uses the hourly file cache above. Existing login/profile and GUI
+  initialization behavior is preserved, so their own commands still contribute to latency.
+
+The container suite prints the average of 20 warm `try /usr/bin/true` calls without a
+pass/fail threshold. This measures the sourced `try`/native launch path, excluding the
+outer `debian-run` script startup and its result-file creation/removal. It also checks
+that successful launches and library refresh do not invoke Python, plus component-link
+resolution, the link limit, timezone expiry, cache reuse and explicit TZ handling.
+For end-to-end device profiling, use `PS4='+${EPOCHREALTIME} ' bash -x PATH/TO/debian-run true`
+and trace `droiddesk-glibc-native` separately with the same PS4; Bash tracing is not
+automatically inherited through an executable script. Compare warm runs separately from
+the first timezone/library refresh.
 
 ### Nové aplikace
 
@@ -281,6 +346,7 @@ jdou konzervativně rovnou do prootu. Terminálové příkazy se po chybě neopa
 
 ```sh
 droiddesk-glibc-native status          # Vypíše i naučené programy
+droiddesk-glibc-native learn tmux      # Vynutí proot pro další starty tmux relací
 droiddesk-glibc-native reset obsidian  # Znovu dovolí nativní pokus tohoto programu
 droiddesk-glibc-native reset --all     # Vymaže celý naučený seznam
 ```
@@ -290,3 +356,8 @@ spouštěného procesu; neodhalí pád potomka, pokud launcher už úspěšně s
 mimo hook zůstávají omezením kompatibility a patří do ověření na zařízení. Kontejnerové
 testy pokrývají původní Electron ELF bez mirroru, rychlou chybu i signál, pomalou chybu,
 ochranu TTY, reset, souběžné zápisy seznamu a jednoznačný restartovací protokol.
+
+The regression suite also covers NSS against a fake passwd/group rootfs (including `_r`
+buffer limits, enumeration, thread-local results and getgrouplist capacity/deduplication),
+the explicit learn command and all eight new libc syscall numbers using synthetic arm64
+ELFs. Real Android seccomp and native/proot tmux startup still require device validation.
