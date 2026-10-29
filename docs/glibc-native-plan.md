@@ -2,7 +2,7 @@
 
 Status: spike done on the Galaxy Tab S10 FE (night 2026-10-29/30, fold.89/90). Full notes on the
 tablet in `~/glibc-spike/FINDINGS.md`; this file is the design that came out of it. Step 1 now
-has an opt-in Termux-side launcher. The current device baseline (Android 16) passes setup/run,
+has a Termux-side launcher; step 2 adds native-first routing and background setup. The current device baseline (Android 16) passes setup/run,
 TracerPid 0, git/grep/tar/python/node/npm and DNS. The five fixes below still need device validation.
 
 ## Why
@@ -67,7 +67,8 @@ keyctl, io_uring, futex2, the mount API. So `apt`, `sudo`, and servers stay on p
 ## How to use (step 1)
 
 Build the shipped arm64 hook with `bash tools/glibc-native/build.sh` before building the app.
-The app installs the launcher and its assets at startup; it never runs setup automatically.
+The app installs the launcher and its assets at startup. Step 2 also runs setup in the
+background after Debian setup/repair is ready, unless native routing is switched off.
 From a **Termux-side terminal outside proot**, with Debian already installed:
 
 ```sh
@@ -78,8 +79,8 @@ droiddesk-glibc-native run /bin/sh -c 'python3 -c "import ssl"; git --version'
 droiddesk-glibc-native claude
 ```
 
-This is opt-in: existing Debian and Claude launchers continue to use proot. On failure, use
-those launchers. Native children inherit the path hook, so a tool chain must start through
+`run` is the explicit native entry point. Debian, Claude and Codex launchers now try native
+first and use proot when preflight declines it (details below). Native children inherit the path hook, so a tool chain must start through
 this launcher from Termux; launching it under proot still traces its descendants. The hook
 maps Debian system paths into the rootfs and temporary paths into Termux tmp; HOME and shared
 Android paths stay unchanged. `run` inherits the Termux HOME unless explicitly overridden
@@ -192,3 +193,100 @@ D. Setup automatically: after Debian is ready the app runs `droiddesk-glibc-nati
 E. Tests per app class on the Tab S10 FE: Claude Code (claude-tmux), Codex, git/node/python,
    an Electron app, Brave from the menu, GTK apps from Debian, GPU (virgl) programs, the USB
    tools; native vs proot, what falls back.
+
+### Step 2 implementation (2026-10-29)
+
+A–D are implemented; E remains device validation. No APK or shipped `pathhook.so` is built
+by this change: rebuild the hook with `tools/glibc-native/build.sh` before the APK build.
+
+- `connect`, `bind`, `sendto` and `sendmsg.msg_name` use the file-path mapping for AF_UNIX
+  pathname addresses. Abstract/unnamed sockets stay unchanged. Input lengths are respected,
+  including a pathname without a terminating NUL; expansion that exceeds `sun_path` falls
+  back to the original address. Returned peer/socket names are not translated.
+- `run` keeps `DISPLAY=:N` as supplied (default `:0`): Xlib can fall back from its abstract
+  socket attempt to `/tmp/.X11-unix/XN`, which the hook maps to `DD_TMP`. DBus defaults to
+  `unix:path=/tmp/dbus-session`; an exported address wins. LANG and exported LC_* use the
+  locale fallback, TERM/COLORTERM and exported Mesa/GL/Vulkan variables are carried through.
+  Space-separated names in `DD_NATIVE_PASS` add user variables. Loader variables, PREFIX,
+  TERMUX_*, native runtime controls and shell startup injection variables cannot override
+  the clean environment; values pointing into the Termux prefix are excluded. Bionic
+  variables remain in `DD_SAVED_*` for Android/Termux children.
+- Before dispatch, native bash sources the existing Debian `droiddesk-gui.sh`. This selects
+  the same virpipe/zink/llvmpipe policy and GPU off switch as Debian login shells, replacing
+  any inherited Termux driver selection. Debian GPU library paths become physical rootfs
+  entries in `DD_LIBPATH`; `LD_PRELOAD` and `LD_LIBRARY_PATH` are removed before dispatch.
+- `try CMD ...` returns 3 before running CMD for disabled/unprepared native mode, missing
+  Termux Python, a proot-only command, or an unresolved/non-executable command. Bare names
+  use `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`; symlinks resolve inside
+  Debian, and relative command paths start in Debian root home. Commands outside the rootfs
+  are declined. For `bash -c/-lc`, only the first simple command word is checked (also after
+  `exec`, `command`, `env` or assignments); this is not a shell parser. Compound scripts can
+  still contain operations requiring proot: use `DD_NATIVE=0` for those.
+- `debian-run`, `claude-debian` and `codex-debian` call `try` first and retain the existing
+  proot invocation on an explicit fallback request or a missing launcher. Native commands get physical Debian
+  root HOME/cwd and `bash -lc` login semantics (`/etc/profile` and the usual user login
+  profile), including `~/.local/bin`. Claude/Codex keep their existing project startup bodies;
+  Claude keeps its private messaging socket logic, harmless with the real app uid too.
+  Native sessions put that directory in physical TMPDIR instead of the much longer Debian
+  HOME path, which can exceed the Unix socket pathname limit. Proot keeps its cache path.
+  tmux still ensures a passwd entry, but only emits `server-access` when server/client uids
+  differ. Existing proot tmux servers use a different uid socket directory; switching mode
+  requires starting/attaching sessions in the selected mode.
+- Native/proot decisions append reason and command basename only to
+  `$TMPDIR/droiddesk-native.log` (about 64 KiB, retaining the last 32 KiB on rotation).
+  Each caller creates a private, empty `DD_NATIVE_RESULT` file. Only a preflight decline or
+  a supervised quick GUI failure writes `proot` there. Callers remove the file and run
+  their existing proot branch once; otherwise they propagate the exact native exit status.
+  A program returning 3 no longer causes a terminal command to be repeated. Standalone
+  `try` still returns 3 for a declined preflight; standalone GUI quick failures restart
+  through `DD_NATIVE=0 debian-run` when no result-file caller is present.
+- Once Debian is ready at session start, setup runs on a daemon thread, with output in
+  `$TMPDIR/droiddesk-native-setup.log`. Repairs trigger it after successful completion.
+  It never waits on the desktop startup path and respects the persistent off marker.
+
+Native routing defaults to on after successful setup (no off marker). Switch it with:
+
+```sh
+droiddesk-glibc-native off     # Creates $PREFIX/opt/glibc-native/off; also skips background setup
+droiddesk-glibc-native status
+droiddesk-glibc-native on      # Removes the marker; setup is still required if not yet prepared
+DD_NATIVE=0 debian-run apt-get update  # Force proot for one invocation
+```
+
+Explicit `run`, `claude`, patching and self-tests remain available for native diagnostics.
+The container suite now covers pathname stream/datagram sockets, abstract sockets, overlong
+mapping fallback, desktop environment filtering, Debian GPU profile application, on/off and
+preflight decisions, command symlinks, login HOME/cwd/profile and bounded argument-free logs.
+Android seccomp, X/DBus/virgl connections, real-uid tmux, Bun and Electron self-reexec still
+need the device matrix in E; preflight cannot establish support for every program syscall.
+
+### Nové aplikace
+
+Po instalaci balíčku apt automaticky spustí `droiddesk-menu-sync`. Ten vytvoří položky
+`Exec=env DD_NATIVE_GUI=1 …/debian-run …`; Electron aplikace předá přes `electron-run`.
+Nové aplikace tak používají nativní běh bez ručního `patch`, `app` nebo změny launcheru.
+Před startem se automaticky obnoví odkazy nových Debian knihoven. Verze Debian setupu 15
+obnoví také existující položky menu při příštím spuštění relace.
+
+Electron se spouští z původního adresáře v rootfs. Hook vrací skutečný program pro
+`/proc/self/exe` a zprostředkuje jeho reexec; sousední ICU/resources soubory zůstanou dostupné.
+Ruční mirror není potřeba. Nativní `electron-run` přidává `--disable-dev-shm-usage`.
+
+Pokud označený GUI start bez TTY na stdin **i** stdout skončí chybou nebo signálem před
+uplynutím přibližně pěti sekund, zapíše se vyřešený název programu do
+`$PREFIX/opt/glibc-native/proot-list`. Stejný start se jednou zopakuje pod prootem a příště
+jde tento program rovnou do prootu. `env`, `gpu-run` a `electron-run` se při určení názvu
+rozbalí; seznam tak nevyřadí všechny aplikace najednou. Neurčitelné GUI shellové wrappery
+jdou konzervativně rovnou do prootu. Terminálové příkazy se po chybě neopakují ani neučí.
+
+```sh
+droiddesk-glibc-native status          # Vypíše i naučené programy
+droiddesk-glibc-native reset obsidian  # Znovu dovolí nativní pokus tohoto programu
+droiddesk-glibc-native reset --all     # Vymaže celý naučený seznam
+```
+
+Úspěšné ukončení ani chyba po pěti sekundách seznam nemění. Detekce sleduje návratový kód
+spouštěného procesu; neodhalí pád potomka, pokud launcher už úspěšně skončil. Přímé syscally
+mimo hook zůstávají omezením kompatibility a patří do ověření na zařízení. Kontejnerové
+testy pokrývají původní Electron ELF bez mirroru, rychlou chybu i signál, pomalou chybu,
+ochranu TTY, reset, souběžné zápisy seznamu a jednoznačný restartovací protokol.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Opt-in Debian glibc launcher. Run this from Termux, outside proot.
+# Debian glibc launcher. Run this from Termux, outside proot.
 set -euo pipefail
 
 PREFIX=${PREFIX:-$(cd "$(dirname "$0")/.." && pwd)}
@@ -76,9 +76,8 @@ setup() {
     printf 'Nativní glibc je připravena.\n'
 }
 
-setup_data() {
-    local dir link target locale input stage
-    mkdir -p "$N/locale"
+setup_libraries() {
+    local dir
     # ld.so opens libraries internally, so interposition cannot fix these links. Only when a
     # library directory changed since the last pass (apt adds libraries; the directory mtime
     # changes): resolving every link took about 27 s on each setup (Tab S10 FE). One python
@@ -90,8 +89,8 @@ setup_data() {
         [[ -f $N/lib/.links && ! $dir -nt $N/lib/.links ]] || changed+=("$dir")
     done
     if [[ ${#changed[@]} -gt 0 ]]; then
-        python3 - "$R" "$N/lib" "${dirs[@]}" <<'PYEOF' || printf 'Varování: Odkazy knihoven se nepodařilo aktualizovat.\n' >&2
-import os, sys
+        python3 - "$R" "$N/lib" "${dirs[@]}" <<'PYEOF' || { printf 'Varování: Odkazy knihoven se nepodařilo aktualizovat.\n' >&2; return 1; }
+import fcntl, os, sys
 root, out, dirs = sys.argv[1], sys.argv[2], sys.argv[3:]
 
 def resolve(path):
@@ -103,22 +102,30 @@ def resolve(path):
         path = root + target if target.startswith('/') else os.path.join(os.path.dirname(path), target)
     return None
 
-for d in dirs:
-    for name in os.listdir(d):
-        link = os.path.join(d, name)
-        if not os.path.islink(link) or not os.readlink(link).startswith('/'):
-            continue
-        target = resolve(link)
-        if target and os.path.isfile(target):
-            dest = os.path.join(out, name)
-            tmp = dest + '.new'
-            if os.path.lexists(tmp):
-                os.remove(tmp)
-            os.symlink(target, tmp)
-            os.replace(tmp, dest)
+with open(os.path.join(out, '.links.lock'), 'a') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    for d in dirs:
+        for name in os.listdir(d):
+            link = os.path.join(d, name)
+            if not os.path.islink(link) or not os.readlink(link).startswith('/'):
+                continue
+            target = resolve(link)
+            if target and os.path.isfile(target):
+                dest = os.path.join(out, name)
+                tmp = dest + '.new'
+                if os.path.lexists(tmp):
+                    os.remove(tmp)
+                os.symlink(target, tmp)
+                os.replace(tmp, dest)
 PYEOF
         touch "$N/lib/.links"
     fi
+}
+
+setup_data() {
+    local locale input stage
+    mkdir -p "$N/locale"
+    setup_libraries
     # LOCPATH bypasses locale-archive; localedef must publish directory locales.
     for locale in C.UTF-8 "${LANG:-C.UTF-8}" cs_CZ.UTF-8 en_US.UTF-8; do
         [[ $locale != C && $locale != POSIX && $locale != */* ]] || continue
@@ -139,7 +146,7 @@ PYEOF
 }
 
 native_locale() {
-    local locale=${LANG:-C.UTF-8} normalized
+    local locale=${1:-${LANG:-C.UTF-8}} normalized
     normalized=${locale//UTF-8/utf8}
     if [[ $locale == C || $locale == POSIX || ( $locale != */* && ( -d $N/locale/$locale || -d $N/locale/$normalized ) ) ]]; then
         printf '%s\n' "$locale"
@@ -159,7 +166,7 @@ source_path() {
         /*) ;;
         */*) path=$PWD/$path ;;
         *)
-            for dir in /usr/local/bin /usr/bin /bin; do
+            for dir in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do
                 path=$(resolve "$R$dir/$1")
                 if [[ -f $path && -x $path ]]; then printf '%s\n' "$path"; return; fi
             done
@@ -230,6 +237,26 @@ run_native() {
     [[ $# -gt 0 ]] || fail 'Použití: droiddesk-glibc-native run PŘÍKAZ [ARGUMENTY]'
     local saved_preload=${LD_PRELOAD-} saved_library=${LD_LIBRARY_PATH-} saved_path=${PATH-}
     local timezone=${TZ:-} variable locale
+    local -a desktop=() extra=()
+    # Only exported names and explicitly requested names enter the clean environment.
+    read -r -a extra <<< "${DD_NATIVE_PASS:-}"
+    while IFS= read -r variable; do
+        case $variable in
+            DISPLAY|DBUS_SESSION_BUS_ADDRESS|COLORTERM|GALLIUM_DRIVER|MESA_*|LIBGL_*|VK_*|__GLX_*|__EGL_*|GBM_BACKENDS_PATH|LC_*) extra+=("$variable") ;;
+        esac
+    done < <(compgen -e)
+    for variable in "${extra[@]}"; do
+        [[ $variable =~ ^[a-zA-Z_][a-zA-Z_0-9]*$ && -v $variable ]] || continue
+        case $variable in
+            LD_*|PREFIX|TERMUX_*|DD_*|PATH|HOME|TMPDIR|LANG|TERM|LOCPATH|GCONV_PATH|GLIBC_TUNABLES|BASH_ENV|ENV|SHELLOPTS|BASHOPTS) continue ;;
+        esac
+        # A Termux GUI session can export bionic driver/module paths.
+        [[ ${!variable} != *"$PREFIX"* ]] || continue
+        case $variable in
+            LC_*) desktop+=("$variable=$(native_locale "${!variable}")") ;;
+            *) desktop+=("$variable=${!variable}") ;;
+        esac
+    done
     local -a saved=("DD_SAVED_PREFIX=$PREFIX")
     while IFS= read -r variable; do
         saved+=("DD_SAVED_$variable=${!variable}")
@@ -241,18 +268,214 @@ run_native() {
     fi
     locale=$(native_locale)
     exec 63< "$R/etc/resolv.conf"
-    # Debian env delegates the initial command to the hook, including PATH and shebangs.
+    # Debian bash applies the GUI policy, then delegates PATH and shebangs to the hook.
     exec "$PREFIX/bin/env" -i \
         "HOME=${HOME:-$R/root}" "TERM=${TERM:-xterm-256color}" "LANG=$locale" \
-        'PATH=/usr/local/bin:/usr/bin:/bin' "LOCPATH=$N/locale:$R/usr/lib/locale" \
+        'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' "LOCPATH=$N/locale:$R/usr/lib/locale" \
         "TZDIR=$R/usr/share/zoneinfo" "TZ=$timezone" "${saved[@]}" \
         "FONTCONFIG_SYSROOT=$R" 'FONTCONFIG_FILE=/etc/fonts/fonts.conf' \
         "SSL_CERT_FILE=$R/etc/ssl/certs/ca-certificates.crt" "GCONV_PATH=$R/usr/lib/aarch64-linux-gnu/gconv" \
-        "DISPLAY=$T/.X11-unix/X0" "TMPDIR=$T" 'GLIBC_TUNABLES=glibc.pthread.rseq=0' \
+        'DISPLAY=:0' 'DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session' "${desktop[@]}" \
+        "TMPDIR=$T" 'GLIBC_TUNABLES=glibc.pthread.rseq=0' \
         "DD_ROOTFS=$R" "DD_TMP=$T" "DD_PLIB=$PLIB" "DD_LIBPATH=$LIBPATH" \
         "DD_SAVED_LD_PRELOAD=$saved_preload" "DD_SAVED_LD_LIBRARY_PATH=$saved_library" "DD_SAVED_PATH=$saved_path" \
         "$PLIB/ld.so" --library-path "$LIBPATH" --preload "$N/lib/pathhook.so" \
-        "$R/usr/bin/env" -- "$@"
+        "$R/usr/bin/bash" -c '
+            # Reuse Debian Mesa policy, including virpipe and the GPU off switch.
+            if [ -f /etc/profile.d/droiddesk-gui.sh ]; then . /etc/profile.d/droiddesk-gui.sh; fi
+            # The Adreno profile adds Debian libraries; the hook uses DD_LIBPATH for exec.
+            native_libs=
+            IFS=: read -r -a native_dirs <<< "${LD_LIBRARY_PATH-}"
+            for native_dir in "${native_dirs[@]}"; do
+                case $native_dir in
+                    /opt/*|/usr/*|/lib/*) native_libs+=${DD_ROOTFS}${native_dir}: ;;
+                esac
+            done
+            export DD_LIBPATH=$DD_PLIB:${native_libs}${DD_LIBPATH#*:}
+            unset LD_PRELOAD LD_LIBRARY_PATH native_libs native_dirs native_dir
+            exec "$@"
+        ' droiddesk-native "$@"
+}
+
+native_ready() {
+    [[ -f $N/stamp && -x $PLIB/ld.so && -f $PLIB/libc.so.6 && -f $N/lib/pathhook.so &&
+       -f $R/etc/resolv.conf && -x $R/usr/bin/bash && -d $R/root ]]
+}
+
+native_enabled() { [[ ! -e $N/off && ${DD_NATIVE:-1} != 0 ]]; }
+
+native_switch() {
+    mkdir -p "$N"
+    case $1 in
+        on) rm -f "$N/off"; printf 'Nativní běh je zapnutý.\n' ;;
+        off) touch "$N/off"; printf 'Nativní běh je vypnutý; použije se proot.\n' ;;
+        status)
+            if ! native_enabled; then printf 'Nativní běh je vypnutý.\n'
+            elif native_ready; then printf 'Nativní běh je připravený a zapnutý.\n'
+            else printf 'Nativní běh není připravený; použije se proot.\n'; fi
+            if [[ -s $N/proot-list ]]; then
+                printf 'Programy s naučeným fallbackem na proot:\n'
+                sort -u "$N/proot-list"
+            else printf 'Seznam naučených fallbacků je prázdný.\n'; fi ;;
+    esac
+}
+
+proot_list_update() {
+    # Concurrent GUI starts and resets share a lock; readers see an atomic snapshot.
+    python3 - "$N/proot-list" "$1" "${2:-}" <<'PY'
+import fcntl, os, sys, tempfile
+path, action, name = sys.argv[1:]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path + '.lock', 'a') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        with open(path) as src:
+            names = set(src.read().splitlines())
+    except FileNotFoundError:
+        names = set()
+    if action == 'add':
+        names.add(name)
+    elif name == '--all':
+        names.clear()
+    else:
+        names.discard(name)
+    with tempfile.NamedTemporaryFile(mode='w', dir=os.path.dirname(path), delete=False) as dst:
+        dst.writelines(n + '\n' for n in sorted(names))
+    os.replace(dst.name, path)
+PY
+}
+
+program_name_valid() { [[ -n $1 && $1 != */* && $1 != *[[:cntrl:]]* ]]; }
+
+native_reset() {
+    [[ $# == 1 ]] || fail 'Použití: droiddesk-glibc-native reset NÁZEV|--all'
+    program_name_valid "$1" || fail 'Zadejte samotný název programu bez cesty.'
+    need_python
+    proot_list_update remove "$1"
+    printf 'Naučený fallback byl odstraněn: %s\n' "$1"
+}
+
+native_target() {
+    if [[ $1 == */* && $1 != /* ]]; then resolve "$R/root/$1"
+    else source_path "$1"; fi
+}
+
+native_program() {
+    # These wrappers are generic: never learn a fallback for env, bash or electron-run.
+    while [[ $# -gt 0 ]]; do
+        case ${1##*/} in
+            env|gpu-run|electron-run) shift ;;
+            --) shift; break ;;
+            -*) return 1 ;;
+            *) [[ $1 == [a-zA-Z_]*=* ]] && { shift; continue; }; break ;;
+        esac
+    done
+    [[ $# -gt 0 ]] || return 1
+    case ${1##*/} in bash|sh|dash|zsh|fish|tmux|xterm|xfce4-terminal) return 1 ;; esac
+    local target
+    target=$(native_target "$1" 2>/dev/null) || return 1
+    [[ $target == "$R/"* && -f $target && -x $target ]] || return 1
+    case ${target##*/} in env|gpu-run|electron-run|bash|sh|dash|zsh|fish|tmux|xterm|xfce4-terminal) return 1 ;; esac
+    program_name_valid "${target##*/}" || return 1
+    printf '%s\n' "${target##*/}"
+}
+
+request_proot() {
+    # The caller owns this private mktemp file. Program exit codes never set it.
+    if [[ -n ${DD_NATIVE_RESULT:-} ]]; then printf 'proot\n' > "$DD_NATIVE_RESULT"; fi
+    return 3
+}
+
+proot_only() {
+    case ${1##*/} in
+        apt|apt-get|apt-cache|aptitude|dpkg|dpkg-reconfigure|debconf|sudo|su|passwd|useradd|usermod|groupadd|chroot|mount|umount|systemctl|service|update-alternatives|proot-distro) return 0 ;;
+    esac
+    return 1
+}
+
+native_decision() {
+    local log=${TMPDIR:-$T}/droiddesk-native.log name=${3##*/}
+    # One bounded line; never record arguments or control characters from a command name.
+    name=${name//[^a-zA-Z0-9_.+-]/_}; name=${name:0:128}
+    { mkdir -p "${log%/*}"
+      if [[ -f $log ]] && (( $(wc -c < "$log") > 65536 )); then
+          tail -c 32768 "$log" > "$log.old" && mv -f "$log.old" "$log"
+      fi
+      printf '%s %s %s\n' "$1" "$2" "$name" >> "$log"
+    } 2>/dev/null || true
+}
+
+try_native() {
+    local cmd=${1:-} reason= target word body program= gui=0 status started
+    local -a words=()
+    if ! native_enabled; then reason=disabled
+    elif ! native_ready; then reason=not-ready
+    elif ! command -v python3 >/dev/null; then reason=no-python
+    elif [[ -z $cmd ]]; then reason=no-command
+    elif proot_only "$cmd"; then reason=proot-only
+    else
+        if [[ ${cmd##*/} == bash && ( ${2:-} == -lc || ${2:-} == -c ) ]]; then
+            body=${3:-}
+            read -r -a words <<< "${body//$'\n'/ }"
+            for word in "${words[@]}"; do
+                case $word in exec|command|env|[a-zA-Z_]*=*) continue ;; esac
+                # Strip simple quoting and shell punctuation, without evaluating input.
+                word=${word//[\"\']/}; word=${word%%[\;\|\&]*}
+                if proot_only "$word"; then reason=proot-only; fi
+                break
+            done
+        fi
+        if [[ -z $reason ]]; then
+            target=$(native_target "$cmd" 2>/dev/null) || reason=not-found
+            [[ -n $reason || ( -f $target && -x $target ) ]] || reason=not-found
+            [[ -n $reason || $target == "$R/"* ]] || reason=outside-rootfs
+            if [[ -z $reason ]]; then
+                program=$(native_program "$@") || program=
+                if [[ -n $program ]]; then
+                    if proot_only "$program"; then reason=proot-only
+                    elif [[ -f $N/proot-list ]] && grep -Fxq -- "$program" "$N/proot-list"; then reason=learned; fi
+                fi
+            fi
+        fi
+    fi
+    # Menu entries explicitly opt in; direct electron-run launches may also opt in by shape.
+    # Both descriptors must be non-TTY, so a terminal command is never retried or learned.
+    if [[ ! -t 0 && ! -t 1 && ( ${DD_NATIVE_GUI:-0} == 1 || ${cmd##*/} == electron-run ) ]]; then gui=1; fi
+    if [[ -z $reason && $gui == 1 && -z $program ]]; then reason=gui-wrapper; fi
+    if [[ -n $reason ]]; then native_decision proot "$reason" "${program:-$cmd}"; request_proot; return 3; fi
+    # apt can add absolute library links while the desktop stays open. Refresh them now,
+    # without rebuilding app binaries, so newly installed programs need no manual setup.
+    if ! setup_libraries >> "${TMPDIR:-$T}/droiddesk-native-setup.log" 2>&1; then
+        native_decision proot libraries "${program:-$cmd}"; request_proot; return 3
+    fi
+    native_decision native ready "${program:-$cmd}"
+    if [[ $gui != 1 ]]; then native_launch "$@"; return; fi
+    started=$SECONDS
+    if (native_launch "$@"); then status=0; else status=$?; fi
+    if (( status != 0 && SECONDS - started < 5 )); then
+        proot_list_update add "$program" || printf 'Varování: Fallback pro %s se nepodařilo uložit.\n' "$program" >&2
+        native_decision proot "quick-exit-$status" "$program"
+        if [[ -n ${DD_NATIVE_RESULT:-} ]]; then request_proot; return 3; fi
+        # Standalone try has no caller to perform the restart. Force one proot launch.
+        DD_NATIVE=0 exec "$PREFIX/bin/debian-run" "$@"
+    fi
+    return "$status"
+}
+
+native_launch() {
+    local cmd=$1 target
+    # Physical HOME also works for programs using direct syscalls (Bun). Login bash reads
+    # Debian /etc/profile and ~/.profile, just like debian-run under proot.
+    export HOME=$R/root
+    cd "$HOME" || return 1
+    if [[ $cmd == */* && $cmd != /* ]]; then
+        # Relative symlinks with absolute Debian targets cannot be opened by Android.
+        # Use the resolved file while retaining the requested argv0 (multicall tools).
+        target=$(native_target "$cmd")
+        shift
+        run_native /bin/bash -lc 'cd ~; exec -a "$0" "$@"' "$cmd" "$target" "$@"
+    fi
+    run_native /bin/bash -lc 'cd ~; exec "$@"' debian-run "$@"
 }
 
 claude_native() {
@@ -317,7 +540,10 @@ case $command in
     patch) ready; need_python; need_patchelf; [[ $# -gt 0 ]] || fail 'Použití: droiddesk-glibc-native patch PROGRAM...'; for binary in "$@"; do if [[ -d $(source_path "$binary") ]]; then mirror_app "$binary"; else patch_one "$binary"; fi; done ;;
     app) ready; need_python; need_patchelf; [[ $# == 2 ]] || fail 'Použití: droiddesk-glibc-native app ADRESÁŘ PROGRAM'; mirror_app "$@" ;;
     run) run_native "$@" ;;
+    try) try_native "$@" ;;
+    on|off|status) native_switch "$command" ;;
+    reset) native_reset "$@" ;;
     claude) claude_native "$@" ;;
     selftest) selftest ;;
-    *) fail 'Použití: droiddesk-glibc-native {setup|patch PROGRAM...|app ADRESÁŘ PROGRAM|run PŘÍKAZ [ARGUMENTY]|claude [ARGUMENTY]|selftest}' ;;
+    *) fail 'Použití: droiddesk-glibc-native {setup|on|off|status|reset NÁZEV|--all|try PŘÍKAZ [ARGUMENTY]|patch PROGRAM...|app ADRESÁŘ PROGRAM|run PŘÍKAZ [ARGUMENTY]|claude [ARGUMENTY]|selftest}' ;;
 esac

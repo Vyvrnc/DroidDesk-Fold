@@ -18,6 +18,9 @@
 #include <sys/time.h>
 #include <sys/vfs.h>
 #include <sys/syscall.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <stddef.h>
 extern char **environ;
 
 /* The program this process really runs. Started as "ld.so --library-path ... --preload ...
@@ -267,6 +270,54 @@ int renameat(int a, const char *p, int b, const char *q) {
 int renameat2(int a, const char *p, int b, const char *q, unsigned f) {
     REAL(renameat2, int, int, const char *, int, const char *, unsigned); char second[PATH_MAX];
     return real_renameat2(a, map(p, 1), b, mapbuf(q, second, 1), f);
+}
+
+/* Socket names are length-delimited, unlike file paths. Keep abstract, unnamed,
+ * malformed and overlong addresses unchanged, including their original length. */
+static const struct sockaddr *socket_address(const struct sockaddr *addr, socklen_t *len,
+                                            struct sockaddr_un *out) {
+    size_t offset = offsetof(struct sockaddr_un, sun_path);
+    if (!addr || *len <= offset || *len > sizeof(*out) || addr->sa_family != AF_UNIX) return addr;
+    const struct sockaddr_un *un = (const struct sockaddr_un *)addr;
+    size_t n = *len - offset;
+    if (!un->sun_path[0]) return addr;
+    char path[sizeof(un->sun_path) + 1], buffer[PATH_MAX];
+    memcpy(path, un->sun_path, n); path[n] = 0;
+    int saved_errno = errno;
+    const char *p = mapped(path, buffer, 0);
+    errno = saved_errno;
+    if (!p || !strcmp(p, path) || strlen(p) >= sizeof(out->sun_path)) return addr;
+    memset(out, 0, sizeof(*out));
+    out->sun_family = AF_UNIX;
+    strcpy(out->sun_path, p);
+    *len = (socklen_t)(offset + strlen(p) + 1);
+    return (const struct sockaddr *)out;
+}
+int connect(int fd, const struct sockaddr *addr, socklen_t len) {
+    REAL(connect, int, int, const struct sockaddr *, socklen_t);
+    struct sockaddr_un out;
+    addr = socket_address(addr, &len, &out);
+    return real_connect(fd, addr, len);
+}
+int bind(int fd, const struct sockaddr *addr, socklen_t len) {
+    REAL(bind, int, int, const struct sockaddr *, socklen_t);
+    struct sockaddr_un out;
+    addr = socket_address(addr, &len, &out);
+    return real_bind(fd, addr, len);
+}
+ssize_t sendto(int fd, const void *buf, size_t size, int flags, const struct sockaddr *addr, socklen_t len) {
+    REAL(sendto, ssize_t, int, const void *, size_t, int, const struct sockaddr *, socklen_t);
+    struct sockaddr_un out;
+    addr = socket_address(addr, &len, &out);
+    return real_sendto(fd, buf, size, flags, addr, len);
+}
+ssize_t sendmsg(int fd, const struct msghdr *msg, int flags) {
+    REAL(sendmsg, ssize_t, int, const struct msghdr *, int);
+    if (!msg) return real_sendmsg(fd, msg, flags);
+    struct msghdr copy = *msg;
+    struct sockaddr_un out;
+    copy.msg_name = (void *)socket_address(msg->msg_name, &copy.msg_namelen, &out);
+    return real_sendmsg(fd, &copy, flags);
 }
 
 /* Prepare before exec/spawn, so spawn file actions and attributes retain libc

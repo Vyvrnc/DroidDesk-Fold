@@ -14,6 +14,10 @@
 #include <sys/time.h>
 #include <sys/vfs.h>
 #include <sys/wait.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/syscall.h>
+#include <stddef.h>
 #include <unistd.h>
 
 extern char **environ;
@@ -56,8 +60,98 @@ static void dispatch(int mode, const char *file, const char *arg) {
     }
     child_status(pid);
 }
+static void unix_sockets(void) {
+    alarm(15);
+    struct sockaddr_un addr = {.sun_family = AF_UNIX}, actual;
+    strcpy(addr.sun_path, "/tmp/x.sock");
+    socklen_t len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + strlen(addr.sun_path));
+    /* Deliberately omit the trailing NUL from the supplied address length. */
+    for (int stream = 0; stream < 2; ++stream) {
+        int server = socket(AF_UNIX, stream ? SOCK_STREAM : SOCK_DGRAM, 0);
+        check(server >= 0 && !bind(server, (struct sockaddr *)&addr, len), "unix bind");
+        socklen_t size = sizeof(actual);
+        char expected[PATH_MAX];
+        snprintf(expected, sizeof(expected), "%s/x.sock", getenv("DD_TMP"));
+        check(!getsockname(server, (struct sockaddr *)&actual, &size) &&
+              !strcmp(actual.sun_path, expected), "unix physical socket path");
+        if (stream) check(!listen(server, 1), "unix listen");
+        pid_t pid = fork(); check(pid >= 0, "unix fork");
+        if (!pid) {
+            close(server);
+            int client = socket(AF_UNIX, stream ? SOCK_STREAM : SOCK_DGRAM, 0);
+            check(client >= 0, "unix client");
+            if (stream) {
+                check(!connect(client, (struct sockaddr *)&addr, len), "unix connect");
+                check(write(client, "x", 1) == 1, "unix write");
+            } else {
+                check(sendto(client, "x", 1, 0, (struct sockaddr *)&addr, len) == 1, "unix sendto");
+                struct iovec iov = {.iov_base = "y", .iov_len = 1};
+                struct msghdr msg = {.msg_name = &addr, .msg_namelen = len, .msg_iov = &iov, .msg_iovlen = 1};
+                check(sendmsg(client, &msg, 0) == 1, "unix sendmsg");
+            }
+            close(client); _exit(0);
+        }
+        int peer = stream ? accept4(server, NULL, NULL, SOCK_CLOEXEC) : server;
+        char c;
+        check(peer >= 0 && read(peer, &c, 1) == 1 && c == 'x', "unix receive");
+        if (!stream) check(read(peer, &c, 1) == 1 && c == 'y', "unix receive msg");
+        child_status(pid);
+        if (stream) close(peer);
+        close(server);
+        check(!unlink("/tmp/x.sock"), "unix unlink");
+    }
+    memset(&addr, 0, sizeof(addr)); addr.sun_family = AF_UNIX;
+    snprintf(addr.sun_path + 1, sizeof(addr.sun_path) - 1, "/tmp/dd-abstract-%ld", (long)getpid());
+    len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + strlen(addr.sun_path + 1));
+    int server = socket(AF_UNIX, SOCK_DGRAM, 0), client = socket(AF_UNIX, SOCK_DGRAM, 0);
+    check(server >= 0 && client >= 0 && !bind(server, (struct sockaddr *)&addr, len), "abstract bind");
+    check(sendto(client, "a", 1, 0, (struct sockaddr *)&addr, len) == 1, "abstract sendto");
+    char c; check(read(server, &c, 1) == 1 && c == 'a', "abstract unchanged");
+    close(client); close(server);
+    /* If expansion exceeds sun_path, connect must still reach the original address. */
+    memset(&addr, 0, sizeof(addr)); addr.sun_family = AF_UNIX;
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "/tmp/dd-fallback-%ld.sock", (long)getpid());
+    len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + strlen(addr.sun_path) + 1);
+    server = socket(AF_UNIX, SOCK_DGRAM, 0); client = socket(AF_UNIX, SOCK_DGRAM, 0);
+    check(server >= 0 && client >= 0 &&
+          !syscall(SYS_bind, server, &addr, len), "original socket bind");
+    char *tmp = strdup(getenv("DD_TMP")); check(tmp != NULL, "save tmp");
+    char longtmp[256]; memset(longtmp, 'x', sizeof(longtmp) - 1);
+    longtmp[0] = '/'; longtmp[sizeof(longtmp) - 1] = 0;
+    check(!setenv("DD_TMP", longtmp, 1), "overlong tmp");
+    check(!connect(client, (struct sockaddr *)&addr, len), "overlong mapping keeps original");
+    check(write(client, "z", 1) == 1 && read(server, &c, 1) == 1 && c == 'z', "fallback receive");
+    check(!setenv("DD_TMP", tmp, 1), "restore tmp"); free(tmp);
+    check(!syscall(SYS_unlinkat, AT_FDCWD, addr.sun_path, 0), "original socket unlink");
+    close(client); close(server);
+    alarm(0);
+    puts("unix socket checks OK");
+}
 int main(int argc, char **argv) {
-    if (argc > 1 && !strcmp(argv[1], "app")) {
+    if (argc > 1 && !strcmp(argv[1], "unix")) { unix_sockets(); return 0; }
+    if (argc > 1 && !strcmp(argv[1], "context")) {
+        char cwd[PATH_MAX], home[PATH_MAX];
+        snprintf(home, sizeof(home), "%s/root", getenv("DD_ROOTFS"));
+        check(getenv("HOME") && !strcmp(getenv("HOME"), home), "try Debian HOME");
+        check(getcwd(cwd, sizeof(cwd)) && !strcmp(cwd, home), "try Debian cwd");
+        check(getenv("DD_PROFILE") && getenv("DD_USER_PROFILE"), "try login profiles");
+        check(getenv("PATH") && !strncmp(getenv("PATH"), home, strlen(home)), "try login PATH");
+        return 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "desktop")) {
+        check(!getenv("PREFIX") && !getenv("TERMUX_VERSION") && !getenv("LD_PRELOAD") &&
+              !getenv("LD_LIBRARY_PATH"), "desktop no bionic env");
+        check(getenv("CUSTOM") && !strcmp(getenv("CUSTOM"), "value with spaces"), "desktop explicit pass");
+        check(getenv("MESA_TEST") && !strcmp(getenv("MESA_TEST"), "mesa"), "desktop Mesa env");
+        check(getenv("GALLIUM_DRIVER") && !strcmp(getenv("GALLIUM_DRIVER"), "virpipe"), "Debian GPU profile");
+        char gpu[PATH_MAX]; snprintf(gpu, sizeof(gpu), "%s/opt/native-gpu/lib:", getenv("DD_ROOTFS"));
+        check(getenv("DD_LIBPATH") && strstr(getenv("DD_LIBPATH"), gpu), "Debian GPU library path");
+        check(getenv("LC_TIME") && !strcmp(getenv("LC_TIME"), "C.UTF-8"), "desktop LC fallback");
+        check(getenv("DISPLAY") && !strcmp(getenv("DISPLAY"), ":7"), "desktop DISPLAY");
+        check(getenv("DBUS_SESSION_BUS_ADDRESS") && !strcmp(getenv("DBUS_SESSION_BUS_ADDRESS"), "unix:path=/tmp/custom-bus"), "desktop DBus");
+        return 0;
+    }
+    if (argc > 1 && (!strcmp(argv[argc - 1], "app") || !strcmp(argv[argc - 1], "app-reexec"))) {
         char path[PATH_MAX];
         ssize_t n = readlink("/proc/self/exe", path, sizeof(path) - 1);
         check(n > 0, "app executable path"); path[n] = 0;
@@ -68,6 +162,15 @@ int main(int argc, char **argv) {
         FILE *f = fopen(path, "r"); check(f != NULL, "ICU beside executable"); fclose(f);
         check(!strcmp(getenv("LANG"), "C.UTF-8"), "launcher LANG fallback");
         check(getenv("DISPLAY") && getenv("TMPDIR"), "app display and temp");
+        if (!strcmp(argv[1], "--no-sandbox")) {
+            check(argc > 4 && !strcmp(argv[2], "--password-store=gnome-libsecret") &&
+                  !strcmp(argv[3], "--disable-dev-shm-usage"), "native Electron flags");
+        }
+        if (!strcmp(argv[argc - 1], "app")) {
+            char *args[] = {"app-child", "app-reexec", NULL};
+            execv("/proc/self/exe", args);
+            check(0, "app self re-exec");
+        }
         return 0;
     }
     if (argc > 1 && !strcmp(argv[1], "library")) {

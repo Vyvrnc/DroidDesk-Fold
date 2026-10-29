@@ -41,6 +41,7 @@ printf 'int marker;\n' | gcc -shared -fPIC -x c - -o "$work/empty.so"
 export PATH=/usr/bin:/bin
 exec 63<"$root/etc/native-test"
 "$loader" --library-path "$libs" --preload "$work/hook.so" "$root/usr/bin/probe"
+"$loader" --library-path "$libs" --preload "$work/hook.so" "$root/usr/bin/probe" unix
 # Self re-exec through /proc/self/exe and through the loader (bun's embedded ripgrep).
 gcc -O2 -Wall -Wextra -Werror -o "$root/usr/bin/selfexec" /repo/tools/glibc-native/selfexec.c
 for how in proc loader; do
@@ -57,9 +58,11 @@ echo "self re-exec checks OK"
     LIBPATH=$PLIB:$N/lib:$libs
     mkdir -p "$N"/{lib,bin,locale,plib} "$PREFIX/bin" "$root/usr/lib/aarch64-linux-gnu"
     ln -s "$loader" "$PLIB/ld.so"
+    ln -s "$libs/libc.so.6" "$PLIB/libc.so.6"
     ln -s "$work/hook.so" "$N/lib/pathhook.so"
     ln -s /usr/bin/env "$PREFIX/bin/env"
     cp /usr/bin/env "$root/usr/bin/env"
+    cp /bin/bash "$root/usr/bin/bash"
     cp "$root/etc/native-test" "$root/etc/resolv.conf"
     touch "$N/stamp"
     mkdir -p "$root/usr/lib/locale/C.utf8"
@@ -87,8 +90,187 @@ echo "self re-exec checks OK"
     [[ $(sha256sum "$root/opt/dummy/brave") == "$before" ]]
     mirror_app /opt/dummy brave >/dev/null
     (LANG=xx_YY.UTF-8 run_native "$N/apps/dummy/brave" app)
+    # Source executables keep adjacent data and their real self path without any mirror.
+    (LANG=xx_YY.UTF-8 run_native /opt/dummy/brave app)
     export TERMUX_VERSION=0.118 TERMUX__TEST='value with spaces'
     (run_native /usr/bin/android-marker android)
+    mkdir -p "$root/etc/profile.d"
+    printf 'export GALLIUM_DRIVER=virpipe LD_LIBRARY_PATH=/opt/native-gpu/lib\n' > "$root/etc/profile.d/droiddesk-gui.sh"
+    (export CUSTOM='value with spaces' MESA_TEST=mesa LC_TIME=xx_YY.UTF-8 DISPLAY=:7
+     export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/custom-bus
+     export DD_NATIVE_PASS='CUSTOM PREFIX TERMUX_VERSION LD_PRELOAD LD_LIBRARY_PATH'
+     run_native /usr/bin/probe desktop)
+
+    expect_proot() {
+        if (try_native "$@"); then echo 'try unexpectedly ran a command' >&2; exit 1
+        else [[ $? == 3 ]]; fi
+    }
+    [[ $(native_switch status) == *'připravený a zapnutý'* ]]
+    native_switch off
+    [[ -f $N/off ]]
+    expect_proot probe --secret-argument
+    native_switch on
+    [[ ! -e $N/off ]]
+    DD_NATIVE=0 expect_proot probe
+    for cmd in apt apt-get apt-cache aptitude dpkg dpkg-reconfigure debconf sudo su passwd useradd usermod groupadd chroot mount umount systemctl service update-alternatives proot-distro; do
+        expect_proot "$cmd"
+        expect_proot /usr/bin/"$cmd"
+        expect_proot bash -lc "$cmd --secret-argument"
+    done
+    expect_proot bash -c 'exec /usr/bin/apt-get update'
+    expect_proot bash -lc $'\napt-get update'
+    expect_proot missing-native-command
+    expect_proot /usr/bin/../bin/missing-native-command
+    expect_proot "$PREFIX/bin/env"
+    ln -s /usr/bin/probe "$root/usr/bin/native-link"
+    [[ $(source_path native-link) == "$root/usr/bin/probe" ]]
+    printf 'export DD_PROFILE=1 PATH="$HOME/.local/bin:$PATH"\n' > "$root/etc/profile"
+    printf 'export DD_USER_PROFILE=1\n' > "$root/root/.profile"
+    (try_native native-link context)
+    ln -s /usr/bin/probe "$root/root/relative-probe"
+    (try_native ./relative-probe context)
+    mv "$N/stamp" "$N/stamp.saved"
+    expect_proot probe
+    mv "$N/stamp.saved" "$N/stamp"
+    mv "$PLIB/libc.so.6" "$PLIB/libc.saved"
+    expect_proot probe
+    mv "$PLIB/libc.saved" "$PLIB/libc.so.6"
+    ! grep -q -- '--secret-argument' "$T/droiddesk-native.log"
+    grep -q '^native ready probe$' "$T/droiddesk-native.log"
+    grep -q '^proot disabled probe$' "$T/droiddesk-native.log"
+    grep -q '^proot not-ready probe$' "$T/droiddesk-native.log"
+    head -c 70000 /dev/zero > "$T/droiddesk-native.log"
+    expect_proot apt
+    [[ $(wc -c < "$T/droiddesk-native.log") -lt 66000 ]]
+    echo 'native decision and desktop environment checks OK'
+
+    # Extract the actual generated launchers, not hand-maintained copies of their logic.
+    python3 - "$root" "$PREFIX" "$T" <<'PY'
+import pathlib, re, sys, textwrap
+root, prefix, tmp = map(pathlib.Path, sys.argv[1:])
+text = pathlib.Path('/repo/app/android/app/src/main/kotlin/com/orailnoor/droiddesk/runtime/LinuxRuntime.kt').read_text()
+body = text.split("cat > /usr/local/bin/electron-run <<'DROIDDESK_ELECTRON_RUN'\n", 1)[1]
+body = body.split('\n            DROIDDESK_ELECTRON_RUN', 1)[0]
+electron = root / 'usr/local/bin/electron-run'
+electron.parent.mkdir(parents=True, exist_ok=True)
+electron.write_text(textwrap.dedent(body).replace("${'$'}", '$') + '\n')
+electron.chmod(0o755)
+body = text.split('val runLauncher =', 1)[1].split('"""', 2)[1]
+body = textwrap.dedent(body).lstrip('\n').replace("${'$'}", '$')
+body = body.replace('${tmpDir.absolutePath}', str(tmp)).replace('${binDir.absolutePath}', str(prefix / 'bin'))
+body = re.sub(r'\$\{File\(binDir, "([^"]+)"\)\.absolutePath\}', lambda m: str(prefix / 'bin' / m[1]), body)
+body = re.sub(r'\$\{File\(prefixDir, "([^"]+)"\)\.absolutePath\}', lambda m: str(prefix / m[1]), body)
+(prefix / 'bin/debian-run').write_text(body + '\n')
+assert 'Exec=env DD_NATIVE_GUI=1' in text
+assert '99droiddesk-menu-sync' in text
+PY
+    (LANG=xx_YY.UTF-8 run_native /usr/local/bin/electron-run /opt/dummy/brave app)
+    [[ ! -L $root/opt/dummy/brave ]]
+
+    # Learning is per resolved program, with generic wrappers peeled off.
+    mkdir -p "$root/usr/local/bin"
+    printf '#!/bin/sh\nprintf "start\\n" >> "$HOME/fast-starts"\nfor arg in "$@"; do :; done\nexit "${arg:-23}"\n' > "$root/usr/bin/fast-app"
+    printf '#!/bin/sh\nexit 0\n' > "$root/usr/bin/ok-app"
+    printf '#!/bin/sh\nkill -SEGV "$$"\n' > "$root/usr/bin/signal-app"
+    printf '#!/bin/sh\nsleep 6\nexit 23\n' > "$root/usr/bin/slow-app"
+    cp /usr/bin/sleep "$root/usr/bin/sleep"
+    printf '#!/bin/sh\nexec "$@"\n' > "$root/usr/local/bin/gpu-run"
+    chmod +x "$root/usr/bin/"{fast-app,ok-app,signal-app,slow-app} "$root/usr/local/bin/gpu-run"
+    ln -s /usr/bin/fast-app "$root/usr/bin/fast-alias"
+    feedback=$work/native-result
+    : > "$feedback"
+    DD_NATIVE_RESULT=$feedback expect_proot apt
+    [[ $(cat "$feedback") == proot ]]
+    : > "$feedback"
+    # A normal non-GUI command returning 3 does not request fallback or enter the list.
+    status=0
+    (DD_NATIVE_RESULT=$feedback try_native fast-app 3) </dev/null >"$work/terminal.log" 2>&1 || status=$?
+    [[ $status == 3 && ! -s $feedback && ! -s $N/proot-list ]]
+    # The same exit code for an opted-in GUI launch requests one restart and is learned.
+    status=0
+    (DD_NATIVE_GUI=1 DD_NATIVE_RESULT=$feedback try_native /usr/local/bin/electron-run env TEST=1 gpu-run fast-alias 3) </dev/null >"$work/gui.log" 2>&1 || status=$?
+    [[ $status == 3 && $(cat "$feedback") == proot ]]
+    grep -aq '^proot quick-exit-3 fast-app$' "$T/droiddesk-native.log"
+    grep -Fxq fast-app "$N/proot-list"
+    ! grep -Eq '^(env|gpu-run|electron-run|bash|fast-alias)$' "$N/proot-list"
+    [[ $(wc -l < "$root/root/fast-starts") == 2 ]]
+    : > "$feedback"
+    DD_NATIVE_RESULT=$feedback expect_proot fast-alias
+    [[ $(cat "$feedback") == proot && $(wc -l < "$root/root/fast-starts") == 2 ]]
+    [[ $(native_switch status) == *fast-app* ]]
+    DD_NATIVE_GUI=1 expect_proot bash -lc 'echo no-global-shell-fallback'
+    ln -s /usr/bin/bash "$root/usr/bin/shell-alias"
+    DD_NATIVE_GUI=1 expect_proot shell-alias -lc 'exit 9'
+    ! grep -Fxq bash "$N/proot-list"
+    : > "$feedback"
+    ln -s /opt/native-test.so "$root/usr/lib/aarch64-linux-gnu/libnew-app.so"
+    (DD_NATIVE_GUI=1 DD_NATIVE_RESULT=$feedback try_native ok-app) </dev/null >"$work/ok.log" 2>&1
+    [[ ! -s $feedback ]] && ! grep -Fxq ok-app "$N/proot-list"
+    [[ $(readlink "$N/lib/libnew-app.so") == "$root/opt/native-test.so" ]]
+    ulimit -c 0
+    status=0
+    (DD_NATIVE_GUI=1 DD_NATIVE_RESULT=$feedback try_native signal-app) </dev/null >"$work/signal.log" 2>&1 || status=$?
+    [[ $status == 3 && $(cat "$feedback") == proot ]]
+    grep -Fxq signal-app "$N/proot-list"
+    : > "$feedback"
+    status=0
+    (DD_NATIVE_GUI=1 DD_NATIVE_RESULT=$feedback try_native slow-app) </dev/null >"$work/slow.log" 2>&1 || status=$?
+    [[ $status == 23 && ! -s $feedback ]] && ! grep -Fxq slow-app "$N/proot-list"
+    native_reset fast-app
+    ! grep -Fxq fast-app "$N/proot-list"
+    grep -Fxq signal-app "$N/proot-list"
+    proot_list_update add parallel-a & pid_a=$!
+    proot_list_update add parallel-b & pid_b=$!
+    wait "$pid_a"; wait "$pid_b"
+    grep -Fxq parallel-a "$N/proot-list"
+    grep -Fxq parallel-b "$N/proot-list"
+    native_reset --all
+    [[ ! -s $N/proot-list ]]
+    python3 - "$root" "$T" "$feedback" <<'PY'
+import os, pty, subprocess, sys
+root, tmp, feedback = sys.argv[1:]
+script = '''source <(sed '/^command=/,$d' /repo/app/android/app/src/main/assets/droiddesk/droiddesk-glibc-native)
+R=$1 T=$2
+native_launch() { return 3; }
+DD_NATIVE_GUI=1 DD_NATIVE_RESULT=$3 try_native fast-app'''
+master, slave = pty.openpty()
+try:
+    result = subprocess.run(['bash', '-c', script, 'test-tty', root, tmp, feedback],
+                            stdin=slave, stdout=slave, stderr=slave, timeout=15)
+    assert result.returncode == 3, result.returncode
+    assert not os.path.getsize(feedback)
+finally:
+    os.close(slave)
+    os.close(master)
+PY
+    [[ ! -s $N/proot-list && ! -s $feedback ]]
+    echo 'native learning/reset and original Electron binary checks OK'
+
+    # The generated caller uses the side channel, never a program exit code, to retry.
+    ln -s /bin/bash "$PREFIX/bin/bash"
+    cat > "$PREFIX/bin/droiddesk-glibc-native" <<'SH'
+#!/bin/bash
+printf 'native\n' >> "$TEST_LAUNCH_LOG"
+if [[ ${TEST_NATIVE_FALLBACK:-0} == 1 ]]; then printf 'proot\n' > "$DD_NATIVE_RESULT"; fi
+exit "$TEST_NATIVE_STATUS"
+SH
+    cat > "$PREFIX/bin/proot-distro" <<'SH'
+#!/bin/bash
+printf 'proot\n' >> "$TEST_LAUNCH_LOG"
+exit 17
+SH
+    chmod +x "$PREFIX/bin/droiddesk-glibc-native" "$PREFIX/bin/proot-distro"
+    export TEST_LAUNCH_LOG=$work/launches
+    : > "$TEST_LAUNCH_LOG"
+    status=0
+    TEST_NATIVE_STATUS=3 TEST_NATIVE_FALLBACK=0 bash "$PREFIX/bin/debian-run" fast-app || status=$?
+    [[ $status == 3 && $(cat "$TEST_LAUNCH_LOG") == native ]]
+    : > "$TEST_LAUNCH_LOG"
+    status=0
+    TEST_NATIVE_STATUS=3 TEST_NATIVE_FALLBACK=1 bash "$PREFIX/bin/debian-run" fast-app || status=$?
+    [[ $status == 17 && $(grep -c '^native$' "$TEST_LAUNCH_LOG") == 1 && $(grep -c '^proot$' "$TEST_LAUNCH_LOG") == 1 ]]
+    [[ -z $(find "$T" -name 'droiddesk-native-result.*' -print -quit) ]]
+    echo 'unambiguous single-restart launcher protocol checks OK'
 )
 # Exercise patcher failure and success without needing an Android device.
 python3 - "$work" <<'PY'

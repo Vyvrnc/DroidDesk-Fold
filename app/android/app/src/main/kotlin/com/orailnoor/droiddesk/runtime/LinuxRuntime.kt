@@ -82,7 +82,8 @@ class LinuxRuntime(private val context: Context) {
         // 12: libxcb-keysyms1, Mesa library check, GPU self-test (fold.69).
         // 13: gpu-run Vulkan-only mode with lavapipe fallback, clearer self-test detail (fold.70).
         // 14: gnome-keyring + Debian session bus, electron-run, URL schemes in menu-sync (fold.72).
-        private const val DEBIAN_SETUP_VERSION = 14
+        // 15: automatic native GUI fallback, menu launch context and native Electron shm flag.
+        private const val DEBIAN_SETUP_VERSION = 15
         private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
         // Craft app ids (table in assets/droiddesk/craft-install.sh); also guards the shell command.
         private val CRAFT_ID = Regex("[a-z]{1,20}craft")
@@ -597,6 +598,21 @@ class LinuxRuntime(private val context: Context) {
             #!${File(binDir, "bash").absolutePath}
             export DISPLAY="${'$'}{DISPLAY:-:0}"
             export TMPDIR="${tmpDir.absolutePath}"
+            native="${binDir.absolutePath}/droiddesk-glibc-native"
+            if [ -x "${'$'}native" ] && native_result=${'$'}(mktemp "${'$'}TMPDIR/droiddesk-native-result.XXXXXX"); then
+                DD_NATIVE_RESULT="${'$'}native_result" "${'$'}native" try bash -lc 'mkdir -p ~/projekty/Claude; cd ~/projekty/Claude || cd ~; PATH="${'$'}HOME/.local/bin:${'$'}PATH"
+                    # proot has no uid map, so Claude Code (2.1.289+) turns local cross-session
+                    # messaging off unless it gets a socket path. One socket per session; the
+                    # ones of sessions that ended are removed.
+                    # Claude Code wants a private (0700) directory it owns.
+                    d=${'$'}TMPDIR/claude-msg; mkdir -p -m 700 ${'$'}d; chmod 700 ${'$'}d
+                    for s in ${'$'}d/*.sock; do [ -e "${'$'}s" ] || continue; p=${'$'}{s##*/}; kill -0 ${'$'}{p%.sock} 2>/dev/null || rm -f "${'$'}s"; done
+                    exec claude --messaging-socket-path "${'$'}d/${'$'}${'$'}.sock" "${'$'}@"' claude "${'$'}@"
+                native_status=${'$'}?
+                native_fallback=${'$'}(cat "${'$'}native_result")
+                rm -f "${'$'}native_result"
+                [ "${'$'}native_fallback" = proot ] || exit "${'$'}native_status"
+            fi
             mkdir -p "${tmpDir.absolutePath}/proot"
             droiddesk_dri=()
             if [ ! -e /dev/kgsl-3d0 ]; then
@@ -632,6 +648,14 @@ class LinuxRuntime(private val context: Context) {
             #!${File(binDir, "bash").absolutePath}
             export DISPLAY="${'$'}{DISPLAY:-:0}"
             export TMPDIR="${tmpDir.absolutePath}"
+            native="${binDir.absolutePath}/droiddesk-glibc-native"
+            if [ -x "${'$'}native" ] && native_result=${'$'}(mktemp "${'$'}TMPDIR/droiddesk-native-result.XXXXXX"); then
+                DD_NATIVE_RESULT="${'$'}native_result" "${'$'}native" try bash -lc 'mkdir -p ~/projekty/Claude; cd ~/projekty/Claude || cd ~; exec codex --no-daemon "${'$'}@"' codex "${'$'}@"
+                native_status=${'$'}?
+                native_fallback=${'$'}(cat "${'$'}native_result")
+                rm -f "${'$'}native_result"
+                [ "${'$'}native_fallback" = proot ] || exit "${'$'}native_status"
+            fi
             mkdir -p "${tmpDir.absolutePath}/proot"
             droiddesk_dri=()
             if [ ! -e /dev/kgsl-3d0 ]; then
@@ -669,6 +693,7 @@ class LinuxRuntime(private val context: Context) {
             # tmux server with it, so a detached host keeps a proot of its own while the session
             # lives, with a tmux server of its own (-L): ending one session leaves the others. The app's uid goes along: the server runs as proot's fake root, clients
             # connect with the real uid and tmux turns them away without server-access.
+            # Native server and client share the app uid, so no server-access is needed there.
             # The log is appended to (one header per start), so an earlier failure stays readable.
             echo "=== ${'$'}(date "+%Y-%m-%d %H:%M:%S") debian-tmux ${'$'}name ===" >> "${'$'}log"
             setsid nohup "${binDir.absolutePath}/debian-run" bash -c '
@@ -714,7 +739,7 @@ class LinuxRuntime(private val context: Context) {
                         echo "bind -T ${'$'}t Escape send-keys -X cancel"
                         echo "bind -T ${'$'}t MouseDown1Pane select-pane \\; send-keys -X clear-selection"
                     done
-                    [ -n "${'$'}user" ] && echo "server-access -a ${'$'}user"
+                    [ -n "${'$'}user" ] && [ "${'$'}(id -u)" != "${'$'}uid" ] && echo "server-access -a ${'$'}user"
                     # This file is rewritten at every server start; own settings go here.
                     echo "source-file -q ~/.config/droiddesk/tmux.local.conf"
                 } > "${'$'}conf"
@@ -752,7 +777,10 @@ class LinuxRuntime(private val context: Context) {
                     # messaging off unless it gets a socket path. One socket per session; the
                     # ones of sessions that ended are removed.
                     # Claude Code wants a private (0700) directory it owns.
-                    d=${'$'}HOME/.cache/claude-msg; mkdir -p -m 700 ${'$'}d; chmod 700 ${'$'}d
+                    d=${'$'}HOME/.cache/claude-msg
+                    # Physical Debian HOME can exceed the Unix socket pathname limit.
+                    [ "${'$'}(id -u)" = 0 ] || d=${'$'}TMPDIR/claude-msg
+                    mkdir -p -m 700 ${'$'}d; chmod 700 ${'$'}d
                     for s in ${'$'}d/*.sock; do [ -e "${'$'}s" ] || continue; p=${'$'}{s##*/}; kill -0 ${'$'}{p%.sock} 2>/dev/null || rm -f "${'$'}s"; done
                     exec claude --messaging-socket-path "${'$'}d/${'$'}${'$'}.sock" "${'$'}@"' claude "${'$'}@"
             """.trimIndent() + "\n",
@@ -774,6 +802,14 @@ class LinuxRuntime(private val context: Context) {
             #!${File(binDir, "bash").absolutePath}
             export DISPLAY="${'$'}{DISPLAY:-:0}"
             export TMPDIR="${tmpDir.absolutePath}"
+            native="${binDir.absolutePath}/droiddesk-glibc-native"
+            if [ -x "${'$'}native" ] && native_result=${'$'}(mktemp "${'$'}TMPDIR/droiddesk-native-result.XXXXXX"); then
+                DD_NATIVE_RESULT="${'$'}native_result" "${'$'}native" try "${'$'}@"
+                native_status=${'$'}?
+                native_fallback=${'$'}(cat "${'$'}native_result")
+                rm -f "${'$'}native_result"
+                [ "${'$'}native_fallback" = proot ] || exit "${'$'}native_status"
+            fi
             mkdir -p "${tmpDir.absolutePath}/proot"
             droiddesk_dri=()
             if [ ! -e /dev/kgsl-3d0 ]; then
@@ -949,6 +985,8 @@ class LinuxRuntime(private val context: Context) {
             program=${'$'}1
             shift
             flags=(--no-sandbox --password-store=gnome-libsecret)
+            # Chromium uses direct shm syscalls too; native Android has no usable /dev/shm.
+            [ -z "${'$'}{DD_ROOTFS:-}" ] || flags+=(--disable-dev-shm-usage)
             case "${'$'}{DROIDDESK_ELECTRON_GPU:-}" in
                 0) gpu=0 ;;
                 1) gpu=1 ;;
@@ -1376,10 +1414,10 @@ class LinuxRuntime(private val context: Context) {
                     # debian-run's login shell takes Debian's session bus (droiddesk-dbus.sh) when
                     # it runs; dbus-launch used to leave a private bus per app.
                     if [ -x /usr/local/bin/electron-run ] && is_electron "${'$'}exec_line"; then
-                        echo "Exec=${'$'}RUN /usr/local/bin/electron-run ${'$'}exec_line"
+                        echo "Exec=env DD_NATIVE_GUI=1 ${'$'}RUN /usr/local/bin/electron-run ${'$'}exec_line"
                         echo "X-DroidDesk-Electron=true"
                     else
-                        echo "Exec=${'$'}RUN ${'$'}exec_line"
+                        echo "Exec=env DD_NATIVE_GUI=1 ${'$'}RUN ${'$'}exec_line"
                     fi
                     echo "Icon=$(find_icon "${'$'}icon")"
                 } >> "${'$'}out"
@@ -3384,6 +3422,7 @@ class LinuxRuntime(private val context: Context) {
     }
 
     @Volatile private var debianSetupRunning = false
+    @Volatile private var nativeSetupRunning = false
 
     /**
      * Hardware OpenGL for Debian programs on GPUs without KGSL (Mali, Xclipse; Galaxy Tab
@@ -3628,6 +3667,29 @@ class LinuxRuntime(private val context: Context) {
         }, "default-look").apply { isDaemon = true }.start()
     }
 
+    private fun refreshNativeSetupInBackground() {
+        val launcher = File(binDir, "droiddesk-glibc-native")
+        if (nativeSetupRunning || debianRootfsMarkers().none(File::exists) ||
+            File(prefixDir, "opt/glibc-native/off").exists() || !launcher.canExecute()) return
+        nativeSetupRunning = true
+        Thread({
+            try {
+                val log = File(tmpDir, "droiddesk-native-setup.log")
+                val process = ProcessBuilder(File(binDir, "bash").absolutePath, launcher.absolutePath, "setup")
+                    .directory(homeDir)
+                    .redirectErrorStream(true)
+                    .redirectOutput(log)
+                    .also { it.environment().clear(); it.environment().putAll(getTermuxEnv()) }
+                    .start()
+                Log.i(TAG, "Background native setup finished with ${process.waitFor()} (log ${log.path})")
+            } catch (error: Exception) {
+                Log.w(TAG, "Background native setup failed", error)
+            } finally {
+                nativeSetupRunning = false
+            }
+        }, "glibc-native-setup").apply { isDaemon = true }.start()
+    }
+
     /**
      * debian-setup runs at Debian's installation; without network it failed and nothing
      * retried it (tablet: no curl, no PATH for ~/.local/bin, so no Claude Code). At session
@@ -3639,6 +3701,7 @@ class LinuxRuntime(private val context: Context) {
         if (debianSetupRunning || debianRootfsMarkers().none(File::exists)) return
         val stamp = File(debianRootfs(baseDir), "etc/droiddesk/setup-version")
         if (stamp.isFile && stamp.readText().trim() == DEBIAN_SETUP_VERSION.toString()) {
+            refreshNativeSetupInBackground()
             if (gpuSelfTestNeeded()) {
                 debianSetupRunning = true
                 Thread({
@@ -3663,7 +3726,10 @@ class LinuxRuntime(private val context: Context) {
                 Log.i(TAG, "Background debian-setup finished with $code (log ${log.path})")
                 if (code == 0 && gpuSelfTestNeeded()) runGpuSelfTest()
                 // Setup 14 brings gnome-keyring: the bus can start in this session already.
-                if (code == 0) ensureDebianSessionBusInBackground()
+                if (code == 0) {
+                    ensureDebianSessionBusInBackground()
+                    refreshNativeSetupInBackground()
+                }
             } catch (error: Exception) {
                 Log.w(TAG, "Background debian-setup failed", error)
             } finally {
