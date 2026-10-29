@@ -104,6 +104,7 @@ elif [ "$screen" = desktop ]; then
     [ -f "$dir/narrow.conf" ] || cp "$dir/wide.conf" "$dir/narrow.conf"
 fi
 
+scale_before=$(xfconf-query -c xsettings -p /Gdk/WindowScalingFactor 2>/dev/null || true)
 if [ -f "$dir/$screen.conf" ]; then
     load "$dir/$screen.conf"
 elif [ "$screen" = desktop ]; then
@@ -114,3 +115,13 @@ else
     [ -f "$dir/$other.conf" ] && load "$dir/$other.conf"
 fi
 echo "$screen" > "$dir/current"
+
+# The USB tray icon (GtkStatusIcon) keeps the scaling it started with: restart it when the
+# scaling changed and it is running.
+scale_after=$(xfconf-query -c xsettings -p /Gdk/WindowScalingFactor 2>/dev/null || true)
+if [ "$scale_before" != "$scale_after" ] && pgrep -f droiddesk-usb-tray.py >/dev/null 2>&1; then
+    pkill -f droiddesk-usb-tray.py
+    sleep 0.5
+    command -v droiddesk-usb-tray >/dev/null 2>&1 &&
+        nohup droiddesk-usb-tray >/dev/null 2>&1 &
+fi

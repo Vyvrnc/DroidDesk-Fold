@@ -746,9 +746,22 @@ class Tray:
         self.icon.set_tooltip_text("USB")
         self.icon.connect("activate", lambda *_: self.toggle())
         self.icon.connect("popup-menu", self.popup)
+        self.icon.connect("size-changed", self.icon_size_changed)
         threading.Thread(target=self.watch, daemon=True).start()
 
     # ── panel icon ──
+
+    def icon_size_changed(self, icon, size):
+        # With window scaling 2 GtkStatusIcon drew the named icon at twice the size of its
+        # XEmbed socket, so only a corner showed in the panel (Fold 7). A pixbuf loaded for
+        # the size and the scale is whole and sharp.
+        try:
+            scale = icon.get_screen().get_monitor_scale_factor(0)
+            pixbuf = Gtk.IconTheme.get_default().load_icon_for_scale(ICON, max(1, size), scale, 0)
+        except GLib.Error:
+            return False
+        icon.set_from_pixbuf(pixbuf)
+        return True
 
     def popup(self, icon, button, when):
         menu = Gtk.Menu()
