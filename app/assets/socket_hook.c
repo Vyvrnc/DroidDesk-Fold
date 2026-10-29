@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdio.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <stddef.h>
 #include <stdarg.h>
@@ -613,10 +614,31 @@ DIR *opendir(const char *name) {
  * Chromium copies it into a std::string and crashed in strlen(NULL) on a failed optional
  * library (optimization_guide_internal, Fold 7). The message is kept per thread and handed
  * out once by the dlerror() below, as libdl would.
+ *
+ * Per thread through a pthread key, not __thread: ELF TLS needs Android 10, and on Android 9
+ * (minSdk 28) a preloaded library with a TLS segment crashed every program at start.
  */
-static __thread char dl_error[512];
-static __thread int dl_error_pending;
+struct dl_error_slot {
+    int pending;
+    char message[512];
+};
+static pthread_key_t dl_error_key;
+static pthread_once_t dl_error_once = PTHREAD_ONCE_INIT;
 static char *(*real_dlerror)(void) = NULL;
+
+static void dl_error_key_init(void) {
+    pthread_key_create(&dl_error_key, free);
+}
+
+static struct dl_error_slot *dl_error_slot(int create) {
+    pthread_once(&dl_error_once, dl_error_key_init);
+    struct dl_error_slot *slot = pthread_getspecific(dl_error_key);
+    if (!slot && create) {
+        slot = calloc(1, sizeof(*slot));
+        if (slot) pthread_setspecific(dl_error_key, slot);
+    }
+    return slot;
+}
 
 void *dlopen(const char *filename, int flag) {
     setup();
@@ -626,19 +648,25 @@ void *dlopen(const char *filename, int flag) {
     if (!real_dlerror) real_dlerror = dlsym(RTLD_NEXT, "dlerror");
     if (!ret) {
         const char *error = real_dlerror ? real_dlerror() : NULL;
-        snprintf(dl_error, sizeof(dl_error), "%s", error ? error : "dlopen failed");
-        dl_error_pending = 1;
-        __android_log_print(ANDROID_LOG_ERROR, "LorieNative Hook", "dlopen failed for %s -> %s: %s", filename, new_path, dl_error);
+        struct dl_error_slot *slot = dl_error_slot(1);
+        if (slot) {
+            snprintf(slot->message, sizeof(slot->message), "%s", error ? error : "dlopen failed");
+            slot->pending = 1;
+        }
+        __android_log_print(ANDROID_LOG_ERROR, "LorieNative Hook", "dlopen failed for %s -> %s: %s",
+                            filename, new_path, slot ? slot->message : (error ? error : "?"));
     } else {
-        dl_error_pending = 0;
+        struct dl_error_slot *slot = dl_error_slot(0);
+        if (slot) slot->pending = 0;
     }
     return ret;
 }
 
 char *dlerror(void) {
-    if (dl_error_pending) {
-        dl_error_pending = 0;
-        return dl_error;
+    struct dl_error_slot *slot = dl_error_slot(0);
+    if (slot && slot->pending) {
+        slot->pending = 0;
+        return slot->message;
     }
     if (!real_dlerror) real_dlerror = dlsym(RTLD_NEXT, "dlerror");
     return real_dlerror ? real_dlerror() : NULL;
