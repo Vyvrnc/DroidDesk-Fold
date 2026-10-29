@@ -18,17 +18,34 @@ case "$screen" in narrow|wide|desktop) ;; *) echo "usage: droiddesk-screen-profi
 dir=$HOME/.config/droiddesk/screen-profiles
 mkdir -p "$dir"
 # One run at a time (mkdir is atomic; flock is not always installed): two overlapping runs
-# could save the new screen's sizes as the old screen's profile. A lock older than a minute
-# is left over from a killed run.
+# could save the new screen's sizes as the old screen's profile. The lock holds its owner's
+# pid; a lock whose owner is gone (a run killed by the app's timeout) is taken over, a lock
+# without a pid yet only when it is older than a minute. Exit 75 when it stays busy, so the
+# app tries again.
 lock=$dir/.lock
 locked=0
 for _ in $(seq 1 100); do
-    if mkdir "$lock" 2>/dev/null; then locked=1; break; fi
-    if [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then rmdir "$lock" 2>/dev/null; continue; fi
+    if mkdir "$lock" 2>/dev/null; then
+        echo $$ > "$lock/pid"
+        locked=1
+        break
+    fi
+    owner=$(cat "$lock/pid" 2>/dev/null || true)
+    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+        # Take it over only if it still belongs to that dead owner.
+        mv "$lock" "$lock.dead.$$" 2>/dev/null && [ "$(cat "$lock.dead.$$/pid" 2>/dev/null)" = "$owner" ] &&
+            rm -rf "$lock.dead.$$"
+        [ -d "$lock.dead.$$" ] && mv "$lock.dead.$$" "$lock" 2>/dev/null
+        continue
+    fi
+    if [ -z "$owner" ] && [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+        rm -rf "$lock" 2>/dev/null
+        continue
+    fi
     sleep 0.2
 done
-[ "$locked" = 1 ] || exit 0
-trap 'rmdir "$lock" 2>/dev/null' EXIT
+[ "$locked" = 1 ] || exit 75
+trap 'rm -rf "$lock" 2>/dev/null' EXIT
 current=$(cat "$dir/current" 2>/dev/null || true)
 [ "$current" = "$screen" ] && exit 0
 command -v xfconf-query >/dev/null 2>&1 || exit 0
@@ -104,7 +121,6 @@ elif [ "$screen" = desktop ]; then
     [ -f "$dir/narrow.conf" ] || cp "$dir/wide.conf" "$dir/narrow.conf"
 fi
 
-scale_before=$(xfconf-query -c xsettings -p /Gdk/WindowScalingFactor 2>/dev/null || true)
 if [ -f "$dir/$screen.conf" ]; then
     load "$dir/$screen.conf"
 elif [ "$screen" = desktop ]; then
@@ -115,13 +131,3 @@ else
     [ -f "$dir/$other.conf" ] && load "$dir/$other.conf"
 fi
 echo "$screen" > "$dir/current"
-
-# The USB tray icon (GtkStatusIcon) keeps the scaling it started with: restart it when the
-# scaling changed and it is running.
-scale_after=$(xfconf-query -c xsettings -p /Gdk/WindowScalingFactor 2>/dev/null || true)
-if [ "$scale_before" != "$scale_after" ] && pgrep -f droiddesk-usb-tray.py >/dev/null 2>&1; then
-    pkill -f droiddesk-usb-tray.py
-    sleep 0.5
-    command -v droiddesk-usb-tray >/dev/null 2>&1 &&
-        nohup droiddesk-usb-tray >/dev/null 2>&1 &
-fi

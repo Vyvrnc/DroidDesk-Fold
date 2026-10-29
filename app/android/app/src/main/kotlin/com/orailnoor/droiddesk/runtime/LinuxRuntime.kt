@@ -2994,21 +2994,30 @@ class LinuxRuntime(private val context: Context) {
         // One at a time and in order: two overlapping runs could save the new screen's sizes
         // as the old screen's profile.
         screenProfileExecutor.execute {
-            runCatching {
-                val process = ProcessBuilder(command.absolutePath, screen)
-                    .directory(homeDir)
-                    .redirectErrorStream(true)
-                    .redirectOutput(ProcessBuilder.Redirect.appendTo(File(tmpDir, "droiddesk-screen-profile.log")))
-                    .also { builder ->
-                        builder.environment().clear()
-                        builder.environment().putAll(getTermuxEnv())
-                        builder.environment()["DISPLAY"] = ":0"
-                        builder.environment()["DBUS_SESSION_BUS_ADDRESS"] =
-                            "unix:path=${File(tmpDir, "dbus-session").absolutePath}"
+            repeat(2) { attempt ->
+                val busy = runCatching {
+                    val process = ProcessBuilder(command.absolutePath, screen)
+                        .directory(homeDir)
+                        .redirectErrorStream(true)
+                        .redirectOutput(ProcessBuilder.Redirect.appendTo(File(tmpDir, "droiddesk-screen-profile.log")))
+                        .also { builder ->
+                            builder.environment().clear()
+                            builder.environment().putAll(getTermuxEnv())
+                            builder.environment()["DISPLAY"] = ":0"
+                            builder.environment()["DBUS_SESSION_BUS_ADDRESS"] =
+                                "unix:path=${File(tmpDir, "dbus-session").absolutePath}"
+                        }
+                        .start()
+                    if (!process.waitFor(20, java.util.concurrent.TimeUnit.SECONDS)) {
+                        process.destroyForcibly()
+                        true
+                    } else {
+                        process.exitValue() == 75 // the profile lock stayed busy
                     }
-                    .start()
-                if (!process.waitFor(20, java.util.concurrent.TimeUnit.SECONDS)) process.destroyForcibly()
-            }.onFailure { Log.w(TAG, "Screen profile $screen failed: ${it.message}") }
+                }.onFailure { Log.w(TAG, "Screen profile $screen failed: ${it.message}") }.getOrDefault(false)
+                if (!busy) return@execute
+                if (attempt == 0) Thread.sleep(2000)
+            }
         }
     }
 

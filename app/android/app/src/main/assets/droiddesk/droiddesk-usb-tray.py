@@ -747,6 +747,7 @@ class Tray:
         self.icon.connect("activate", lambda *_: self.toggle())
         self.icon.connect("popup-menu", self.popup)
         self.icon.connect("size-changed", self.icon_size_changed)
+        self.icon_scale = None
         threading.Thread(target=self.watch, daemon=True).start()
 
     # ── panel icon ──
@@ -757,11 +758,23 @@ class Tray:
         # the size and the scale is whole and sharp.
         try:
             scale = icon.get_screen().get_monitor_scale_factor(0)
-            pixbuf = Gtk.IconTheme.get_default().load_icon_for_scale(ICON, max(1, size), scale, 0)
+            pixbuf = Gtk.IconTheme.get_default().load_icon_for_scale(ICON, max(1, size), max(1, scale), 0)
         except GLib.Error:
             return False
+        self.icon_scale = scale
         icon.set_from_pixbuf(pixbuf)
         return True
+
+    def check_icon_scale(self):
+        """The window scaling changes with the screen (DeX vs phone, droiddesk-screen-profile):
+        reload the icon for the new scale instead of restarting the tray, which would end
+        running USB operations."""
+        try:
+            scale = self.icon.get_screen().get_monitor_scale_factor(0)
+        except Exception:
+            return
+        if self.icon_scale is not None and scale != self.icon_scale:
+            self.icon_size_changed(self.icon, self.icon.get_size())
 
     def popup(self, icon, button, when):
         menu = Gtk.Menu()
@@ -981,6 +994,7 @@ class Tray:
         """Operations of droiddesk-usb (also from a terminal): the State column, the icon's
         tooltip, and a notification when one ends."""
         import json
+        self.check_icon_scale()
         folder = usb.status_dir()
         seen = {}
         try:

@@ -195,7 +195,8 @@ struct cam {
     /* streaming */
     int streaming, stop, thread_valid;
     int stopping;      /* a stream_off is joining the producer (lock dropped) */
-    int waiters;       /* stream_off calls waiting for that one */
+    int waiters;       /* threads waiting on cond (stream_off, blocking DQBUF): the last close
+                        * frees the device only when there are none */
     pthread_t thread;
     pthread_cond_t cond;
     const struct dd_frame_source *source;
@@ -735,7 +736,9 @@ static int do_ioctl(struct cam *c, unsigned int req, void *arg) {
             while (!c->ndone) {
                 int fl = real_fcntl(c->notify_fd, F_GETFL);
                 if (fl >= 0 && (fl & O_NONBLOCK)) return EAGAIN;
+                c->waiters++;
                 pthread_cond_wait(&c->cond, &lock);
+                if (--c->waiters == 0) pthread_cond_broadcast(&c->cond);
                 if (!c->streaming || c->stop) return EINVAL;
             }
             unsigned idx = c->done[0];

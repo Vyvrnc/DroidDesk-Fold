@@ -32,4 +32,20 @@ bash $S wide
 bash $S desktop & bash $S desktop & wait
 bash $S wide
 check xsettings /Gdk/WindowScalingFactor 2; check xfce4-panel /panels/panel-2/size 65
+echo "== a lock left by a killed run (dead owner) is taken over"
+L=$HOME/.config/droiddesk/screen-profiles/.lock
+sh -c 'exit 0' & dead=$!; wait $dead
+mkdir -p "$L" && echo "$dead" > "$L/pid"
+bash $S desktop; rc=$?
+[ "$rc" = 0 ] || { echo "FAIL exit $rc with a dead owner's lock"; fail=1; }
+check xsettings /Gdk/WindowScalingFactor 1
+[ -d "$L" ] && { echo "FAIL lock left behind"; fail=1; }
+echo "== a lock of a live owner: busy (exit 75), nothing changed"
+sleep 60 & live=$!
+mkdir -p "$L" && echo "$live" > "$L/pid"
+sed 's/seq 1 100/seq 1 3/' $S > /tmp/sp-short
+bash /tmp/sp-short wide; rc=$?
+[ "$rc" = 75 ] || { echo "FAIL exit $rc with a live owner's lock"; fail=1; }
+check xsettings /Gdk/WindowScalingFactor 1
+kill $live; rm -rf "$L"
 [ $fail = 0 ] && echo SCREEN_PROFILE_OK || echo SCREEN_PROFILE_FAIL
