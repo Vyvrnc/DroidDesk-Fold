@@ -663,13 +663,19 @@ void *dlopen(const char *filename, int flag) {
 }
 
 char *dlerror(void) {
+    if (!real_dlerror) real_dlerror = dlsym(RTLD_NEXT, "dlerror");
     struct dl_error_slot *slot = dl_error_slot(0);
+    /* An error libdl recorded after the saved one (a failed dlsym) is the newer one. */
+    char *newer = real_dlerror ? real_dlerror() : NULL;
+    if (newer) {
+        if (slot) slot->pending = 0;
+        return newer;
+    }
     if (slot && slot->pending) {
         slot->pending = 0;
         return slot->message;
     }
-    if (!real_dlerror) real_dlerror = dlsym(RTLD_NEXT, "dlerror");
-    return real_dlerror ? real_dlerror() : NULL;
+    return NULL;
 }
 
 /*

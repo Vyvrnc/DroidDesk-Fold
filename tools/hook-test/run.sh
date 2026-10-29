@@ -38,4 +38,11 @@ printf '#include <dlfcn.h>\n#include <stdio.h>\nint main(void){ void *h = dlopen
 gcc -O2 -o /tmp/dl /tmp/dl.c -ldl
 out=$(LD_PRELOAD=/tmp/hook.so /tmp/dl 2>&1); echo "dlerror -> $out"
 [ "$out" = "failed msg cleared" ] || fail=1
+# A newer libdl error (a failed dlsym) wins over the saved dlopen message, as in bionic.
+printf '#include <dlfcn.h>\n#include <stdio.h>\n#include <string.h>\nint main(void){ dlopen("libdoesnotexist_xyz.so", RTLD_NOW); dlsym(RTLD_DEFAULT, "no_such_symbol_xyz"); const char *e = dlerror(); printf("%%s %%s\\n", e && strstr(e, "no_such_symbol_xyz") ? "newer" : "older", dlerror() ? "again" : "cleared"); return 0; }\n' > /tmp/dl2.c
+gcc -O2 -D_GNU_SOURCE -o /tmp/dl2 /tmp/dl2.c -ldl
+# glibc keeps the older message here, bionic the newer one: the hook must match its libc.
+plain=$(/tmp/dl2 2>&1)
+out=$(LD_PRELOAD=/tmp/hook.so /tmp/dl2 2>&1); echo "dlerror order -> $out (libc alone: $plain)"
+[ "$out" = "$plain" ] || fail=1
 [ $fail = 0 ] && echo HOOK_OK || echo HOOK_FAILED

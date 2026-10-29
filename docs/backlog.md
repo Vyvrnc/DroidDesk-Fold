@@ -400,3 +400,13 @@ PT_INTERP points at com.termux; all 86 Termux `.desktop` entries resolve.
 Camera: without the Android CAMERA permission the bridge waits ~30 s for the permission dialog
 before the shim shows the test pattern. When the permission is permanently denied (no dialog
 possible), answer `err no-permission` at once.
+
+## Camera shim, known limits (Codex review of fold.82-88, 2026-10-29)
+
+- The /dev listing that adds video0/video1 (Chromium) does not support telldir/seekdir back
+  into the listing, fdopendir, readdir_r or direct getdents, and stops adding names after 16
+  /dev listings open at once. Chromium uses opendir/readdir; nothing else known needs more.
+- dup2/dup3 and their tracking are not atomic against a close of the source fd on another
+  thread: the new fd can end up as an untracked eventfd. Not on Firefox's or Chromium's path.
+- The atomic file writer (LinuxRuntime.writeAtomically) keeps the executable bit, not the
+  whole permission mode of the file it replaces.

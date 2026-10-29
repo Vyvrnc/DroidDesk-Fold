@@ -27,4 +27,9 @@ check xfce4-panel /panels/panel-2/size 65
 echo "== desktop again (keeps the tweak)"; bash $S desktop
 check xfce4-panel /panels/panel-2/size 36; check xsettings /Gdk/WindowScalingFactor 1
 echo "== same screen again (no-op)"; bash $S desktop; check xfce4-panel /panels/panel-2/size 36
+echo "== two runs at once (wide, then desktop twice): the phone profile must survive"
+bash $S wide
+bash $S desktop & bash $S desktop & wait
+bash $S wide
+check xsettings /Gdk/WindowScalingFactor 2; check xfce4-panel /panels/panel-2/size 65
 [ $fail = 0 ] && echo SCREEN_PROFILE_OK || echo SCREEN_PROFILE_FAIL

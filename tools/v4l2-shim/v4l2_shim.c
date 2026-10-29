@@ -195,6 +195,7 @@ struct cam {
     /* streaming */
     int streaming, stop, thread_valid;
     int stopping;      /* a stream_off is joining the producer (lock dropped) */
+    int waiters;       /* stream_off calls waiting for that one */
     pthread_t thread;
     pthread_cond_t cond;
     const struct dd_frame_source *source;
@@ -389,7 +390,11 @@ static void *producer(void *arg) {
 /* Called with lock held; drops it while joining the producer. A second caller (STREAMOFF and
  * the last close on two threads) waits until the first one has finished the teardown. */
 static void stream_off(struct cam *c) {
-    while (c->stopping) pthread_cond_wait(&c->cond, &lock);
+    if (c->stopping) {
+        c->waiters++;
+        while (c->stopping) pthread_cond_wait(&c->cond, &lock);
+        if (--c->waiters == 0) pthread_cond_broadcast(&c->cond);
+    }
     if (!c->streaming) return;
     c->stop = 1;
     pthread_cond_broadcast(&c->cond);
@@ -488,6 +493,8 @@ static void release_fd(int fd) {
         return;
     }
     stream_off(c);
+    /* A STREAMOFF on another thread may still be waiting in stream_off: free after it. */
+    while (c->waiters) pthread_cond_wait(&c->cond, &lock);
     free_buffers(c);
     real_close(c->notify_fd);
     pthread_cond_destroy(&c->cond);
@@ -507,12 +514,16 @@ static void track_dup(int oldfd, int newfd) {
     pthread_mutex_unlock(&lock);
 }
 
+static pthread_mutex_t devdir_lock; /* the /dev listing, below */
+
 static void prefork(void) {
     pthread_mutex_lock(&lock);
+    pthread_mutex_lock(&devdir_lock);
     pthread_mutex_lock(&log_lock);
 }
 static void postfork_parent(void) {
     pthread_mutex_unlock(&log_lock);
+    pthread_mutex_unlock(&devdir_lock);
     pthread_mutex_unlock(&lock);
 }
 /* The child forgets the inherited camera fds (they become plain eventfds): cleaning them up
@@ -521,6 +532,7 @@ static void postfork_parent(void) {
 static void postfork_child(void) {
     for (int fd = 0; fd < MAX_FD; fd++) fdmap[fd] = NULL;
     pthread_mutex_unlock(&log_lock);
+    pthread_mutex_unlock(&devdir_lock);
     pthread_mutex_unlock(&lock);
 }
 

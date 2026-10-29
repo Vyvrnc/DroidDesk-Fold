@@ -17,6 +17,18 @@ screen=${1:-}
 case "$screen" in narrow|wide|desktop) ;; *) echo "usage: droiddesk-screen-profile narrow|wide|desktop" >&2; exit 2 ;; esac
 dir=$HOME/.config/droiddesk/screen-profiles
 mkdir -p "$dir"
+# One run at a time (mkdir is atomic; flock is not always installed): two overlapping runs
+# could save the new screen's sizes as the old screen's profile. A lock older than a minute
+# is left over from a killed run.
+lock=$dir/.lock
+locked=0
+for _ in $(seq 1 100); do
+    if mkdir "$lock" 2>/dev/null; then locked=1; break; fi
+    if [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then rmdir "$lock" 2>/dev/null; continue; fi
+    sleep 0.2
+done
+[ "$locked" = 1 ] || exit 0
+trap 'rmdir "$lock" 2>/dev/null' EXIT
 current=$(cat "$dir/current" 2>/dev/null || true)
 [ "$current" = "$screen" ] && exit 0
 command -v xfconf-query >/dev/null 2>&1 || exit 0

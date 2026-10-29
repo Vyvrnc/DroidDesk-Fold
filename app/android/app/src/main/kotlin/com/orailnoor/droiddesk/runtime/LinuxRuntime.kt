@@ -35,7 +35,8 @@ class LinuxRuntime(private val context: Context) {
         }
         if (file.isFile && file.length() == bytes.size.toLong() && file.readBytes().contentEquals(bytes)) return
         val wasExecutable = file.isFile && file.canExecute()
-        val tmp = File(file.parentFile, ".${file.name}.${android.os.Process.myPid()}.tmp")
+        // Unique per call: desktop start and the terminal can write the same tools at once.
+        val tmp = File(file.parentFile, ".${file.name}.${android.os.Process.myPid()}.${Thread.currentThread().id}.${System.nanoTime()}.tmp")
         try {
             java.io.FileOutputStream(tmp).use { it.write(bytes) }
             if (wasExecutable) tmp.setExecutable(true, false)
@@ -62,6 +63,7 @@ class LinuxRuntime(private val context: Context) {
         @Volatile private var virglServer: Process? = null
         private val virglLock = Any()
         @Volatile private var virglStarting = false
+        private val screenProfileExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
         private const val BOOTSTRAP_MARKER = ".bootstrap_extracted"
         // v4: also files/home, files/apps and cache, so existing installs get one more pass.
         private const val SHEBANG_MARKER = ".relocated_text_paths_v4"
@@ -2989,7 +2991,9 @@ class LinuxRuntime(private val context: Context) {
         if (!isBootstrapped()) return
         val command = File(binDir, "droiddesk-screen-profile")
         if (!command.canExecute()) return
-        Thread({
+        // One at a time and in order: two overlapping runs could save the new screen's sizes
+        // as the old screen's profile.
+        screenProfileExecutor.execute {
             runCatching {
                 val process = ProcessBuilder(command.absolutePath, screen)
                     .directory(homeDir)
@@ -3005,7 +3009,7 @@ class LinuxRuntime(private val context: Context) {
                     .start()
                 if (!process.waitFor(20, java.util.concurrent.TimeUnit.SECONDS)) process.destroyForcibly()
             }.onFailure { Log.w(TAG, "Screen profile $screen failed: ${it.message}") }
-        }, "screen-profile").start()
+        }
     }
 
     // ── Environment Configuration ──
