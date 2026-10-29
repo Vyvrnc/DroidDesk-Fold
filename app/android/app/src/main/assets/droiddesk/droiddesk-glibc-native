@@ -9,6 +9,7 @@ PLIB=$N/plib
 SHARE=$N/share
 T=${PREFIX%/usr}/tmp
 LIBPATH=$PLIB:$N/lib:$R/lib/aarch64-linux-gnu:$R/usr/lib/aarch64-linux-gnu
+[[ ! -s $N/libpaths ]] || LIBPATH+=:$(< "$N/libpaths")
 fail() { printf 'Chyba: %s\n' "$*" >&2; exit 1; }
 need_python() { command -v python3 >/dev/null || fail 'Chybí Termux Python. Spusťte: pkg install python'; }
 
@@ -91,21 +92,112 @@ setup() {
     printf 'Nativní glibc je připravena.\n'
 }
 
+load_library_paths() {
+    LIBPATH=$PLIB:$N/lib:$R/lib/aarch64-linux-gnu:$R/usr/lib/aarch64-linux-gnu
+    [[ ! -s $N/libpaths ]] || LIBPATH+=:$(< "$N/libpaths")
+}
+
+scan_library_paths() {
+    # ld.so reads DT_RPATH/DT_RUNPATH internally, past pathhook. Parse program
+    # headers (section headers may be stripped); never execute a rootfs tool.
+    python3 - "$@" <<'PY'
+import mmap, os, struct, sys
+
+def elf_runpaths(data):
+    if len(data) < 64 or data[:6] != b'\x7fELF\x02\x01':
+        return []
+    try:
+        phoff = struct.unpack_from('<Q', data, 32)[0]
+        entsize, count = struct.unpack_from('<HH', data, 54)
+        if entsize < 56 or phoff + entsize * count > len(data):
+            return []
+        loads, dynamic = [], []
+        for i in range(count):
+            kind, _, off, addr, _, size, _, _ = struct.unpack_from('<II6Q', data, phoff + i * entsize)
+            if off + size > len(data):
+                return []
+            if kind == 1:
+                loads.append((addr, off, size))
+            elif kind == 2:
+                dynamic.append((off, size))
+        table = length = None
+        strings = []
+        for off, size in dynamic:
+            for pos in range(off, off + size - 15, 16):
+                tag, value = struct.unpack_from('<qQ', data, pos)
+                if tag == 0:
+                    break
+                if tag == 5:
+                    table = value
+                elif tag == 10:
+                    length = value
+                elif tag in (15, 29):
+                    strings.append(value)
+        if table is None or length is None:
+            return []
+        for addr, off, size in loads:
+            if addr <= table < addr + size:
+                start = off + table - addr
+                end = start + min(length, size - (table - addr))
+                break
+        else:
+            return []
+        paths = []
+        for index in strings:
+            if index >= end - start:
+                continue
+            nul = data.find(b'\0', start + index, end)
+            if nul < 0:
+                continue
+            for path in os.fsdecode(data[start + index:nul]).split(':'):
+                # Dynamic tokens need loader context; only literal absolute dirs belong here.
+                if path.startswith('/') and '$' not in path and '\n' not in path and '\r' not in path:
+                    paths.append(path)
+        return paths
+    except (ValueError, struct.error):
+        return []
+
+if __name__ == '__main__':
+    paths, seen = set(), set()
+    for directory in sys.argv[1:]:
+        for parent, _, names in os.walk(directory):
+            for name in names:
+                if not (name.endswith('.so') or '.so.' in name):
+                    continue
+                file = os.path.join(parent, name)
+                if os.path.islink(file):
+                    continue
+                real = os.path.realpath(file)
+                if real in seen:
+                    continue
+                seen.add(real)
+                with open(file, 'rb') as src:
+                    if os.fstat(src.fileno()).st_size:
+                        with mmap.mmap(src.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                            paths.update(elf_runpaths(data))
+    for path in sorted(paths):
+        print(path)
+PY
+}
+
 setup_libraries() {
-    local dir entry target stage
-    local -a dirs=() changed=()
-    # The normal launch checks only directory mtimes. Refresh absolute library
-    # links only after apt changes a directory; never start Python on this path.
-    for dir in "$R/lib/aarch64-linux-gnu" "$R/usr/lib/aarch64-linux-gnu"; do
-        [[ -d $dir ]] || continue
-        dirs+=("$dir")
-        [[ -f $N/lib/.links && ! $dir -nt $N/lib/.links ]] || changed+=("$dir")
+    local dir entry target stage newer= paths= separator=
+    local -a dirs=()
+    for dir in "$R/lib" "$R/usr/lib"; do
+        resolve_into "$dir" || continue
+        [[ ! -d $REPLY ]] || dirs+=("$REPLY")
     done
-    [[ ${#changed[@]} -gt 0 ]] || return 0
+    [[ ${#dirs[@]} -gt 0 ]] || return 1
+    if [[ -f $N/lib/.links && -f $N/libpaths ]]; then
+        # Include subdirectories: apt can change pulseaudio without touching usr/lib.
+        newer=$(find -H "${dirs[@]}" -type d -newer "$N/lib/.links" -print -quit) || return 1
+        if [[ -z $newer ]]; then load_library_paths; return 0; fi
+    fi
     stage=$(mktemp -d "$N/lib/.links.XXXXXX") || return 1
     # Timestamp before scanning so concurrent apt changes cause another pass.
     touch "$stage/stamp" || { rmdir "$stage"; return 1; }
-    for dir in "${dirs[@]}"; do
+    for dir in "$R/lib/aarch64-linux-gnu" "$R/usr/lib/aarch64-linux-gnu"; do
+        [[ -d $dir ]] || continue
         for entry in "$dir"/*; do
             [[ -L $entry ]] || continue
             target=$(readlink -- "$entry") || continue
@@ -121,7 +213,21 @@ setup_libraries() {
             fi
         done
     done
-    mv -f "$stage/stamp" "$N/lib/.links" && rmdir "$stage"
+    if ! scan_library_paths "${dirs[@]}" > "$stage/directories"; then
+        rm -rf "$stage"
+        printf 'Varování: Cesty knihoven se nepodařilo načíst.\n' >&2
+        return 1
+    fi
+    while IFS= read -r dir; do
+        resolve_into "$R$dir" || continue
+        [[ -d $REPLY ]] || continue
+        paths+=$separator$REPLY; separator=:
+    done < "$stage/directories"
+    printf '%s' "$paths" > "$stage/libpaths"
+    rm -f "$stage/directories"
+    mv -f "$stage/libpaths" "$N/libpaths" &&
+        mv -f "$stage/stamp" "$N/lib/.links" && rmdir "$stage" || return 1
+    load_library_paths
 }
 
 setup_data() {
@@ -264,6 +370,7 @@ need_patchelf() { command -v patchelf >/dev/null || fail 'Chybí patchelf. Spus�
 
 run_native() {
     ready
+    load_library_paths
     [[ $# -gt 0 ]] || fail 'Použití: droiddesk-glibc-native run PŘÍKAZ [ARGUMENTY]'
     local saved_preload=${LD_PRELOAD-} saved_library=${LD_LIBRARY_PATH-} saved_path=${PATH-}
     local timezone variable locale
@@ -271,7 +378,7 @@ run_native() {
     # Prefix expansion enumerates names in this shell. Indirect attribute
     # expansion filters exported variables without compgen subprocesses/pipes.
     read -r -a extra <<< "${DD_NATIVE_PASS:-}"
-    for variable in DISPLAY DBUS_SESSION_BUS_ADDRESS COLORTERM GALLIUM_DRIVER \
+    for variable in DISPLAY COLORTERM GALLIUM_DRIVER \
         GBM_BACKENDS_PATH "${!MESA_@}" "${!LIBGL_@}" "${!VK_@}" "${!__GLX_@}" \
         "${!__EGL_@}" "${!LC_@}" "${!TERMUX_@}"; do
         [[ -v $variable && ${!variable@a} == *x* ]] || continue
@@ -283,7 +390,7 @@ run_native() {
     for variable in "${extra[@]}"; do
         [[ $variable =~ ^[a-zA-Z_][a-zA-Z_0-9]*$ && -v $variable ]] || continue
         case $variable in
-            LD_*|PREFIX|TERMUX_*|DD_*|PATH|HOME|TMPDIR|LANG|TERM|LOCPATH|GCONV_PATH|GLIBC_TUNABLES|BASH_ENV|ENV|SHELLOPTS|BASHOPTS) continue ;;
+            DBUS_SESSION_BUS_ADDRESS|LD_*|PREFIX|TERMUX_*|DD_*|PATH|HOME|TMPDIR|LANG|TERM|LOCPATH|GCONV_PATH|GLIBC_TUNABLES|BASH_ENV|ENV|SHELLOPTS|BASHOPTS) continue ;;
         esac
         # A Termux GUI session can export bionic driver/module paths.
         [[ ${!variable} != *"$PREFIX"* ]] || continue
@@ -302,7 +409,7 @@ run_native() {
         "TZDIR=$R/usr/share/zoneinfo" "TZ=$timezone" "${saved[@]}" \
         "FONTCONFIG_SYSROOT=$R" 'FONTCONFIG_FILE=/etc/fonts/fonts.conf' \
         "SSL_CERT_FILE=$R/etc/ssl/certs/ca-certificates.crt" "GCONV_PATH=$R/usr/lib/aarch64-linux-gnu/gconv" \
-        'DISPLAY=:0' 'DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session' "${desktop[@]}" \
+        'DISPLAY=:0' 'DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-debian' "${desktop[@]}" \
         "TMPDIR=$T" 'GLIBC_TUNABLES=glibc.pthread.rseq=0' \
         'DD_NATIVE_ACTIVE=1' "DD_ROOTFS=$R" "DD_TMP=$T" "DD_PLIB=$PLIB" "DD_LIBPATH=$LIBPATH" \
         "DD_SAVED_LD_PRELOAD=$saved_preload" "DD_SAVED_LD_LIBRARY_PATH=$saved_library" "DD_SAVED_PATH=$saved_path" \
@@ -400,16 +507,47 @@ native_program_into() {
     local resolved_command=$1 resolved_target=$2 target
     shift 2
     REPLY=
-    # These wrappers are generic: never learn a fallback for env, bash or electron-run.
+    # Peel wrappers for identification only; execute the original argv unchanged.
     while [[ $# -gt 0 ]]; do
         case ${1##*/} in
-            env|gpu-run|electron-run) shift ;;
-            --) shift; break ;;
+            env)
+                shift
+                while [[ $# -gt 0 ]]; do
+                    case $1 in
+                        -i|-0|--ignore-environment|--null|--unset=*) shift ;;
+                        -u|--unset) [[ $# -ge 2 ]] || return 1; shift 2 ;;
+                        --) shift; break ;;
+                        -*) return 1 ;;
+                        *) [[ $1 =~ ^[a-zA-Z_][a-zA-Z_0-9]*= ]] && { shift; continue; }; break ;;
+                    esac
+                done ;;
+            gpu-run|electron-run) shift ;;
+            nice)
+                shift
+                case ${1:-} in -n|--adjustment) [[ $# -ge 2 ]] || return 1; shift 2 ;; --adjustment=*|-[0-9]*) shift ;; esac
+                [[ ${1:-} != -- ]] || shift ;;
+            setsid)
+                shift
+                while [[ ${1:-} == -f || ${1:-} == -w || ${1:-} == --fork || ${1:-} == --wait ]]; do shift; done
+                [[ ${1:-} != -- ]] || shift ;;
+            stdbuf)
+                shift
+                while [[ $# -gt 0 ]]; do
+                    case $1 in
+                        -i|-o|-e) [[ $# -ge 2 ]] || return 1; shift 2 ;;
+                        -i?*|-o?*|-e?*|--input=*|--output=*|--error=*) shift ;;
+                        --) shift; break ;;
+                        *) break ;;
+                    esac
+                done ;;
             -*) return 1 ;;
-            *) [[ $1 == [a-zA-Z_]*=* ]] && { shift; continue; }; break ;;
+            *) [[ $1 =~ ^[a-zA-Z_][a-zA-Z_0-9]*= ]] && { shift; continue; }; break ;;
         esac
     done
     [[ $# -gt 0 ]] || return 1
+    # Classify the requested basename before resolving symlinks: local Wine
+    # wrappers may point to an executable with a different name.
+    if proot_only "$1"; then REPLY=${1##*/}; return 0; fi
     case ${1##*/} in bash|sh|dash|zsh|fish|tmux|xterm|xfce4-terminal) return 1 ;; esac
     if [[ $1 == "$resolved_command" ]]; then target=$resolved_target
     else native_target_into "$1" 2>/dev/null || return 1; target=$REPLY; fi
@@ -437,7 +575,9 @@ request_proot() {
 
 proot_only() {
     case ${1##*/} in
-        apt|apt-get|apt-cache|aptitude|dpkg|dpkg-reconfigure|debconf|sudo|su|passwd|useradd|usermod|groupadd|chroot|mount|umount|systemctl|service|update-alternatives|proot-distro) return 0 ;;
+        # Wine derives its library directory from its own executable identity.
+        wine|wine64|wine-stable|wineserver|wineboot|winecfg|wineconsole|winetricks|hangover*|box64|box86|fex*|FEXInterpreter|FEXLoader) return 0 ;;
+        apt|apt-get|apt-cache|aptitude|dpkg|dpkg-reconfigure|debconf|sudo|su|passwd|useradd|usermod|groupadd|chroot|mount|umount|systemctl|service|update-alternatives|proot-distro|droiddesk-session-bus) return 0 ;;
     esac
     return 1
 }
@@ -464,6 +604,7 @@ native_decision() {
 
 try_native() {
     local cmd=${1:-} reason= target= word body program= gui=0 status started launch_target=
+    local stderr_log= stderr_pid= stderr_fd fatal=0
     local -a words=()
     if ! native_enabled; then reason=disabled
     elif ! native_ready; then reason=not-ready
@@ -509,8 +650,20 @@ try_native() {
     launch_target=$target
     if [[ $gui != 1 ]]; then native_launch "$@"; return; fi
     started=$SECONDS
-    if (native_launch "$@"); then status=0; else status=$?; fi
-    if (( status != 0 && SECONDS - started < 5 )); then
+    if [[ ${DD_NATIVE_GUI:-0} == 1 ]]; then
+        stderr_log=$(mktemp "${TMPDIR:-$T}/droiddesk-native-stderr.XXXXXX") || { request_proot; return 3; }
+        # Pass stderr through and retain only its last 16 KiB. Drain before checking.
+        exec {stderr_fd}> >(tee -a /dev/stderr | tail -c 16384 > "$stderr_log")
+        stderr_pid=$!
+        if (native_launch "$@") 2>&$stderr_fd; then status=0; else status=$?; fi
+        exec {stderr_fd}>&-
+        wait "$stderr_pid" || true
+        if grep -aEq "Bad system call|Trace/breakpoint trap|GPU process isn.t usable|SIGSYS|Segmentation fault|cannot open shared object|Illegal instruction" "$stderr_log"; then fatal=1; fi
+        rm -f "$stderr_log"
+    else
+        if (native_launch "$@"); then status=0; else status=$?; fi
+    fi
+    if (( (status != 0 || fatal) && SECONDS - started < 5 )); then
         proot_list_update add "$program" || printf 'Varování: Fallback pro %s se nepodařilo uložit.\n' "$program" >&2
         native_decision proot "quick-exit-$status" "$program"
         if [[ -n ${DD_NATIVE_RESULT:-} ]]; then request_proot; return 3; fi

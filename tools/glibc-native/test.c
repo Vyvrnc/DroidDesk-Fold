@@ -264,6 +264,12 @@ int main(int argc, char **argv) {
         check(getenv("PATH") && !strncmp(getenv("PATH"), home, strlen(home)), "try login PATH");
         return 0;
     }
+    if (argc > 1 && !strcmp(argv[1], "bus")) {
+        check(getenv("DBUS_SESSION_BUS_ADDRESS") &&
+              !strcmp(getenv("DBUS_SESSION_BUS_ADDRESS"), "unix:path=/tmp/dbus-debian"),
+              "native default Debian bus");
+        return 0;
+    }
     if (argc > 1 && !strcmp(argv[1], "desktop")) {
         check(!getenv("PREFIX") && !getenv("TERMUX_VERSION") && !getenv("LD_PRELOAD") &&
               !getenv("LD_LIBRARY_PATH"), "desktop no bionic env");
@@ -274,7 +280,7 @@ int main(int argc, char **argv) {
         check(getenv("DD_LIBPATH") && strstr(getenv("DD_LIBPATH"), gpu), "Debian GPU library path");
         check(getenv("LC_TIME") && !strcmp(getenv("LC_TIME"), "C.UTF-8"), "desktop LC fallback");
         check(getenv("DISPLAY") && !strcmp(getenv("DISPLAY"), ":7"), "desktop DISPLAY");
-        check(getenv("DBUS_SESSION_BUS_ADDRESS") && !strcmp(getenv("DBUS_SESSION_BUS_ADDRESS"), "unix:path=/tmp/custom-bus"), "desktop DBus");
+        check(getenv("DBUS_SESSION_BUS_ADDRESS") && !strcmp(getenv("DBUS_SESSION_BUS_ADDRESS"), "unix:path=/tmp/dbus-debian"), "desktop DBus");
         return 0;
     }
     if (argc > 1 && (!strcmp(argv[argc - 1], "app") || !strcmp(argv[argc - 1], "app-reexec"))) {
@@ -297,6 +303,14 @@ int main(int argc, char **argv) {
             execv("/proc/self/exe", args);
             check(0, "app self re-exec");
         }
+        return 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "runpath")) {
+        void *lib = dlopen("libdd-runpath.so", RTLD_NOW);
+        check(lib != NULL, "absolute RUNPATH dependency load");
+        int (*value)(void) = (int (*)(void))dlsym(lib, "dd_runpath_value");
+        check(value && value() == 73, "RUNPATH dependency symbol");
+        dlclose(lib);
         return 0;
     }
     if (argc > 1 && !strcmp(argv[1], "library")) {
@@ -332,6 +346,22 @@ int main(int argc, char **argv) {
     }
     struct stat s; struct statfs fs;
     check(!stat("/etc/native-test", &s) && s.st_size == 7, "stat");
+    check(!euidaccess("/usr/share/X11/xkb", R_OK | X_OK), "XKB euidaccess mapping");
+    check(!eaccess("/usr/share/X11/xkb", R_OK | X_OK), "XKB eaccess mapping");
+    check(!faccessat(AT_FDCWD, "/usr/share/X11/xkb", R_OK | X_OK, AT_EACCESS),
+          "XKB faccessat effective access");
+    int xkb = open("/usr/share/X11", O_RDONLY | O_DIRECTORY);
+    check(xkb >= 0 && !faccessat(xkb, "xkb", R_OK | X_OK, AT_EACCESS),
+          "relative faccessat effective access");
+    close(xkb);
+    check(!faccessat(AT_FDCWD, "/usr/share/X11/xkb/broken", F_OK, AT_EACCESS | AT_SYMLINK_NOFOLLOW),
+          "faccessat preserves nofollow flag");
+    errno = 0;
+    check(faccessat(AT_FDCWD, "/usr/share/X11/xkb/broken", F_OK, AT_EACCESS) == -1 && errno == ENOENT,
+          "faccessat follows broken link without nofollow");
+    check(!access("/root/x", R_OK) && !access("/home/test/x", R_OK), "root and home mapping");
+    check(access("/root-not-mapped/x", F_OK) == -1 && access("/home-not-mapped/x", F_OK) == -1,
+          "home mapping boundaries");
     check(!statfs("/etc/native-test", &fs), "statfs");
     check(!stat("/etc/absolute-file", &s) && s.st_size == 7, "absolute file link");
     check(!stat("/opt/absolute-dir/native-test", &s) && s.st_size == 7, "absolute directory link");
@@ -401,6 +431,8 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 4; ++i) pthread_join(threads[i], NULL);
     dispatch(0, "/usr/bin/absolute-probe", "absolute exec link");
     dispatch(0, "/usr/bin/probe", "execve");
+    dispatch(0, "/root/apps/test/AppRun", "root AppRun exec");
+    dispatch(0, "/home/test/home-probe", "home exec");
     dispatch(1, "/usr/bin/probe", "execv");
     dispatch(2, "probe", "execvp");
     dispatch(3, "probe", "execvpe");

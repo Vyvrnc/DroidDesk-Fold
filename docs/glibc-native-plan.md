@@ -51,7 +51,7 @@ python 6.7–10.8 CPU-s under proot against 0.16–0.38 native; Brave, 85 s with
    replaced by `/proc/self/fd/63` (same length) and the launcher opens the file as fd 63. The
    rest goes through a small glibc path hook (`pathhook.so`, loaded with
    `ld.so --preload`): open/stat/access/opendir/readlink/realpath/dlopen … of `/usr /etc /var
-   /opt /lib /bin /sbin` → the rootfs, `/tmp`, `/dev/shm` → Termux's tmp. node, npm, fc-match and
+   /opt /lib /bin /sbin /root /home` → the rootfs, `/tmp`, `/dev/shm` → Termux's tmp. node, npm, fc-match and
    perl XS run with it.
 4. **Launcher with a clean environment.** Termux variables (GIO_MODULE_DIR …) made glibc
    programs load bionic modules ("invalid ELF header"). Brave also needs
@@ -62,19 +62,30 @@ python 6.7–10.8 CPU-s under proot against 0.16–0.38 native; Brave, 85 s with
 Blocked calls that matter: the set*uid/gid family except setresuid (apt drops to `_apt`, sudo),
 `accept` (accept4 works; servers using plain accept), SysV IPC (shm/sem/msg), POSIX mqueues,
 keyctl, io_uring, futex2, the mount API. So `apt`, `sudo`, and unsupported servers stay on proot.
-The libc patch also replaces inline immediate-number syscall sites for setregid (143),
-setgid (144), setreuid (145), setuid (146), setresgid (149), setfsuid (151), setfsgid (152)
-and setgroups (159) with `movn x0,#37` (-ENOSYS). setresuid (147) remains allowed and unpatched.
-The native tmux client on Tab S10 FE (fold.95) was killed by SIGSYS at setfsuid; tmux ignores
-that return value, so no success emulation is needed. Every patched site is reported.
-The loader still requires its original robust-list/rseq sites; libc must also match at
-least one original site before any new set*id sites count as success.
+Both the loader and libc replace every matched inline immediate-number site from the
+93-number Android seccomp blocklist with `movn x0,#37` (-ENOSYS), including set*id,
+SysV IPC, POSIX mqueues and kcmp (272). accept (202) and setresuid (147) stay unpatched.
+Every patched site is reported. Both copies require set_robust_list and rseq sites;
+libc also requires exactly one resolv.conf string before it can publish a patched copy.
+The native tmux client on Tab S10 FE (fold.95) was killed by SIGSYS at setfsuid; tmux
+ignores that return value, so no success emulation is needed.
 
 This is not complete setxid emulation: in multithreaded glibc, setuid/setgid and related
 calls broadcast to other threads. Those threads issue a syscall with a variable number,
 which the immediate `movz x8,#NR ... svc #0` patch cannot reach. Such callers can still get
 SIGSYS (or fail glibc setxid consistency checks) and must use proot. Direct syscalls outside
 the patched libc are also unaffected.
+
+Wine a kompatibilitní runtime se vždy směrují do prootu, včetně CLI bez GUI fallbacku:
+`wine`, `wine64`, `wine-stable`, `wineserver`, `wineboot`, `winecfg`, `wineconsole`,
+`winetricks`, `hangover*`, `box64`, `box86`, `fex*`, `FEXInterpreter`, `FEXLoader`.
+Rozhoduje basename požadovaného programu i za `env`/`gpu-run`; platí to také pro
+wrappery v `/usr/local/bin` a symlinky na binárku s jiným názvem. Generovaný `debian-run`
+předává celé argv společnému native preflightu, který rovnou vyžádá proot.
+Wine odvozuje adresář knihoven z vlastní executable identity (loader path,
+`AT_EXECFN`/`dladdr`) a při nativním startu nenajde `ntdll.so`. Nativní podpora by
+potřebovala `AT_EXECFN` ukazující na skutečnou binárku, například patchelf kopii;
+to je prozatím mimo rozsah.
 
 ## How to use (step 1)
 
@@ -306,8 +317,9 @@ is below 100 ms; the changes below require a new device measurement before claim
   values in `REPLY`, avoiding command-substitution forks for PATH candidates, locale
   selection and program classification. Classification reuses the preflight target.
 - Readiness checks use file tests, including `N/stamp`; hashing remains confined to explicit
-  `setup`. Library refresh checks directory mtimes and runs only after changes. Refresh
-  also uses the Bash resolver, with private staging files and atomic link publication.
+  `setup`. Library refresh checks directory mtimes recursively and runs only after changes.
+  Refresh uses the Bash resolver for links and Python for ELF RPATH/RUNPATH scanning,
+  with private staging files and atomic cache publication.
 - Exported desktop and Termux variables are enumerated with Bash prefix/attribute
   expansions. No `compgen` subprocesses or pipelines are needed. Native decisions read
   the learned list and bounded log with builtins; external log commands run only on
@@ -318,7 +330,7 @@ is below 100 ms; the changes below require a new device measurement before claim
 The container suite prints the average of 20 warm `try /usr/bin/true` calls without a
 pass/fail threshold. This measures the sourced `try`/native launch path, excluding the
 outer `debian-run` script startup and its result-file creation/removal. It also checks
-that successful launches and library refresh do not invoke Python, plus component-link
+that warm successful launches do not invoke Python and directory changes scan once, plus component-link
 resolution, the link limit, timezone expiry, cache reuse and explicit TZ handling.
 For end-to-end device profiling, use `PS4='+${EPOCHREALTIME} ' bash -x PATH/TO/debian-run true`
 and trace `droiddesk-glibc-native` separately with the same PS4; Bash tracing is not
@@ -330,7 +342,7 @@ the first timezone/library refresh.
 Po instalaci balíčku apt automaticky spustí `droiddesk-menu-sync`. Ten vytvoří položky
 `Exec=env DD_NATIVE_GUI=1 …/debian-run …`; Electron aplikace předá přes `electron-run`.
 Nové aplikace tak používají nativní běh bez ručního `patch`, `app` nebo změny launcheru.
-Před startem se automaticky obnoví odkazy nových Debian knihoven. Verze Debian setupu 15
+Před startem se automaticky obnoví odkazy nových Debian knihoven. Verze Debian setupu 16
 obnoví také existující položky menu při příštím spuštění relace.
 
 Electron se spouští z původního adresáře v rootfs. Hook vrací skutečný program pro
@@ -351,13 +363,66 @@ droiddesk-glibc-native reset obsidian  # Znovu dovolí nativní pokus tohoto pro
 droiddesk-glibc-native reset --all     # Vymaže celý naučený seznam
 ```
 
-Úspěšné ukončení ani chyba po pěti sekundách seznam nemění. Detekce sleduje návratový kód
-spouštěného procesu; neodhalí pád potomka, pokud launcher už úspěšně skončil. Přímé syscally
-mimo hook zůstávají omezením kompatibility a patří do ověření na zařízení. Kontejnerové
-testy pokrývají původní Electron ELF bez mirroru, rychlou chybu i signál, pomalou chybu,
-ochranu TTY, reset, souběžné zápisy seznamu a jednoznačný restartovací protokol.
+Rychlý GUI start s `DD_NATIVE_GUI=1` ukládá posledních 16 KiB stderr do soukromého
+souboru pro daný start a současně stderr předává dál. Také návratový kód 0 vyvolá jeden
+proot restart a učení, když tento konec přijde do pěti sekund a stderr obsahuje
+`Bad system call`, `Trace/breakpoint trap`, `GPU process isn't usable`, `SIGSYS`,
+`Segmentation fault`, `cannot open shared object` nebo `Illegal instruction`.
+Dočasný log se po kontrole odstraní. Pomalé konce a terminálové příkazy se neopakují.
+Wrapper, který skončí před pozdějším pádem odpojeného potomka, zůstává omezením detekce.
 
-The regression suite also covers NSS against a fake passwd/group rootfs (including `_r`
-buffer limits, enumeration, thread-local results and getgrouplist capacity/deduplication),
-the explicit learn command and all eight new libc syscall numbers using synthetic arm64
-ELFs. Real Android seccomp and native/proot tmux startup still require device validation.
+Program se pro rozhodování vyhledává za `env` včetně `-i`, `-u NAME`, `--unset=NAME`,
+`--unset NAME`, `-0`, `--` a přiřazení proměnných; také za `gpu-run`, `electron-run`
+a jednoduchými tvary `nice`, `setsid`, `stdbuf`. Spouští se původní argv, takže nastavení
+a rušení proměnných zůstává zachováno. Menu směruje známé Chromium wrappery
+(`brave-browser`, `chromium`, `google-chrome` a uvedené varianty) přes `electron-run`.
+Nativní příznak `--disable-dev-shm-usage` byl již přítomen a zůstává zachován.
+
+Native i proot Debian launchery vybírají `unix:path=/tmp/dbus-debian`, který vytváří
+`droiddesk-session-bus`; login profil vybírá stejný bus i před vznikem socketu.
+Nativní launcher nepřebírá adresu Termux busu ani přes `DD_NATIVE_PASS`. Nedostupný
+Debian bus se proto neřeší aktivací Termux klíčenky. `droiddesk-session-bus` patří do
+proot-only seznamu: jeho Debian dbus-daemon, gnome-keyring, odemčení heslem z Keystore
+a životní cyklus zůstávají v již používaném proot prostředí. Nativní hostování těchto
+služeb není ověřené a není nutné pro sdílení jejich socketu s nativními klienty.
+
+Patcher mění nalezené inline syscall sites celého zadaného Android seccomp seznamu
+(93 čísel včetně IPC 180–197 a `kcmp` 272) na `-ENOSYS`, shodně v libc i loaderu.
+Každý zásah vypíše s offsetem a názvem nebo číslem syscallu. `accept` (202) zůstává
+beze změny. Loader i libc musí obsahovat `set_robust_list` a `rseq`; libc navíc právě
+jeden řetězec resolv.conf. Další nalezené sites tento povinný základ nenahrazují.
+Proměnné syscall dispatchery patcher nepokrývá. X MIT-SHM má po selhání shmget použít
+fallback knihoven, bez dalšího XShm hooku.
+
+Při setupu a změně adresářů v rootfs `/lib` nebo `/usr/lib` včetně podadresářů se
+obnoví také `$PREFIX/opt/glibc-native/libpaths`. Python parser čte programové hlavičky
+a dynamickou sekci ELF64 little endian `.so`/`.so.*` souborů; nepotřebuje sekční
+hlavičky, readelf ani spuštění Debian nástroje. Sbírá absolutní literální adresáře
+z `DT_RPATH` i `DT_RUNPATH` a do cache uloží existující fyzické cesty pod rootfs.
+Relativní cesty a tokeny jako `$ORIGIN` se nepřidávají. Warm launch čte cache pomocí
+`$(< file)` a Python nespouští. Časová značka vzniká před skenem, aby souběžný apt
+vyvolal další průchod. Při chybě skenu se předchozí cache a značka ponechají.
+Tím se například adresář pulseaudio z RUNPATH libpulse dostane do `--library-path`,
+který ld.so používá i pro závislosti otevírané interně mimo pathhook.
+
+Hook mapuje také `/root` a `/home` včetně AppRun exec. Fyzické `HOME=$R/root` se
+nepřemapuje podruhé a `getcwd`/`realpath` ho zachovají jako fyzickou cestu. Launcher
+už stejné absolutní kořeny podporoval; testy nyní pokrývají i rozpoznání AppRun za env.
+`eaccess` a `euidaccess` mapují XKB cesty stejně jako access; faccessat zachovává
+`AT_EACCESS` i `AT_SYMLINK_NOFOLLOW` včetně relativních cest s dirfd.
+
+Po instalaci opravených assetů a obnově native setupu spusťte:
+
+```sh
+droiddesk-glibc-native setup
+droiddesk-glibc-native reset --all
+```
+
+Naučený seznam pravděpodobně obsahuje aplikace postižené opravenými chybami. Bez
+resetu by šly rovnou do prootu a opravený nativní start by se vůbec nezkusil.
+
+Regresní sada pokrývá všechny syscall hodnoty v obou glibc kopiích, povinné minimum,
+RPATH/RUNPATH včetně skutečné závislosti knihovny, obnovu cache a warm start bez Pythonu,
+XKB access varianty a exec pod `/root` i `/home`, vedle předchozích GUI, D-Bus a NSS testů.
+Android seccomp, MIT-SHM fallback a autentizaci nativního klienta proti Debian Secret
+Service je stále potřeba ověřit na zařízení.

@@ -104,7 +104,7 @@ static const char *mapped(const char *p, char b[PATH_MAX], int nofollow) {
     }
     /* Physical rootfs paths occur in HOME and in the initial exec command. */
     if (pre(p, root)) p += strlen(root);
-    else if (!system_path(p)) return p;
+    else if (!system_path(p) && !pre(p, "/root") && !pre(p, "/home")) return p;
     char pending[PATH_MAX], target[PATH_MAX], next[PATH_MAX];
     size_t floor = strlen(root), used = floor;
     if (floor >= PATH_MAX || strlen(p) >= PATH_MAX) goto toolong;
@@ -389,6 +389,9 @@ int fstatat(int d, const char *p, struct stat *s, int f) { REAL(fstatat, int, in
 int fstatat64(int d, const char *p, struct stat64 *s, int f) { REAL(fstatat64, int, int, const char *, struct stat64 *, int); return real_fstatat64(d, map(p, f & AT_SYMLINK_NOFOLLOW), s, f); }
 int statx(int d, const char *p, int f, unsigned m, struct statx *s) { REAL(statx, int, int, const char *, int, unsigned, struct statx *); return real_statx(d, map(p, f & AT_SYMLINK_NOFOLLOW), f, m, s); }
 int access(const char *p, int m) { REAL(access, int, const char *, int); return real_access(map(p, 0), m); }
+int euidaccess(const char *p, int m) { REAL(euidaccess, int, const char *, int); return real_euidaccess(map(p, 0), m); }
+int eaccess(const char *p, int m) { REAL(eaccess, int, const char *, int); return real_eaccess(map(p, 0), m); }
+/* Preserve AT_EACCESS and AT_SYMLINK_NOFOLLOW for the real libc call. */
 int faccessat(int d, const char *p, int m, int f) { REAL(faccessat, int, int, const char *, int, int); return real_faccessat(d, map(p, f & AT_SYMLINK_NOFOLLOW), m, f); }
 DIR *opendir(const char *p) { REAL(opendir, DIR *, const char *); return real_opendir(map(p, 0)); }
 ssize_t readlink(const char *p, char *b, size_t n) { if (*self_exe && is_proc_self_exe(p)) return copy_self_exe(b, n);

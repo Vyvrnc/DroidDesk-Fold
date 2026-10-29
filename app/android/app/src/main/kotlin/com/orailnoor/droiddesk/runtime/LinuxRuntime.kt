@@ -83,7 +83,8 @@ class LinuxRuntime(private val context: Context) {
         // 13: gpu-run Vulkan-only mode with lavapipe fallback, clearer self-test detail (fold.70).
         // 14: gnome-keyring + Debian session bus, electron-run, URL schemes in menu-sync (fold.72).
         // 15: automatic native GUI fallback, menu launch context and native Electron shm flag.
-        private const val DEBIAN_SETUP_VERSION = 15
+        // 16: Chromium wrapper flags and shared Debian bus for native/proot clients.
+        private const val DEBIAN_SETUP_VERSION = 16
         private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
         // Craft app ids (table in assets/droiddesk/craft-install.sh); also guards the shell command.
         private val CRAFT_ID = Regex("[a-z]{1,20}craft")
@@ -822,6 +823,8 @@ class LinuxRuntime(private val context: Context) {
             export TMPDIR="${tmpDir.absolutePath}"
             native="${binDir.absolutePath}/droiddesk-glibc-native"
             if [ -x "${'$'}native" ] && native_result=${'$'}(mktemp "${'$'}TMPDIR/droiddesk-native-result.XXXXXX"); then
+                # Native preflight owns the Wine/Hangover/Box/FEX proot-only policy,
+                # including local wrappers and env/gpu-run prefixes. Keep the original argv.
                 DD_NATIVE_RESULT="${'$'}native_result" "${'$'}native" try "${'$'}@"
                 native_status=${'$'}?
                 native_fallback=${'$'}(< "${'$'}native_result")
@@ -973,6 +976,8 @@ class LinuxRuntime(private val context: Context) {
             fi
             DROIDDESK_GUI_ENV
 
+            # Always select Debian services, including before their socket is ready.
+            # droiddesk-session-bus stays in proot and unlocks the Debian login keyring.
             # The launchers pass the XFCE bus (/tmp/dbus-session), which belongs to Termux and does
             # not answer Debian clients (uid across proot). Debian's own bus with gnome-keyring
             # (droiddesk-session-bus, started by the app per session) takes over while it runs.
@@ -995,7 +1000,18 @@ class LinuxRuntime(private val context: Context) {
             pre=()
             while [ ${'$'}# -gt 0 ]; do
                 case "${'$'}1" in
-                    env|gpu-run|*/gpu-run|[A-Za-z_]*=*) pre+=("${'$'}1"); shift ;;
+                    env|*/env)
+                        pre+=("${'$'}1"); shift
+                        while [ ${'$'}# -gt 0 ]; do
+                            case "${'$'}1" in
+                                -u|--unset) [ ${'$'}# -ge 2 ] || exit 2; pre+=("${'$'}1" "${'$'}2"); shift 2 ;;
+                                -i|-0|--ignore-environment|--null|--unset=*|[A-Za-z_]*=*) pre+=("${'$'}1"); shift ;;
+                                --) pre+=("${'$'}1"); shift; break ;;
+                                -*) exit 2 ;;
+                                *) break ;;
+                            esac
+                        done ;;
+                    gpu-run|*/gpu-run|[A-Za-z_]*=*) pre+=("${'$'}1"); shift ;;
                     *) break ;;
                 esac
             done
@@ -1357,13 +1373,27 @@ class LinuxRuntime(private val context: Context) {
             # gnome-keyring). Detected by the program the Exec line starts (after env, VAR=value and
             # gpu-run): a known name, Electron's files next to the resolved binary, or a small
             # launcher script that starts Electron (VS Code's bin/code).
-            ELECTRON_NAMES=" claude-desktop code code-insiders codium obsidian slack discord signal-desktop element-desktop teams-for-linux joplin bitwarden mattermost-desktop logseq notion-app github-desktop drawio "
+            ELECTRON_NAMES=" brave-browser brave-browser-stable brave-browser-beta brave-browser-nightly chromium chromium-browser google-chrome google-chrome-stable google-chrome-beta google-chrome-unstable claude-desktop code code-insiders codium obsidian slack discord signal-desktop element-desktop teams-for-linux joplin bitwarden mattermost-desktop logseq notion-app github-desktop drawio "
             is_electron() {
                 set -f
                 set -- ${'$'}1
                 set +f
                 while [ ${'$'}# -gt 0 ]; do
-                    case "${'$'}1" in env|gpu-run|*/gpu-run|*=*) shift ;; *) break ;; esac
+                    case "${'$'}1" in
+                        env|*/env)
+                            shift
+                            while [ ${'$'}# -gt 0 ]; do
+                                case "${'$'}1" in
+                                    -u|--unset) [ ${'$'}# -ge 2 ] || return 1; shift 2 ;;
+                                    -i|-0|--ignore-environment|--null|--unset=*|*=*) shift ;;
+                                    --) shift; break ;;
+                                    -*) return 1 ;;
+                                    *) break ;;
+                                esac
+                            done ;;
+                        gpu-run|*/gpu-run|*=*) shift ;;
+                        *) break ;;
+                    esac
                 done
                 [ ${'$'}# -gt 0 ] || return 1
                 bin=${'$'}1

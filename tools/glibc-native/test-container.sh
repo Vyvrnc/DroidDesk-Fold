@@ -5,9 +5,12 @@ apt-get install -y -qq --no-install-recommends gcc libc6-dev patchelf python3
 work=$(mktemp -d /data-glibc-native.XXXXXX)
 trap 'rm -rf "$work"' EXIT
 root=$work/rootfs
-mkdir -p "$root"/{etc,var,usr/bin,root,opt/search/probe} "$work"/{tmp,plib} /system/bin
+mkdir -p "$root"/{etc,var,usr/bin,root,home/test,usr/share/X11/xkb,opt/search/probe} "$work"/{tmp,plib} /system/bin
 ln -s usr/bin "$root/bin"
 printf 'mapped\n' > "$root/etc/native-test"
+printf 'root fixture\n' > "$root/root/x"
+printf 'home fixture\n' > "$root/home/test/x"
+ln -s /missing-xkb-target "$root/usr/share/X11/xkb/broken"
 cat > "$root/etc/passwd" <<'PASSWD'
 malformed-passwd-entry
 dd-alice:x:42420:42420:Alice Example:/home/alice:/bin/bash
@@ -31,6 +34,9 @@ chmod +x "$root/usr/bin/script"
 cp /bin/dash "$root/usr/bin/sh"
 gcc -shared -fPIC -O2 -Wall -Wextra -Werror -o "$work/hook.so" /repo/tools/glibc-native/pathhook.c -ldl
 gcc -O2 -Wall -Wextra -Werror -o "$root/usr/bin/probe" /repo/tools/glibc-native/test.c -ldl -pthread
+mkdir -p "$root/root/apps/test"
+cp "$root/usr/bin/probe" "$root/root/apps/test/AppRun"
+cp "$root/usr/bin/probe" "$root/home/test/home-probe"
 printf 'int native_symbol = 42;\n' | gcc -shared -fPIC -x c - -o "$root/opt/native-test.so"
 case $(uname -m) in
   x86_64) loader=/lib64/ld-linux-x86-64.so.2; libs=/lib/x86_64-linux-gnu ;;
@@ -81,6 +87,7 @@ echo "self re-exec checks OK"
     mkdir -p "$root/usr/lib/locale/C.utf8"
     ln -s /opt/native-test.so "$root/usr/lib/aarch64-linux-gnu/libnative-alias.so"
     setup_data
+    [[ -f $N/libpaths && ! -s $N/libpaths && $LIBPATH != *: ]]
     [[ $(readlink "$N/lib/libnative-alias.so") == "$root/opt/native-test.so" ]]
     DD_LIBPATH=$LIBPATH "$loader" --library-path "$LIBPATH" --preload "$work/hook.so" "$root/usr/bin/probe" library
     [[ $(LANG=xx_YY.UTF-8 native_locale) == C.UTF-8 ]]
@@ -192,21 +199,45 @@ echo "self re-exec checks OK"
     printf 'export GALLIUM_DRIVER=virpipe LD_LIBRARY_PATH=/opt/native-gpu/lib\n' > "$root/etc/profile.d/droiddesk-gui.sh"
     (export CUSTOM='value with spaces' MESA_TEST=mesa LC_TIME=xx_YY.UTF-8 DISPLAY=:7
      export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/custom-bus
-     export DD_NATIVE_PASS='CUSTOM PREFIX TERMUX_VERSION LD_PRELOAD LD_LIBRARY_PATH'
+     export DD_NATIVE_PASS='CUSTOM PREFIX TERMUX_VERSION LD_PRELOAD LD_LIBRARY_PATH DBUS_SESSION_BUS_ADDRESS'
      run_native /usr/bin/probe desktop)
 
-    # Successful launches and a required library refresh must never invoke Python.
+    # Real ELF RUNPATH/RPATH fixtures, including a library found only through
+    # another library RUNPATH. The loader reads these paths past the hook.
+    libdir=$root/usr/lib/aarch64-linux-gnu
+    mkdir -p "$libdir/pulseaudio" "$libdir/legacy"
+    printf 'int dd_pulse_value(void) { return 73; }\n' | gcc -shared -fPIC -x c - -o "$libdir/pulseaudio/libdd-pulse.so"
+    printf 'extern int dd_pulse_value(void); int dd_runpath_value(void) { return dd_pulse_value(); }\n' |
+        gcc -shared -fPIC -x c - -L"$libdir/pulseaudio" -ldd-pulse \
+            -Wl,-rpath,/usr/lib/aarch64-linux-gnu/pulseaudio -o "$libdir/libdd-runpath.so"
+    printf 'int dd_legacy_value = 17;\n' | gcc -shared -fPIC -x c - \
+        -Wl,--disable-new-dtags,-rpath,/usr/lib/aarch64-linux-gnu/legacy:/missing-dd-lib -o "$libdir/legacy/libdd-legacy.so"
+    setup_libraries
+    [[ $(< "$N/libpaths") == *"$libdir/pulseaudio"* && $(< "$N/libpaths") == *"$libdir/legacy"* ]]
+    [[ $(< "$N/libpaths") != *missing-dd-lib* ]]
+    (run_native /usr/bin/probe runpath)
+    # Changes below usr/lib must invalidate the cache too.
+    mkdir -p "$libdir/new-path"
+    touch -d '2 seconds ago' "$N/lib/.links"
+    printf 'int dd_subdir_value;\n' | gcc -shared -fPIC -x c - \
+        -Wl,-rpath,/usr/lib/aarch64-linux-gnu/new-path -o "$libdir/pulseaudio/libdd-subdir.so"
+    setup_libraries
+    [[ $(< "$N/libpaths") == *"$libdir/new-path"* ]]
+    echo 'recursive ELF RPATH/RUNPATH cache and dependency loading checks OK'
+
+    # A changed directory scans once; warm successful launches never invoke Python.
     cp /usr/bin/true "$root/usr/bin/true"
     (
         python_calls=$work/hot-path-python-calls
         : > "$python_calls"
-        python3() { printf 'python3\n' >> "$python_calls"; return 99; }
+        python3() { printf 'python3\n' >> "$python_calls"; command python3 "$@"; }
         ln -s /opt/native-test.so "$root/usr/lib/aarch64-linux-gnu/libhot-path.so"
         rm -f "$N/lib/.links"
         (try_native /usr/bin/true)
         [[ $(readlink "$N/lib/libhot-path.so") == "$root/opt/native-test.so" ]]
+        [[ $(wc -l < "$python_calls") == 1 ]]
+        : > "$python_calls"
         (run_native /usr/bin/true)
-        # Repeat with an already refreshed mirror to exercise the normal fast path.
         (run_native /usr/bin/true)
         [[ ! -s $python_calls ]]
         start_us=${EPOCHREALTIME/./}
@@ -216,7 +247,7 @@ echo "self re-exec checks OK"
         printf '20x try /usr/bin/true average: %d.%03d ms (informational)\n' \
             "$((average_us / 1000))" "$((average_us % 1000))"
         [[ ! -s $python_calls ]]
-        echo 'Python-free successful native launch and library refresh checks OK'
+        echo 'Python-free warm native launch and one-scan refresh checks OK'
     )
 
     expect_proot() {
@@ -230,11 +261,29 @@ echo "self re-exec checks OK"
     native_switch on
     [[ ! -e $N/off ]]
     DD_NATIVE=0 expect_proot probe
-    for cmd in apt apt-get apt-cache aptitude dpkg dpkg-reconfigure debconf sudo su passwd useradd usermod groupadd chroot mount umount systemctl service update-alternatives proot-distro; do
+    for cmd in apt apt-get apt-cache aptitude dpkg dpkg-reconfigure debconf sudo su passwd useradd usermod groupadd chroot mount umount systemctl service update-alternatives proot-distro droiddesk-session-bus; do
         expect_proot "$cmd"
         expect_proot /usr/bin/"$cmd"
         expect_proot bash -lc "$cmd --secret-argument"
     done
+    # CLI compatibility runtimes must request proot without running natively,
+    # including local symlink wrappers whose resolved basename is just probe.
+    mkdir -p "$root/usr/local/bin"
+    printf '#!/bin/sh\nexec "$@"\n' > "$root/usr/local/bin/gpu-run"
+    chmod +x "$root/usr/local/bin/gpu-run"
+    wine_feedback=$work/wine-result
+    for cmd in wine wine64 wine-stable wineserver wineboot winecfg wineconsole winetricks hangover hangover-wine box64 box86 fex fex-shell FEXInterpreter FEXLoader; do
+        ln -s /usr/bin/probe "$root/usr/local/bin/$cmd"
+        for path in "$cmd" "/usr/local/bin/$cmd"; do
+            DD_NATIVE_GUI=0 expect_proot "$path"
+            : > "$wine_feedback"
+            DD_NATIVE_GUI=0 DD_NATIVE_RESULT=$wine_feedback expect_proot env -u MESA_X TEST=1 /usr/local/bin/gpu-run "$path"
+            [[ $(< "$wine_feedback") == proot ]]
+        done
+        grep -Fqx "proot proot-only $cmd" "$T/droiddesk-native.log"
+    done
+    [[ ! -s $N/proot-list ]]
+    echo 'Wine/Hangover/Box/FEX basename and wrapped CLI preflight checks OK'
     expect_proot bash -c 'exec /usr/bin/apt-get update'
     expect_proot bash -lc $'\napt-get update'
     expect_proot missing-native-command
@@ -247,6 +296,11 @@ echo "self re-exec checks OK"
     (try_native native-link context)
     ln -s /usr/bin/probe "$root/root/relative-probe"
     (try_native ./relative-probe context)
+    [[ $(native_target /root/apps/test/AppRun) == "$root/root/apps/test/AppRun" ]]
+    [[ $(native_target /home/test/home-probe) == "$root/home/test/home-probe" ]]
+    [[ $(native_target "$root/root/apps/test/AppRun") == "$root/root/apps/test/AppRun" ]]
+    [[ $(native_program env -u MESA_X GALLIUM_DRIVER=llvmpipe /root/apps/test/AppRun) == AppRun ]]
+    (try_native /root/apps/test/AppRun context)
     mv "$N/stamp" "$N/stamp.saved"
     expect_proot probe
     mv "$N/stamp.saved" "$N/stamp"
@@ -287,6 +341,8 @@ body = body.replace('${tmpDir.absolutePath}', str(tmp)).replace('${binDir.absolu
 body = re.sub(r'\$\{File\(binDir, "([^"]+)"\)\.absolutePath\}', lambda m: str(prefix / 'bin' / m[1]), body)
 body = re.sub(r'\$\{File\(prefixDir, "([^"]+)"\)\.absolutePath\}', lambda m: str(prefix / m[1]), body)
 (prefix / 'bin/debian-run').write_text(body + '\n')
+# Later checks replace debian-run with stubs; the protocol check restores this copy.
+(prefix / 'debian-run.generated').write_text(body + '\n')
 body = text.split('val tmuxLauncher =', 1)[1].split('"""', 2)[1]
 body = textwrap.dedent(body).lstrip('\n').replace("${'$'}", '$')
 body = body.replace('${tmpDir.absolutePath}', str(tmp)).replace('${binDir.absolutePath}', str(prefix / 'bin'))
@@ -299,11 +355,41 @@ host = body.split(" bash -c '\n", 1)[1].split("' droiddesk-tmux-host", 1)[0]
 assert "'" not in host, 'host body must remain safe inside single-quoted bash -c'
 host = host.replace('/etc/passwd', '"$TEST_PASSWD"')
 (tmp / 'tmux-host.sh').write_text(host + '\n')
+# Validate every generated shell body touched by the native GUI changes.
+for tag in ('ELECTRON_RUN', 'GPU_RUN', 'MENU_SYNC', 'DBUS_ENV'):
+    body = text.split("<<'DROIDDESK_" + tag + "'\n", 1)[1].split('\n            DROIDDESK_' + tag, 1)[0]
+    body = textwrap.dedent(body).replace("${'$'}", '$') + '\n'
+    import subprocess
+    subprocess.run(['bash', '-n'], input=body, text=True, check=True)
+    if tag == 'MENU_SYNC':
+        detect = body[body.index('ELECTRON_NAMES='):body.index('# Custom URL schemes')]
+        subprocess.run(['bash', '-c', detect + '\nis_electron "env -u MESA_X GALLIUM_DRIVER=llvmpipe /usr/bin/brave-browser"'], check=True)
+# proot keeps the XFCE bus; Debian's profile switches to Debian's bus (keyring) while it runs.
+# Native launches always get Debian's bus, never the Termux Secret Service (keyring incident).
+assert '--env DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/dbus-session"' in (prefix / 'bin/debian-run').read_text()
+assert "if [ -S /tmp/dbus-debian ]; then export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-debian; fi" in text
+assert "'DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-debian'" in pathlib.Path('/repo/app/android/app/src/main/assets/droiddesk/droiddesk-glibc-native').read_text()
+subprocess.run(['bash', '-n', str(electron)], check=True)
+subprocess.run(['bash', '-n', str(prefix / 'bin/debian-run')], check=True)
 assert 'Exec=env DD_NATIVE_GUI=1' in text
 assert '99droiddesk-menu-sync' in text
 PY
     (LANG=xx_YY.UTF-8 run_native /usr/local/bin/electron-run /opt/dummy/brave app)
+    (LANG=xx_YY.UTF-8 run_native /usr/local/bin/electron-run env -u MESA_X GALLIUM_DRIVER=llvmpipe /opt/dummy/brave app)
+    (unset DBUS_SESSION_BUS_ADDRESS DD_NATIVE_PASS; run_native /usr/bin/probe bus)
     [[ ! -L $root/opt/dummy/brave ]]
+
+    # Resolve env options and nested wrappers without changing the executed argv.
+    for args in '-i' '-u MESA_X' '--unset=MESA_X' '--unset MESA_X' '-0' '--'; do
+        read -r -a env_args <<< "$args"
+        [[ $(native_program env "${env_args[@]}" GALLIUM_DRIVER=llvmpipe gpu-run /opt/dummy/brave) == brave ]]
+    done
+    [[ $(native_program nice -n 5 setsid -f stdbuf -o L env -u MESA_X /opt/dummy/brave) == brave ]]
+    if native_program env -u; then echo 'accepted incomplete env option' >&2; exit 1; fi
+    (export MESA_X=remove_me
+     run_native env -u MESA_X GALLIUM_DRIVER=llvmpipe LIBGL_ALWAYS_SOFTWARE=1 /bin/bash -c '
+         [[ ! -v MESA_X && $GALLIUM_DRIVER == llvmpipe && $LIBGL_ALWAYS_SOFTWARE == 1 ]]
+     ')
 
     # Learning is per resolved program, with generic wrappers peeled off.
     mkdir -p "$root/usr/local/bin"
@@ -324,6 +410,23 @@ PY
     status=0
     (DD_NATIVE_RESULT=$feedback try_native fast-app 3) </dev/null >"$work/terminal.log" 2>&1 || status=$?
     [[ $status == 3 && ! -s $feedback && ! -s $N/proot-list ]]
+    # A successful wrapper can hide a fatal child exit. Terminal runs stay single-shot.
+    printf '#!/bin/sh\nprintf "Trace/breakpoint trap\\n" >&2\nexit 0\n' > "$root/usr/bin/marker-app"
+    chmod +x "$root/usr/bin/marker-app"
+    (DD_NATIVE_RESULT=$feedback try_native marker-app) </dev/null >"$work/marker-terminal.log" 2>&1
+    [[ ! -s $feedback ]] && ! grep -Fxq marker-app "$N/proot-list"
+    printf '#!/bin/bash\nprintf "proot\\n" >> "$TEST_RESTART_LOG"\nexit 17\n' > "$PREFIX/bin/debian-run"
+    chmod +x "$PREFIX/bin/debian-run"
+    export TEST_RESTART_LOG=$work/marker-restarts
+    status=0
+    printf 'previous stderr\n' > "$work/marker-gui.log"
+    (unset DD_NATIVE_RESULT; DD_NATIVE_GUI=1 try_native marker-app) </dev/null >>"$work/marker-gui.log" 2>&1 || status=$?
+    [[ $status == 17 && $(cat "$TEST_RESTART_LOG") == proot ]]
+    grep -Fxq marker-app "$N/proot-list"
+    grep -q 'Trace/breakpoint trap' "$work/marker-gui.log"
+    grep -q '^previous stderr$' "$work/marker-gui.log"
+    [[ -z $(find "$T" -name 'droiddesk-native-stderr.*' -print -quit) ]]
+    native_reset marker-app
     # The same exit code for an opted-in GUI launch requests one restart and is learned.
     status=0
     (DD_NATIVE_GUI=1 DD_NATIVE_RESULT=$feedback try_native /usr/local/bin/electron-run env TEST=1 gpu-run fast-alias 3) </dev/null >"$work/gui.log" 2>&1 || status=$?
@@ -403,9 +506,16 @@ PY
 
     # The generated caller uses the side channel, never a program exit code, to retry.
     ln -s /bin/bash "$PREFIX/bin/bash"
+    cp "$PREFIX/debian-run.generated" "$PREFIX/bin/debian-run"
     cat > "$PREFIX/bin/droiddesk-glibc-native" <<'SH'
 #!/bin/bash
 printf 'native\n' >> "$TEST_LAUNCH_LOG"
+if [[ ${TEST_REAL_NATIVE_PREFLIGHT:-0} == 1 ]]; then
+    source <(sed '/^command=/,$d' /repo/app/android/app/src/main/assets/droiddesk/droiddesk-glibc-native)
+    R=$TEST_ROOTFS T=$TMPDIR
+    try_native "${@:2}"
+    exit $?
+fi
 if [[ ${TEST_NATIVE_FALLBACK:-0} == 1 ]]; then printf 'proot\n' > "$DD_NATIVE_RESULT"; fi
 exit "$TEST_NATIVE_STATUS"
 SH
@@ -424,6 +534,14 @@ SH
     status=0
     TEST_NATIVE_STATUS=3 TEST_NATIVE_FALLBACK=1 bash "$PREFIX/bin/debian-run" fast-app || status=$?
     [[ $status == 17 && $(grep -c '^native$' "$TEST_LAUNCH_LOG") == 1 && $(grep -c '^proot$' "$TEST_LAUNCH_LOG") == 1 ]]
+    [[ -z $(find "$T" -name 'droiddesk-native-result.*' -print -quit) ]]
+    # The actual generated launcher must honor the real preflight for CLI commands.
+    for cmd in wine hangover-wine; do
+        : > "$TEST_LAUNCH_LOG"
+        status=0
+        TEST_REAL_NATIVE_PREFLIGHT=1 TEST_ROOTFS=$root bash "$PREFIX/bin/debian-run" env -u MESA_X TEST=1 /usr/local/bin/gpu-run "/usr/local/bin/$cmd" || status=$?
+        [[ $status == 17 && $(cat "$TEST_LAUNCH_LOG") == $'native\nproot' ]]
+    done
     [[ -z $(find "$T" -name 'droiddesk-native-result.*' -print -quit) ]]
     echo 'unambiguous single-restart launcher protocol checks OK'
 
@@ -511,43 +629,75 @@ python3 - "$work" <<'PY'
 import pathlib, struct, subprocess, sys
 w = pathlib.Path(sys.argv[1])
 patch = '/repo/app/android/app/src/main/assets/droiddesk/glibc-native/patch-glibc.py'
-for kind, words, tail in [('ld', [0xd2800c68, 0xd4000001], b''),
-                          ('libc', [0xd2800c68, 0xd4000001], b'/etc/resolv.conf\0'),
-                          ('libuv', [0xd2803520, 0x94000001, 0, 0, 0], b'')]:
-    src, dst = w / (kind + '.src'), w / (kind + '.dst')
-    header = bytearray(64)
-    header[:6] = b'\x7fELF\x02\x01'
-    struct.pack_into('<H', header, 18, 183)
-    src.write_bytes(header + struct.pack('<%dI' % len(words), *words) + tail)
-    subprocess.run(['python3', patch, kind, str(src), str(dst)], check=True)
-    assert dst.read_bytes() != src.read_bytes()
-blocked = {143: 'setregid', 144: 'setgid', 145: 'setreuid', 146: 'setuid',
-           149: 'setresgid', 151: 'setfsuid', 152: 'setfsgid', 159: 'setgroups'}
+import runpy
+patcher = runpy.run_path(patch)
+blocked = {18,39,40,42,51,58,89,99,100,104,105,106,112,116,142,143,144,145,146,
+           149,151,152,159,161,162,170,171,*range(180,198),217,218,219,224,225,
+           234,235,236,237,238,239,244,262,263,264,265,266,272,273,288,289,290,
+           292,293,294,425,426,427,428,429,430,431,432,433,442,443,447,449,450,
+           451,453,454,455,456,457,458,459,460}
+assert set(patcher['BLOCK']) == blocked
+header = bytearray(64)
+header[:6] = b'\x7fELF\x02\x01'
+struct.pack_into('<H', header, 18, 183)
 def svc(nr):
     return struct.pack('<II', 0xd2800008 | (nr << 5), 0xd4000001)
 for kind in ('ld', 'libc'):
-    src, dst = w / (kind + '-setid.src'), w / (kind + '-setid.dst')
-    code = svc(99) + b''.join(svc(nr) for nr in blocked) + svc(147)
-    src.write_bytes(header + code + (b'/etc/resolv.conf\0' if kind == 'libc' else b''))
+    src, dst = w / (kind + '.src'), w / (kind + '.dst')
+    numbers = sorted(blocked) + [147, 202]
+    src.write_bytes(header + b''.join(svc(nr) for nr in numbers) + (b'/etc/resolv.conf\0' if kind == 'libc' else b''))
     result = subprocess.run(['python3', patch, kind, str(src), str(dst)],
                             check=True, capture_output=True, text=True)
     patched = dst.read_bytes()
-    assert struct.unpack_from('<I', patched, 68)[0] == 0x928004a0
-    for i, (nr, name) in enumerate(blocked.items(), 1):
+    for i, nr in enumerate(numbers):
         offset = 68 + i * 8
-        expected = 0x928004a0 if kind == 'libc' else 0xd4000001
+        expected = 0x928004a0 if nr in blocked else 0xd4000001
         assert struct.unpack_from('<I', patched, offset)[0] == expected, (kind, nr)
-        line = f'{kind} {hex(offset)} {name}'
-        assert (line in result.stdout.splitlines()) == (kind == 'libc'), (line, result.stdout)
-    assert struct.unpack_from('<I', patched, 68 + 9 * 8)[0] == 0xd4000001, 'setresuid stays allowed'
-    assert len(result.stdout.splitlines()) == (10 if kind == 'libc' else 1)
-    # New set*id sites cannot satisfy the original required glibc-site check.
-    for body in (bytes(64), b''.join(svc(nr) for nr in blocked)):
-        src.write_bytes(header + body + (b'/etc/resolv.conf\0' if kind == 'libc' else b''))
+        if nr in blocked:
+            assert f"{kind} {hex(offset)} {patcher['BLOCK'][nr]}" in result.stdout.splitlines()
+    assert len(result.stdout.splitlines()) == len(blocked) + (kind == 'libc')
+    # Both original required sites are mandatory, even with every extra blocked site.
+    for omitted in ({99}, {293}, {99, 293}):
+        src.write_bytes(header + b''.join(svc(nr) for nr in sorted(blocked - omitted)) +
+                        (b'/etc/resolv.conf\0' if kind == 'libc' else b''))
         dst.unlink(missing_ok=True)
-        assert subprocess.run(['python3', patch, kind, str(src), str(dst)],
-                              capture_output=True).returncode != 0
+        assert subprocess.run(['python3', patch, kind, str(src), str(dst)], capture_output=True).returncode != 0
         assert not dst.exists(), 'failed patch must not create output'
+    if kind == 'libc':
+        src.write_bytes(header + svc(99) + svc(293))
+        assert subprocess.run(['python3', patch, kind, str(src), str(dst)], capture_output=True).returncode != 0
+        assert not dst.exists(), 'missing resolv.conf must fail'
+# Intervening writes to x8 and syscalls outside the matching window stay untouched.
+for code in (svc(272)[:4] + struct.pack('<I', 0xd2800008) + svc(272)[4:],
+             svc(272)[:4] + struct.pack('<13I', *([0xd503201f] * 12 + [0xd4000001]))):
+    data = bytearray(code)
+    assert not patcher['patch_svc'](data, blocked) and bytes(data) == code
+src, dst = w / 'libuv.src', w / 'libuv.dst'
+src.write_bytes(header + struct.pack('<5I', 0xd2803520, 0x94000001, 0, 0, 0))
+subprocess.run(['python3', patch, 'libuv', str(src), str(dst)], check=True)
+assert struct.unpack_from('<I', dst.read_bytes(), 68)[0] == 0x92800000
+# Exercise the embedded ELF parser without section headers or a compiler.
+launcher = pathlib.Path('/repo/app/android/app/src/main/assets/droiddesk/droiddesk-glibc-native').read_text()
+scanner = launcher.split("<<'PY'\n", 1)[1].split('\nPY', 1)[0]
+ns = {'__name__': 'scanner_test'}
+exec(scanner, ns)
+elf = bytearray(1024)
+elf[:6] = b'\x7fELF\x02\x01'
+struct.pack_into('<Q', elf, 32, 64)
+struct.pack_into('<HH', elf, 54, 56, 2)
+struct.pack_into('<II6Q', elf, 64, 1, 0, 0, 0x400000, 0, len(elf), len(elf), 4096)
+struct.pack_into('<II6Q', elf, 120, 2, 0, 256, 0x400100, 0, 80, 80, 8)
+strings = b'/usr/lib/pulseaudio:$ORIGIN/ignored:relative\0/usr/lib/legacy\0'
+elf[512:512 + len(strings)] = strings
+for i, (tag, value) in enumerate(((5, 0x400200), (10, len(strings)), (29, 0),
+                                  (15, strings.index(b'/usr/lib/legacy')), (0, 0))):
+    struct.pack_into('<qQ', elf, 256 + i * 16, tag, value)
+assert ns['elf_runpaths'](bytes(elf)) == ['/usr/lib/pulseaudio', '/usr/lib/legacy']
+for size in (0, 4, 63, 127, 300):
+    assert ns['elf_runpaths'](bytes(elf[:size])) == []
+struct.pack_into('<Q', elf, 264, 0xffffffffffffffff)
+assert ns['elf_runpaths'](bytes(elf)) == []
+print('synthetic ELF dynamic-path checks OK')
 print('synthetic seccomp patch checks OK')
 PY
 printf 'GLIBC_NATIVE_OK\n'

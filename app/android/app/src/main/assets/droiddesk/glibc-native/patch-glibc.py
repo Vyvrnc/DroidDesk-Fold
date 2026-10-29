@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Patch copies of Debian arm64 glibc (ld.so, libc.so.6) and libuv for Android app seccomp.
 - glibc: every inline `mov x8,#NR ... svc #0` (svc within 12 instructions, x8 not rewritten in between)
-  for robust-list/rseq, plus Android-blocked set*id calls in libc only -> the svc becomes
+  for the Android seccomp blocklist in both ld and libc -> the svc becomes
   `movn x0,#37` (x0 = -ENOSYS). Variable-number setxid broadcasts are not covered.
 - libc: "/etc/resolv.conf\\0" -> "/proc/self/fd/63\\0" (same length); the launcher opens fd 63 on the real file.
 - libuv: `mov x0,#NR; bl syscall@plt` with NR in io_uring_* -> the bl becomes `movn x0,#0` (returns -1).
@@ -13,11 +13,21 @@ Usage: patch-glibc.py ld|libc|libuv SRC DST
 """
 import struct, sys
 
-BLOCK = {99: 'set_robust_list', 100: 'get_robust_list', 293: 'rseq',
-         143: 'setregid', 144: 'setgid', 145: 'setreuid', 146: 'setuid',
-         149: 'setresgid', 151: 'setfsuid', 152: 'setfsgid', 159: 'setgroups',
-         425: 'io_uring_setup', 426: 'io_uring_enter', 427: 'io_uring_register'}
-LIBC_SETID = {143, 144, 145, 146, 149, 151, 152, 159}
+# Keep this list identical for the loader and libc; accept (202) is allowed.
+BLOCK = {nr: 'syscall_%d' % nr for nr in (
+    18, 39, 40, 42, 51, 58, 89, 99, 100, 104, 105, 106, 112, 116,
+    142, 143, 144, 145, 146, 149, 151, 152, 159, 161, 162, 170, 171,
+    *range(180, 198), 217, 218, 219, 224, 225, 234, 235, 236, 237,
+    238, 239, 244, 262, 263, 264, 265, 266, 272, 273, 288, 289, 290,
+    292, 293, 294, 425, 426, 427, 428, 429, 430, 431, 432, 433,
+    442, 443, 447, 449, 450, 451, 453, 454, 455, 456, 457, 458, 459, 460)}
+BLOCK.update({99: 'set_robust_list', 100: 'get_robust_list', 293: 'rseq',
+              143: 'setregid', 144: 'setgid', 145: 'setreuid', 146: 'setuid',
+              149: 'setresgid', 151: 'setfsuid', 152: 'setfsgid', 159: 'setgroups',
+              272: 'kcmp', 425: 'io_uring_setup', 426: 'io_uring_enter', 427: 'io_uring_register'})
+BLOCK.update(enumerate(('mq_open mq_unlink mq_timedsend mq_timedreceive mq_notify '
+                        'mq_getsetattr msgget msgctl msgrcv msgsnd semget semctl '
+                        'semtimedop semop shmget shmctl shmat shmdt').split(), 180))
 SVC0 = 0xD4000001
 ENOSYS_X0 = 0x928004A0      # movn x0,#37  -> -38
 MINUS1_X0 = 0x92800000      # movn x0,#0   -> -1
@@ -70,12 +80,11 @@ def main():
         sys.exit('Chyba: zdroj musí být ELF64 pro aarch64 (little endian).')
     if kind in ('ld', 'libc'):
         hits = patch_svc(b, {99, 100, 293})
-        if not hits:
+        if not {'set_robust_list', 'rseq'} <= {name for _, name in hits}:
             sys.exit('Chyba: nebyly nalezeny instrukce pro úpravu glibc; výstup nebyl zapsán.')
+        # Extra blocked sites cannot satisfy the original required-site check.
+        hits += patch_svc(b, BLOCK.keys() - {99, 100, 293})
         if kind == 'libc':
-            # Require the original glibc sites above even if set*id sites exist.
-            # Variable-number syscalls in the setxid broadcast cannot be matched.
-            hits += patch_svc(b, LIBC_SETID)
             old, new = b'/etc/resolv.conf\0', b'/proc/self/fd/63\0'
             n = b.count(old)
             if n != 1:
