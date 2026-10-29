@@ -68,6 +68,13 @@ n=$(grep -c "\[$CAP/.*camera bridge: ok v=1" $DROIDDESK_V4L2_LOG || true)
 echo "   $n of 4 streams from the bridge"
 [ "$n" = 4 ] || fail=1
 
+echo "== /dev listing (Chromium enumerates by readdir): video0 and video1 exactly once"
+n=$(LD_PRELOAD=$P ls /dev | grep -c -E "^video[01]$" || true)
+echo "   $n of 2 names; plain ls: $(ls /dev | grep -c -E "^video[01]$" || true)"
+[ "$n" = 2 ] || fail=1
+n=$(LD_PRELOAD=$P ls -f /dev | sort | uniq -d | wc -l)
+[ "$n" = 0 ] || { echo "   duplicate names in the listing"; fail=1; }
+
 echo "== two devices: video0 = front, video1 = back (card names, facing sent to the bridge)"
 for d in 0 1; do
   LD_PRELOAD=$P v4l2-ctl -d /dev/video$d --info 2>/dev/null | grep -E "Card type|Bus info" | sed "s/^/   video$d /"

@@ -11,7 +11,8 @@
  * DQBUF, so POLLIN means "a frame is ready".
  *
  * Hooked: open/open64/openat/openat64 (+ fortify __open_2 variants), close, dup/dup2/dup3,
- * fcntl (F_DUPFD*), ioctl, mmap/mmap64, stat/lstat/fstat/fstatat, access/faccessat. Every
+ * fcntl (F_DUPFD*), ioctl, mmap/mmap64, stat/lstat/fstat/fstatat, access/faccessat, and
+ * opendir/readdir/rewinddir/closedir of /dev (the device names are added to the listing). Every
  * other path and fd goes straight to the next library (socket_hook or libc).
  *
  * Builds for bionic (Termux, NDK) and glibc (Linux), LP64 only.
@@ -27,6 +28,7 @@
  *                         DROIDDESK_CAMERA_SOCKET abstract socket name (tests)
  */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -90,6 +92,10 @@ static int (*real_fstat)(int, struct stat *);
 static int (*real_fstatat)(int, const char *, struct stat *, int);
 static int (*real_access)(const char *, int);
 static int (*real_faccessat)(int, const char *, int, int);
+static DIR *(*real_opendir)(const char *);
+static struct dirent *(*real_readdir)(DIR *);
+static void (*real_rewinddir)(DIR *);
+static int (*real_closedir)(DIR *);
 
 static int disabled;
 static int debug;
@@ -104,6 +110,7 @@ static void resolve(void) {
     RESOLVE(ioctl); RESOLVE(mmap); RESOLVE(mmap64);
     RESOLVE(stat); RESOLVE(lstat); RESOLVE(fstat); RESOLVE(fstatat);
     RESOLVE(access); RESOLVE(faccessat);
+    RESOLVE(opendir); RESOLVE(readdir); RESOLVE(rewinddir); RESOLVE(closedir);
     if (!real_open64) real_open64 = real_open;
     if (!real_openat64) real_openat64 = real_openat;
     if (!real_mmap64) real_mmap64 = (void *(*)(void *, size_t, int, int, int, off64_t))real_mmap;
@@ -1033,4 +1040,101 @@ int faccessat(int dirfd, const char *path, int mode, int flags) {
     if (device_index(path) >= 0) return (mode & X_OK) ? (errno = EACCES, -1) : 0;
     if (!real_faccessat) resolve();
     return real_faccessat(dirfd, path, mode, flags);
+}
+
+/* ---- /dev listing ------------------------------------------------------------------ */
+
+/*
+ * Chromium finds V4L2 devices by listing /dev for "video*" (FileEnumerator), Firefox by
+ * opening /dev/video0..63. Where the phone has /dev/video0 and video1 nodes of its own
+ * (the Fold 7), Chromium found the names and the shim took over the open; the Tab S10 FE
+ * has only inaccessible video6..video242 and Chromium found no camera. A listing of /dev
+ * gets our device names after the real entries when they are missing.
+ */
+#define MAX_DEVDIRS 16
+static struct devdir {
+    DIR *dir;
+    int real_done;
+    unsigned next;          /* next fake device to return */
+    int seen[NDEVICES];     /* a real entry of that name exists */
+    struct dirent ent;
+} devdirs[MAX_DEVDIRS];
+static pthread_mutex_t devdir_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static struct devdir *find_devdir(DIR *d) {
+    for (int i = 0; i < MAX_DEVDIRS; i++)
+        if (devdirs[i].dir == d) return &devdirs[i];
+    return NULL;
+}
+
+static int is_dev_dir(const char *path) {
+    return !disabled && path && (strcmp(path, "/dev") == 0 || strcmp(path, "/dev/") == 0);
+}
+
+DIR *opendir(const char *path) {
+    if (!real_opendir) resolve();
+    DIR *d = real_opendir(path);
+    if (d && is_dev_dir(path)) {
+        pthread_mutex_lock(&devdir_lock);
+        struct devdir *slot = find_devdir(NULL);
+        if (slot) {
+            memset(slot, 0, sizeof(*slot));
+            slot->dir = d;
+        }
+        pthread_mutex_unlock(&devdir_lock);
+    }
+    return d;
+}
+
+struct dirent *readdir(DIR *d) {
+    if (!real_readdir) resolve();
+    pthread_mutex_lock(&devdir_lock);
+    struct devdir *slot = find_devdir(d);
+    pthread_mutex_unlock(&devdir_lock);
+    if (!slot) return real_readdir(d);
+    if (!slot->real_done) {
+        int saved = errno;
+        struct dirent *e = real_readdir(d);
+        if (e) {
+            for (int i = 0; i < NDEVICES; i++)
+                if (strcmp(e->d_name, devices[i].path + 5) == 0) slot->seen[i] = 1;
+            return e;
+        }
+        errno = saved;
+        slot->real_done = 1;
+    }
+    while (slot->next < NDEVICES && slot->seen[slot->next]) slot->next++;
+    if (slot->next >= NDEVICES) return NULL;
+    unsigned i = slot->next++;
+    memset(&slot->ent, 0, sizeof(slot->ent));
+    slot->ent.d_ino = 0xd201d35cu + i;
+    slot->ent.d_reclen = sizeof(slot->ent);
+    slot->ent.d_type = DT_CHR;
+    snprintf(slot->ent.d_name, sizeof(slot->ent.d_name), "%s", devices[i].path + 5);
+    return &slot->ent;
+}
+
+/* LP64: struct dirent64 has the same layout. */
+struct dirent64 *readdir64(DIR *d) { return (struct dirent64 *)readdir(d); }
+
+void rewinddir(DIR *d) {
+    if (!real_rewinddir) resolve();
+    pthread_mutex_lock(&devdir_lock);
+    struct devdir *slot = find_devdir(d);
+    if (slot) {
+        DIR *keep = slot->dir;
+        memset(slot, 0, sizeof(*slot));
+        slot->dir = keep;
+    }
+    pthread_mutex_unlock(&devdir_lock);
+    real_rewinddir(d);
+}
+
+int closedir(DIR *d) {
+    if (!real_closedir) resolve();
+    pthread_mutex_lock(&devdir_lock);
+    struct devdir *slot = find_devdir(d);
+    if (slot) slot->dir = NULL;
+    pthread_mutex_unlock(&devdir_lock);
+    return real_closedir(d);
 }
