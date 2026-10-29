@@ -608,6 +608,14 @@ class LinuxRuntime(private val context: Context) {
                     # Claude Code wants a private (0700) directory it owns.
                     d=${'$'}TMPDIR/claude-msg; mkdir -p -m 700 ${'$'}d; chmod 700 ${'$'}d
                     for s in ${'$'}d/*.sock; do [ -e "${'$'}s" ] || continue; p=${'$'}{s##*/}; kill -0 ${'$'}{p%.sock} 2>/dev/null || rm -f "${'$'}s"; done
+                    if [ -n "${'$'}{DD_ROOTFS:-}" ]; then
+                        export DISABLE_AUTOUPDATER=1
+                        real=${'$'}(pwd -P); virt=${'$'}{real#"${'$'}DD_ROOTFS"}
+                        p=${'$'}HOME/.claude/projects; mkdir -p "${'$'}p"
+                        key=${'$'}(printf %s "${'$'}real" | sed "s/[^A-Za-z0-9]/-/g")
+                        vkey=${'$'}(printf %s "${'$'}virt" | sed "s/[^A-Za-z0-9]/-/g")
+                        [ "${'$'}virt" = "${'$'}real" ] || [ -e "${'$'}p/${'$'}key" ] || [ ! -d "${'$'}p/${'$'}vkey" ] || ln -s "${'$'}vkey" "${'$'}p/${'$'}key"
+                    fi
                     exec claude --messaging-socket-path "${'$'}d/${'$'}${'$'}.sock" "${'$'}@"' claude "${'$'}@"
                 native_status=${'$'}?
                 native_fallback=${'$'}(< "${'$'}native_result")
@@ -636,6 +644,14 @@ class LinuxRuntime(private val context: Context) {
                     # Claude Code wants a private (0700) directory it owns.
                     d=${'$'}HOME/.cache/claude-msg; mkdir -p -m 700 ${'$'}d; chmod 700 ${'$'}d
                     for s in ${'$'}d/*.sock; do [ -e "${'$'}s" ] || continue; p=${'$'}{s##*/}; kill -0 ${'$'}{p%.sock} 2>/dev/null || rm -f "${'$'}s"; done
+                    if [ -n "${'$'}{DD_ROOTFS:-}" ]; then
+                        export DISABLE_AUTOUPDATER=1
+                        real=${'$'}(pwd -P); virt=${'$'}{real#"${'$'}DD_ROOTFS"}
+                        p=${'$'}HOME/.claude/projects; mkdir -p "${'$'}p"
+                        key=${'$'}(printf %s "${'$'}real" | sed "s/[^A-Za-z0-9]/-/g")
+                        vkey=${'$'}(printf %s "${'$'}virt" | sed "s/[^A-Za-z0-9]/-/g")
+                        [ "${'$'}virt" = "${'$'}real" ] || [ -e "${'$'}p/${'$'}key" ] || [ ! -d "${'$'}p/${'$'}vkey" ] || ln -s "${'$'}vkey" "${'$'}p/${'$'}key"
+                    fi
                     exec claude --messaging-socket-path "${'$'}d/${'$'}${'$'}.sock" "${'$'}@"' claude "${'$'}@"
             """.trimIndent() + "\n",
         )
@@ -801,6 +817,14 @@ class LinuxRuntime(private val context: Context) {
                     [ "${'$'}(id -u)" = 0 ] || d=${'$'}TMPDIR/claude-msg
                     mkdir -p -m 700 ${'$'}d; chmod 700 ${'$'}d
                     for s in ${'$'}d/*.sock; do [ -e "${'$'}s" ] || continue; p=${'$'}{s##*/}; kill -0 ${'$'}{p%.sock} 2>/dev/null || rm -f "${'$'}s"; done
+                    if [ -n "${'$'}{DD_ROOTFS:-}" ]; then
+                        export DISABLE_AUTOUPDATER=1
+                        real=${'$'}(pwd -P); virt=${'$'}{real#"${'$'}DD_ROOTFS"}
+                        p=${'$'}HOME/.claude/projects; mkdir -p "${'$'}p"
+                        key=${'$'}(printf %s "${'$'}real" | sed "s/[^A-Za-z0-9]/-/g")
+                        vkey=${'$'}(printf %s "${'$'}virt" | sed "s/[^A-Za-z0-9]/-/g")
+                        [ "${'$'}virt" = "${'$'}real" ] || [ -e "${'$'}p/${'$'}key" ] || [ ! -d "${'$'}p/${'$'}vkey" ] || ln -s "${'$'}vkey" "${'$'}p/${'$'}key"
+                    fi
                     exec claude --messaging-socket-path "${'$'}d/${'$'}${'$'}.sock" "${'$'}@"' claude "${'$'}@"
             """.trimIndent() + "\n",
         )
