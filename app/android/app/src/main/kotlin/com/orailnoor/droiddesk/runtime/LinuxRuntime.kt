@@ -1479,6 +1479,12 @@ class LinuxRuntime(private val context: Context) {
                 launcher.writeText("#!${File(binDir, "bash").absolutePath}\n" + script.substringAfter('\n'))
                 launcher.setExecutable(true, false)
             }
+            // XFCE sizes per screen (DeX monitor vs phone), run by applyScreenProfile.
+            File(binDir, "droiddesk-screen-profile").let { command ->
+                val script = context.assets.open("droiddesk/droiddesk-screen-profile").bufferedReader().use { it.readText() }
+                command.writeText("#!${File(binDir, "bash").absolutePath}\n" + script.substringAfter('\n'))
+                command.setExecutable(true, false)
+            }
             // The same camera for Termux Chromium (Meet's background blur works there, not in
             // Firefox).
             File(binDir, "chromium-cam").let { launcher ->
@@ -2972,6 +2978,34 @@ class LinuxRuntime(private val context: Context) {
             if (!done) process.destroyForcibly()
             done && process.exitValue() == 0
         }.getOrDefault(false)
+    }
+
+    /**
+     * Sets XFCE's sizes for this screen (droiddesk-screen-profile: window scaling, DPI,
+     * decorations, cursor and panel; a DeX monitor wants other ones than the phone). Runs in
+     * the XFCE session's environment; does nothing while xfconf is not running.
+     */
+    fun applyScreenProfile(screen: String) {
+        if (!isBootstrapped()) return
+        val command = File(binDir, "droiddesk-screen-profile")
+        if (!command.canExecute()) return
+        Thread({
+            runCatching {
+                val process = ProcessBuilder(command.absolutePath, screen)
+                    .directory(homeDir)
+                    .redirectErrorStream(true)
+                    .redirectOutput(ProcessBuilder.Redirect.appendTo(File(tmpDir, "droiddesk-screen-profile.log")))
+                    .also { builder ->
+                        builder.environment().clear()
+                        builder.environment().putAll(getTermuxEnv())
+                        builder.environment()["DISPLAY"] = ":0"
+                        builder.environment()["DBUS_SESSION_BUS_ADDRESS"] =
+                            "unix:path=${File(tmpDir, "dbus-session").absolutePath}"
+                    }
+                    .start()
+                if (!process.waitFor(20, java.util.concurrent.TimeUnit.SECONDS)) process.destroyForcibly()
+            }.onFailure { Log.w(TAG, "Screen profile $screen failed: ${it.message}") }
+        }, "screen-profile").start()
     }
 
     // ── Environment Configuration ──

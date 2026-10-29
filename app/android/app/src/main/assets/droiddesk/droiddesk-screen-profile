@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# droiddesk-screen-profile SCREEN — XFCE sizes per screen (narrow = phone, wide = unfolded or
+# tablet, desktop = DeX or an external monitor). XFCE keeps one set of sizes for every
+# screen, so a phone set up for its dense panel (window scaling 2, 3x window decorations,
+# a big panel and cursor) was huge on a FullHD monitor in DeX.
+#
+# The app runs this inside the XFCE session whenever the screen changes and when the desktop
+# starts. The sizes of the screen being left are saved first (manual changes are kept per
+# screen), then those of the new screen are set:
+#   - a saved profile of that screen, or
+#   - desktop without a profile: window scaling 1, 96 DPI, cursor 24, the window decorations
+#     without the -xhdpi/-xxhdpi suffix (else xfwm4's Default), panel 40 / icons 28;
+#   - a phone screen without a profile: the other phone screen's profile, else nothing.
+# Profiles: ~/.config/droiddesk/screen-profiles/<screen>.conf (lines: channel property type value).
+set -u
+screen=${1:-}
+case "$screen" in narrow|wide|desktop) ;; *) echo "usage: droiddesk-screen-profile narrow|wide|desktop" >&2; exit 2 ;; esac
+dir=$HOME/.config/droiddesk/screen-profiles
+mkdir -p "$dir"
+current=$(cat "$dir/current" 2>/dev/null || true)
+[ "$current" = "$screen" ] && exit 0
+command -v xfconf-query >/dev/null 2>&1 || exit 0
+# Without a running xfconfd nothing can be read or set; try again at the next change.
+xfconf-query -c xsettings -p /Xft/DPI >/dev/null 2>&1 || exit 0
+
+panels() {
+    xfconf-query -c xfce4-panel -p /panels 2>/dev/null | grep -E '^[0-9]+$'
+}
+
+save() {
+    local out=$dir/$1.conf tmp
+    tmp=$(mktemp "$dir/.save.XXXXXX") || return
+    {
+        for spec in "xsettings /Gdk/WindowScalingFactor int" "xsettings /Xft/DPI int" \
+                    "xsettings /Gtk/CursorThemeSize int" "xfwm4 /general/theme string"; do
+            set -- $spec
+            value=$(xfconf-query -c "$1" -p "$2" 2>/dev/null) && echo "$1 $2 $3 $value"
+        done
+        for id in $(panels); do
+            for prop in size icon-size; do
+                value=$(xfconf-query -c xfce4-panel -p "/panels/panel-$id/$prop" 2>/dev/null) &&
+                    echo "xfce4-panel /panels/panel-$id/$prop uint $value"
+            done
+        done
+    } > "$tmp"
+    mv -f "$tmp" "$out"
+}
+
+load() {
+    local channel prop type value
+    while read -r channel prop type value; do
+        [ -n "$value" ] || continue
+        xfconf-query -c "$channel" -p "$prop" -n -t "$type" -s "$value" 2>/dev/null
+    done < "$1"
+}
+
+theme_exists() {
+    local d
+    for d in "$HOME/.local/share/themes" "$HOME/.themes" "${PREFIX:-/nonexistent}/share/themes"; do
+        [ -d "$d/$1/xfwm4" ] && return 0
+    done
+    return 1
+}
+
+desktop_defaults() {
+    xfconf-query -c xsettings -p /Gdk/WindowScalingFactor -n -t int -s 1
+    xfconf-query -c xsettings -p /Xft/DPI -n -t int -s 96
+    xfconf-query -c xsettings -p /Gtk/CursorThemeSize -n -t int -s 24
+    local theme base
+    theme=$(xfconf-query -c xfwm4 -p /general/theme 2>/dev/null || true)
+    base=${theme%-xxhdpi}
+    base=${base%-xhdpi}
+    if [ "$base" != "$theme" ]; then
+        # 1x decorations of the same theme, else xfwm4's own (2x/3x pixmaps are huge at scale 1).
+        if theme_exists "$base"; then
+            xfconf-query -c xfwm4 -p /general/theme -n -t string -s "$base"
+        elif theme_exists Default; then
+            xfconf-query -c xfwm4 -p /general/theme -n -t string -s Default
+        fi
+    fi
+    for id in $(panels); do
+        xfconf-query -c xfce4-panel -p "/panels/panel-$id/size" -n -t uint -s 40
+        xfconf-query -c xfce4-panel -p "/panels/panel-$id/icon-size" -n -t uint -s 28
+    done
+}
+
+# The screen being left. Unknown (first run): the current sizes are the phone's.
+if [ -n "$current" ]; then
+    save "$current"
+elif [ "$screen" = desktop ]; then
+    save wide
+    [ -f "$dir/narrow.conf" ] || cp "$dir/wide.conf" "$dir/narrow.conf"
+fi
+
+if [ -f "$dir/$screen.conf" ]; then
+    load "$dir/$screen.conf"
+elif [ "$screen" = desktop ]; then
+    desktop_defaults 2>/dev/null
+else
+    other=wide
+    [ "$screen" = wide ] && other=narrow
+    [ -f "$dir/$other.conf" ] && load "$dir/$other.conf"
+fi
+echo "$screen" > "$dir/current"

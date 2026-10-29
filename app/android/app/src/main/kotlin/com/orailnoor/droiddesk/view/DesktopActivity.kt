@@ -234,6 +234,7 @@ class DesktopActivity : Activity() {
 
     private fun applyDisplayProfile() {
         DisplayProfile.apply(this, screen)
+        applyScreenProfile()
         scaleButton?.text = scaleLabel()
         lorieView?.post {
             lorieView?.reapplyDisplaySettings()
@@ -249,6 +250,12 @@ class DesktopActivity : Activity() {
         } else {
             lorieView?.setContentInsets(cutout.safeInsetLeft, cutout.safeInsetTop, cutout.safeInsetRight, cutout.safeInsetBottom)
         }
+    }
+
+    /** XFCE's sizes for this screen (window scaling, decorations, panel); native session only. */
+    private fun applyScreenProfile() {
+        if (sessionMode == "chroot" || !::linuxRuntime.isInitialized) return
+        linuxRuntime.applyScreenProfile(screen.key)
     }
 
     private fun scaleLabel() = "${screen.label} ${DisplayProfile.scaleFor(this, screen)} %"
@@ -839,6 +846,7 @@ class DesktopActivity : Activity() {
             loadingMessageHandler.removeCallbacks(desktopWatchdog)
             loadingMessageHandler.postDelayed(desktopWatchdog, DESKTOP_WATCHDOG_MS)
             Log.i(TAG, "Desktop revealed ready=$ready")
+            applyScreenProfile()
             loadingOverlay?.animate()
                 ?.alpha(0f)
                 ?.setDuration(350)
