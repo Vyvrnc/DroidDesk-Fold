@@ -24,6 +24,7 @@
 #include <pwd.h>
 #include <grp.h>
 #include <pthread.h>
+#include <ftw.h>
 extern char **environ;
 
 /* The program this process really runs. Started as "ld.so --library-path ... --preload ...
@@ -453,13 +454,88 @@ int symlinkat(const char *a, int d, const char *b) {
     REAL(symlinkat, int, const char *, int, const char *); char second[PATH_MAX];
     return real_symlinkat(map(a, 1), d, mapbuf(b, second, 1));
 }
+/* Android forbids hard links for apps (EPERM; proot uses --link2symlink): fall back to a
+ * symlink to the source's absolute path, like proot. WebKit's cache in OrcaSlicer needed it
+ * (Tab S10 FE). */
+static int link_as_symlink(int olddir, const char *old, int newdir, const char *new) {
+    char abs[PATH_MAX];
+    if (old[0] == '/') {
+        if (strlen(old) >= sizeof abs) { errno = ENAMETOOLONG; return -1; }
+        strcpy(abs, old);
+    } else {
+        char dir[PATH_MAX], fdpath[64];
+        if (olddir == AT_FDCWD) { if (!getcwd(dir, sizeof dir)) return -1; }
+        else {
+            snprintf(fdpath, sizeof fdpath, "/proc/self/fd/%d", olddir);
+            ssize_t n = readlink(fdpath, dir, sizeof dir - 1);
+            if (n < 0) return -1;
+            dir[n] = 0;
+        }
+        if (snprintf(abs, sizeof abs, "%s/%s", dir, old) >= (int)sizeof abs) { errno = ENAMETOOLONG; return -1; }
+    }
+    REAL(symlinkat, int, const char *, int, const char *);
+    return real_symlinkat(abs, newdir, new);
+}
 int link(const char *a, const char *b) {
     REAL(link, int, const char *, const char *); char second[PATH_MAX];
-    return real_link(map(a, 1), mapbuf(b, second, 1));
+    const char *ma = map(a, 1), *mb = mapbuf(b, second, 1);
+    int rc = real_link(ma, mb);
+    if (rc < 0 && (errno == EPERM || errno == EACCES)) rc = link_as_symlink(AT_FDCWD, ma, AT_FDCWD, mb);
+    return rc;
 }
 int linkat(int a, const char *p, int b, const char *q, int f) {
     REAL(linkat, int, int, const char *, int, const char *, int); char second[PATH_MAX];
-    return real_linkat(a, map(p, !(f & AT_SYMLINK_FOLLOW)), b, mapbuf(q, second, 1), f);
+    const char *mp = map(p, !(f & AT_SYMLINK_FOLLOW)), *mq = mapbuf(q, second, 1);
+    int rc = real_linkat(a, mp, b, mq, f);
+    if (rc < 0 && (errno == EPERM || errno == EACCES) && !(f & AT_EMPTY_PATH))
+        rc = link_as_symlink(a, mp, b, mq);
+    return rc;
+}
+
+/* nftw/ftw walk the tree with libc-internal calls past the hook: map the start path (zutty
+ * walks /usr/share/fonts). */
+int nftw(const char *p, int (*fn)(const char *, const struct stat *, int, struct FTW *), int fds, int flags) {
+    REAL(nftw, int, const char *, int (*)(const char *, const struct stat *, int, struct FTW *), int, int);
+    return real_nftw(map(p, 0), fn, fds, flags);
+}
+int nftw64(const char *p, int (*fn)(const char *, const struct stat64 *, int, struct FTW *), int fds, int flags) {
+    REAL(nftw64, int, const char *, int (*)(const char *, const struct stat64 *, int, struct FTW *), int, int);
+    return real_nftw64(map(p, 0), fn, fds, flags);
+}
+int ftw(const char *p, int (*fn)(const char *, const struct stat *, int), int fds) {
+    REAL(ftw, int, const char *, int (*)(const char *, const struct stat *, int), int);
+    return real_ftw(map(p, 0), fn, fds);
+}
+
+/* Calls through the generic syscall() (Mesa: kcmp, Qt/OpenCASCADE: mbind) are not inline svc
+ * sites, so patch-glibc cannot reach them: SolidCraft and FuCad died with SIGSYS. Return
+ * ENOSYS for Android's seccomp blocklist (accept stays: it is mapped to accept4 above). */
+static int seccomp_blocked(long nr) {
+#if defined(__aarch64__)
+    static const short blocked[] = {
+        18, 39, 40, 42, 51, 58, 89, 99, 100, 104, 105, 106, 112, 116, 142, 143, 144, 145, 146,
+        149, 151, 152, 159, 161, 162, 170, 171, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189,
+        190, 191, 192, 193, 194, 195, 196, 197, 217, 218, 219, 224, 225, 234, 235, 236, 237,
+        238, 239, 244, 262, 263, 264, 265, 266, 272, 273, 288, 289, 290, 292, 293, 294, 425,
+        426, 427, 428, 429, 430, 431, 432, 433, 442, 443, 447, 449, 450, 451, 453, 454, 455,
+        456, 457, 458, 459, 460,
+    };
+#else /* the tests run on x86_64: the two calls seen on the device */
+    static const short blocked[] = { __NR_kcmp, __NR_mbind };
+#endif
+    for (size_t i = 0; i < sizeof blocked / sizeof blocked[0]; ++i)
+        if (blocked[i] == nr) return 1;
+    return 0;
+}
+long syscall(long nr, ...) {
+    va_list ap;
+    va_start(ap, nr);
+    long a = va_arg(ap, long), b = va_arg(ap, long), c = va_arg(ap, long);
+    long d = va_arg(ap, long), e = va_arg(ap, long), f = va_arg(ap, long);
+    va_end(ap);
+    if (seccomp_blocked(nr)) { errno = ENOSYS; return -1; }
+    REAL(syscall, long, long, ...);
+    return real_syscall(nr, a, b, c, d, e, f);
 }
 int renameat(int a, const char *p, int b, const char *q) {
     REAL(renameat, int, int, const char *, int, const char *); char second[PATH_MAX];
