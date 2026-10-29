@@ -8,6 +8,12 @@ root=$work/rootfs
 mkdir -p "$root"/{etc,var,usr/bin,root,opt/search/probe} "$work"/{tmp,plib} /system/bin
 ln -s usr/bin "$root/bin"
 printf 'mapped\n' > "$root/etc/native-test"
+ln -s /etc/native-test "$root/etc/absolute-file"
+ln -s /etc "$root/opt/absolute-dir"
+ln -s ../etc "$root/opt/relative-dir"
+ln -s /usr/bin/probe "$root/usr/bin/absolute-probe"
+ln -s /etc/loop-b "$root/etc/loop-a"
+ln -s /etc/loop-a "$root/etc/loop-b"
 printf '#!/bin/sh -e\nexec /usr/bin/probe child script\n' > "$root/usr/bin/script"
 chmod +x "$root/usr/bin/script"
 cp /bin/dash "$root/usr/bin/sh"
@@ -29,11 +35,54 @@ patchelf --force-rpath --set-rpath "$libs" "$root/usr/bin/patched"
 patchelf --set-interpreter "$work/plib/ld.so" "$root/usr/bin/patched"
 patchelf --add-needed "$work/hook.so" "$root/usr/bin/patched"
 export DD_ROOTFS=$root DD_TMP=$work/tmp DD_PLIB=$work/plib DD_LIBPATH=$libs
+export DD_SAVED_PREFIX=/termux/usr DD_SAVED_TERMUX_VERSION=0.118 DD_SAVED_TERMUX__TEST="value with spaces"
 export DD_SAVED_PATH=/termux/bin DD_SAVED_LD_LIBRARY_PATH=$libs DD_SAVED_LD_PRELOAD=$work/empty.so
 printf 'int marker;\n' | gcc -shared -fPIC -x c - -o "$work/empty.so"
 export PATH=/usr/bin:/bin
 exec 63<"$root/etc/native-test"
 "$loader" --library-path "$libs" --preload "$work/hook.so" "$root/usr/bin/probe"
+# Source only launcher functions; exercise the same code as the shipped commands.
+(
+    export PREFIX=$work/termux
+    source <(sed '/^command=/,$d' /repo/app/android/app/src/main/assets/droiddesk/droiddesk-glibc-native)
+    R=$root N=$PREFIX/opt/glibc-native T=$work/tmp
+    PLIB=$N/plib
+    LIBPATH=$PLIB:$N/lib:$libs
+    mkdir -p "$N"/{lib,bin,locale,plib} "$PREFIX/bin" "$root/usr/lib/aarch64-linux-gnu"
+    ln -s "$loader" "$PLIB/ld.so"
+    ln -s "$work/hook.so" "$N/lib/pathhook.so"
+    ln -s /usr/bin/env "$PREFIX/bin/env"
+    cp /usr/bin/env "$root/usr/bin/env"
+    cp "$root/etc/native-test" "$root/etc/resolv.conf"
+    touch "$N/stamp"
+    mkdir -p "$root/usr/lib/locale/C.utf8"
+    ln -s /opt/native-test.so "$root/usr/lib/aarch64-linux-gnu/libnative-alias.so"
+    setup_data
+    [[ $(readlink "$N/lib/libnative-alias.so") == "$root/opt/native-test.so" ]]
+    DD_LIBPATH=$LIBPATH "$loader" --library-path "$LIBPATH" --preload "$work/hook.so" "$root/usr/bin/probe" library
+    [[ $(LANG=xx_YY.UTF-8 native_locale) == C.UTF-8 ]]
+    mkdir -p "$N/locale/en_US.UTF-8" "$N/locale/cs_CZ.utf8"
+    [[ $(LANG=en_US.UTF-8 native_locale) == en_US.UTF-8 ]]
+    [[ $(LANG=cs_CZ.UTF-8 native_locale) == cs_CZ.UTF-8 ]]
+    [[ $(LANG=C native_locale) == C ]]
+    [[ $(source_path /root) == "$root/root" ]]
+    mkdir -p "$root/home/test"
+    [[ $(source_path /home/test) == "$root/home/test" ]]
+    mkdir -p "$root/opt/dummy"
+    cp "$root/usr/bin/probe" "$root/opt/dummy/brave"
+    cp "$root/usr/bin/probe" "$root/opt/dummy/chrome_crashpad_handler"
+    printf 'ICU fixture\n' > "$root/opt/dummy/icudtl.dat"
+    before=$(sha256sum "$root/opt/dummy/brave")
+    mirror_app /opt/dummy brave > "$work/app-command"
+    grep -q -- '--no-sandbox --disable-dev-shm-usage --password-store=basic' "$work/app-command"
+    [[ -L $N/apps/dummy/icudtl.dat && ! -L $N/apps/dummy/brave && ! -L $N/apps/dummy/chrome_crashpad_handler ]]
+    [[ $(patchelf --print-interpreter "$N/apps/dummy/brave") == "$PLIB/ld.so" ]]
+    [[ $(sha256sum "$root/opt/dummy/brave") == "$before" ]]
+    mirror_app /opt/dummy brave >/dev/null
+    (LANG=xx_YY.UTF-8 run_native "$N/apps/dummy/brave" app)
+    export TERMUX_VERSION=0.118 TERMUX__TEST='value with spaces'
+    (run_native /usr/bin/android-marker android)
+)
 # Exercise patcher failure and success without needing an Android device.
 python3 - "$work" <<'PY'
 import pathlib, struct, subprocess, sys

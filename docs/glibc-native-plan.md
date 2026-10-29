@@ -2,7 +2,8 @@
 
 Status: spike done on the Galaxy Tab S10 FE (night 2026-10-29/30, fold.89/90). Full notes on the
 tablet in `~/glibc-spike/FINDINGS.md`; this file is the design that came out of it. Step 1 now
-has an opt-in Termux-side launcher; device validation of this implementation is still required.
+has an opt-in Termux-side launcher. The current device baseline (Android 16) passes setup/run,
+TracerPid 0, git/grep/tar/python/node/npm and DNS. The five fixes below still need device validation.
 
 ## Why
 
@@ -48,7 +49,7 @@ python 6.7–10.8 CPU-s under proot against 0.16–0.38 native; Brave, 85 s with
    fonts (`FONTCONFIG_SYSROOT`, `FONTCONFIG_FILE`), TLS (`SSL_CERT_FILE`), perl (`PERL5LIB`) and
    gconv. DNS cannot: libc reads `/etc/resolv.conf` itself, so the patched libc has that string
    replaced by `/proc/self/fd/63` (same length) and the launcher opens the file as fd 63. The
-   rest goes through a small glibc path hook (`pathhook.so`, about 60 lines, loaded with
+   rest goes through a small glibc path hook (`pathhook.so`, loaded with
    `ld.so --preload`): open/stat/access/opendir/readlink/realpath/dlopen … of `/usr /etc /var
    /opt /lib /bin /sbin` → the rootfs, `/tmp`, `/dev/shm` → Termux's tmp. node, npm, fc-match and
    perl XS run with it.
@@ -81,28 +82,70 @@ This is opt-in: existing Debian and Claude launchers continue to use proot. On f
 those launchers. Native children inherit the path hook, so a tool chain must start through
 this launcher from Termux; launching it under proot still traces its descendants. The hook
 maps Debian system paths into the rootfs and temporary paths into Termux tmp; HOME and shared
-Android paths stay unchanged. `claude` uses the existing Debian root installation and its
-configuration (`HOME` is the physical rootfs `root` directory).
+Android paths stay unchanged. `run` inherits the Termux HOME unless explicitly overridden
+(for example `HOME=/physical/path droiddesk-glibc-native run ...`). `claude` uses the existing
+Debian root installation and defaults to its physical rootfs `root` HOME, matching the proot
+launcher. It warns in Czech that both sessions share `~/.claude`. Use
+`droiddesk-glibc-native claude --home /home/test ...` or `DD_CLAUDE_HOME=/physical/path` to
+select another configuration HOME; `/root` and `/home` arguments map into the rootfs.
+Installation lookup remains in the default Debian home.
 `getcwd` and `realpath` remove the rootfs prefix only for mapped system directories, preserving
 the physical HOME. Mapping covers interposable libc calls; direct syscalls, static programs,
-libc-internal calls and existing absolute symlinks escaping the rootfs are outside this hook.
+libc-internal calls are outside this hook. For mapped paths (including physical rootfs paths),
+the hook walks components and resolves absolute links relative to the Debian root, relative
+links from their parent directory, with a 40-link limit. Final links are preserved for
+lstat/readlink/unlink/rename/symlink creation and other no-follow operations. Buffers belong
+to each invocation, so concurrent and two-path calls cannot overwrite one another.
+This is path compatibility, not a filesystem isolation boundary.
 
 Run `setup` again after Debian upgrades. It hashes the source loader, libc, optional libuv
 and shipped helpers, and rebuilds patched copies only when they change. Unknown instruction
 patterns fail with an error before replacing the current copies. Nothing installs packages
-automatically: setup needs Termux `python3` (`pkg install python`).
+automatically: setup needs Termux `python3` (`pkg install python`). On every setup it also
+refreshes absolute library symlinks from Debian `lib/aarch64-linux-gnu` and
+`usr/lib/aarch64-linux-gnu` into `N/lib`, resolving alternatives inside the rootfs. Both
+`DD_LIBPATH` and loader `--library-path` put `N/lib` immediately after `plib`.
+
+Because LOCPATH disables locale-archive, setup runs Debian localedef natively with
+`--no-archive` to create directory locales in `N/locale`: current LANG, C.UTF-8,
+cs_CZ.UTF-8 and en_US.UTF-8 when their sources/charmap are installed. Existing directory
+locales are reused; the rootfs C.utf8 directory is linked as a C.UTF-8 fallback. LOCPATH
+searches `N/locale` then the rootfs locale directory. A missing requested LANG silently
+falls back to C.UTF-8; C and POSIX remain valid. Empty TZ uses Android
+`getprop persist.sys.timezone`, while an explicit TZ wins.
 
 For a binary that re-executes `/proc/self/exe`, install Termux patchelf with `pkg install
 patchelf`, then run `droiddesk-glibc-native patch /usr/bin/PROGRAM`. It prints the path of a
 copy under `$PREFIX/opt/glibc-native/bin`; launch that path with `run`. RPATH is patched before
 the interpreter in separate calls. A DT_NEEDED entry keeps the hook loaded on re-exec without
 leaking LD_PRELOAD into Termux tools. Existing `$ORIGIN` entries point back to the source
-directory. Re-run `patch` after upgrading that program; `claude` refreshes its native binary
-copy on every launch. The npm Claude installation instead runs Debian node with `cli.js`.
+directory. Re-run `patch` after upgrading that program. Claude Code single-file Bun ELFs
+must stay original: patchelf can move the first LOAD segment and break absolute references.
+`claude` resolves Debian `~/.local/bin/claude` to the versions ELF and dispatches the original
+through the patched loader without modifying it. The npm installation runs Debian node
+with `cli.js`.
+
+Chromium/Brave/Electron need their data next to `/proc/self/exe`. Use:
+
+```sh
+droiddesk-glibc-native app /opt/brave.com/brave brave
+# Run the printed command, for example:
+droiddesk-glibc-native run "$PREFIX/opt/glibc-native/apps/brave/brave" --no-sandbox --disable-dev-shm-usage --password-store=basic
+```
+
+`patch /opt/brave.com/brave` also creates the mirror. Each source directory gets
+`N/apps/<directory-name>`: data files and subdirectories are symlinked to the source;
+ELF executables with a standard glibc interpreter (including chrome_crashpad_handler) are
+patched copies under their original names. RPATH is patched first, interpreter second in
+separate calls, then the hook is added as DT_NEEDED. Mirror `$ORIGIN` entries stay local.
+The launcher supplies DISPLAY and TMPDIR. Directory names must be unique within `N/apps`;
+rerun after upgrades (removed source entries can leave unused mirror entries).
 
 DNS uses inherited fd 63; programs that close it need separate validation. The clean native
 environment keeps Termux loader variables only in `DD_SAVED_*`, restoring them when an
-Android/Termux binary is executed. apt, sudo, and unsupported servers continue to need proot.
+Android/Termux binary is executed. This includes PREFIX and every exported TERMUX_* /
+TERMUX__* variable, carried through glibc descendants even with a custom exec environment.
+apt, sudo, and unsupported servers continue to need proot.
 
 ## Plan
 
@@ -113,3 +156,12 @@ Android/Termux binary is executed. apt, sudo, and unsupported servers continue t
 3. gcc/node/npm natively (the path hook, `--sysroot`).
 4. Re-patching after Debian upgrades (a dpkg hook) and a self-test at start; anything that
    fails falls back to proot.
+
+## Regression checks
+
+`tools/glibc-native/test.sh` runs the container suite with gcc `-Wall -Wextra -Werror`
+and patchelf. It covers component symlinks and executable dispatch, no-follow operations,
+loader library mirrors, locale selection, original app filenames and adjacent ICU data,
+and restored Termux variables in bionic-marker children. Run `bash -n` on the launcher and
+`test-container.sh`, then `build.sh` and `test.sh`. Android seccomp, actual locale generation,
+Bun Claude and Chromium windows still require device checks.

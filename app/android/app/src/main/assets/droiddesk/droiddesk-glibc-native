@@ -8,7 +8,7 @@ N=$PREFIX/opt/glibc-native
 PLIB=$N/plib
 SHARE=$N/share
 T=${PREFIX%/usr}/tmp
-LIBPATH=$PLIB:$R/lib/aarch64-linux-gnu:$R/usr/lib/aarch64-linux-gnu:$N/lib
+LIBPATH=$PLIB:$N/lib:$R/lib/aarch64-linux-gnu:$R/usr/lib/aarch64-linux-gnu
 fail() { printf 'Chyba: %s\n' "$*" >&2; exit 1; }
 need_python() { command -v python3 >/dev/null || fail 'Chybí Termux Python. Spusťte: pkg install python'; }
 
@@ -27,7 +27,7 @@ for _ in range(40):
         if os.path.islink(current):
             target = os.readlink(current)
             if target.startswith('/'):
-                target = root + target if current.startswith(root + '/') else target
+                target = root + target if current.startswith(root + '/') and not target.startswith(root + '/') else target
             else:
                 target = os.path.join(os.path.dirname(current), target)
             path = os.path.join(target, *parts[i + 1:])
@@ -52,6 +52,7 @@ setup() {
     mkdir -p "$PLIB" "$N/bin" "$N/lib"
     signature=$({ sha256sum "$ld" "$libc" "$SHARE/patch-glibc.py" "$SHARE/pathhook.so"; [[ ! -f $uv ]] || sha256sum "$uv"; } | sha256sum)
     if [[ -f $N/stamp && $(cat "$N/stamp") == "$signature" && -f $PLIB/ld.so && -f $PLIB/libc.so.6 && -f $N/lib/pathhook.so ]] && { [[ ! -f $uv ]] || [[ -f $PLIB/libuv.so.1 ]]; }; then
+        setup_data
         printf 'Nativní glibc je aktuální.\n'
         return
     fi
@@ -71,7 +72,50 @@ setup() {
     printf '%s\n' "$signature" > "$stage/stamp"
     mv -f "$stage/stamp" "$N/stamp"
     rmdir "$stage"
+    setup_data
     printf 'Nativní glibc je připravena.\n'
+}
+
+setup_data() {
+    local dir link target locale input stage
+    mkdir -p "$N/locale"
+    # ld.so opens libraries internally, so interposition cannot fix these links.
+    for dir in "$R/lib/aarch64-linux-gnu" "$R/usr/lib/aarch64-linux-gnu"; do
+        [[ -d $dir ]] || continue
+        while IFS= read -r -d '' link; do
+            target=$(readlink "$link")
+            [[ $target == /* ]] || continue
+            target=$(resolve "$link")
+            [[ ! -f $target ]] || ln -sfn "$target" "$N/lib/$(basename "$link")"
+        done < <(find "$dir" -maxdepth 1 -type l -print0)
+    done
+    # LOCPATH bypasses locale-archive; localedef must publish directory locales.
+    for locale in C.UTF-8 "${LANG:-C.UTF-8}" cs_CZ.UTF-8 en_US.UTF-8; do
+        [[ $locale != C && $locale != POSIX && $locale != */* ]] || continue
+        [[ ! -d $N/locale/$locale ]] || continue
+        input=${locale%%.*}; input=${input%%@*}
+        [[ -f $R/usr/share/i18n/locales/$input && -f $R/usr/share/i18n/charmaps/UTF-8.gz && -x $R/usr/bin/localedef ]] || continue
+        stage=$(mktemp -d "$N/locale/.build.XXXXXX")
+        if (run_native /usr/bin/env "I18NPATH=$R/usr/share/i18n" /usr/bin/localedef --no-archive -i "$input" -f UTF-8 "$stage/$locale"); then
+            mv -T "$stage/$locale" "$N/locale/$locale"
+        else
+            printf 'Varování: Nepodařilo se vytvořit locale %s.\n' "$locale" >&2
+        fi
+        rm -rf "$stage"
+    done
+    if [[ -d $R/usr/lib/locale/C.utf8 && ! -e $N/locale/C.UTF-8 ]]; then
+        ln -s "$R/usr/lib/locale/C.utf8" "$N/locale/C.UTF-8"
+    fi
+}
+
+native_locale() {
+    local locale=${LANG:-C.UTF-8} normalized
+    normalized=${locale//UTF-8/utf8}
+    if [[ $locale == C || $locale == POSIX || ( $locale != */* && ( -d $N/locale/$locale || -d $N/locale/$normalized ) ) ]]; then
+        printf '%s\n' "$locale"
+    else
+        printf 'C.UTF-8\n'
+    fi
 }
 
 ready() {
@@ -81,7 +125,7 @@ ready() {
 source_path() {
     local path=$1 dir
     case $path in
-        /usr/*|/etc/*|/var/*|/opt/*|/lib/*|/bin/*|/sbin/*) path=$R$path ;;
+        /root|/root/*|/home|/home/*|/usr/*|/etc/*|/var/*|/opt/*|/lib/*|/bin/*|/sbin/*) path=$R$path ;;
         /*) ;;
         */*) path=$PWD/$path ;;
         *)
@@ -96,14 +140,17 @@ source_path() {
 
 patch_one() {
     local src dst hash old_rpath tmp
+    local requested_dst=${2:-}
     src=$(source_path "$1")
     [[ -f $src ]] || fail "Soubor neexistuje: $src"
     hash=$(printf '%s' "$src" | sha256sum); hash=${hash%% *}
-    dst=$N/bin/$(basename "$src")-${hash:0:16}
+    dst=${requested_dst:-$N/bin/$(basename "$src")-${hash:0:16}}
     old_rpath=$(patchelf --print-rpath "$src")
-    old_rpath=${old_rpath//\$\{ORIGIN\}/$(dirname "$src")}
-    old_rpath=${old_rpath//\$ORIGIN/$(dirname "$src")}
-    tmp=$(mktemp "$N/bin/.patch.XXXXXX")
+    if [[ -z $requested_dst ]]; then
+        old_rpath=${old_rpath//\$\{ORIGIN\}/$(dirname "$src")}
+        old_rpath=${old_rpath//\$ORIGIN/$(dirname "$src")}
+    fi
+    tmp=$(mktemp "$(dirname "$dst")/.patch.XXXXXX")
     cp "$src" "$tmp"
     chmod 755 "$tmp"
     # Separate calls, RPATH first: the opposite order corrupts some non-PIE ELFs.
@@ -118,20 +165,57 @@ patch_one() {
     printf '%s\n' "$dst"
 }
 
+mirror_app() {
+    local src name dst entry interp
+    src=$(source_path "$1")
+    [[ -d $src ]] || fail "Adresář neexistuje: $src"
+    name=$(basename "$src")
+    [[ $name != . && $name != .. && -n $name ]] || fail 'Neplatný název aplikace.'
+    dst=$N/apps/$name
+    mkdir -p "$dst"
+    while IFS= read -r -d '' entry; do
+        interp=
+        if [[ -f $entry && -x $entry ]]; then
+            interp=$(patchelf --print-interpreter "$entry" 2>/dev/null || true)
+        fi
+        case $interp in
+            /lib/ld-linux-aarch64.so.1|/lib64/ld-linux-x86-64.so.2)
+                patch_one "$entry" "$dst/$(basename "$entry")" >/dev/null
+                continue ;;
+        esac
+        ln -sfn "$entry" "$dst/$(basename "$entry")"
+    done < <(find "$src" -mindepth 1 -maxdepth 1 -print0)
+    if [[ -n ${2:-} ]]; then
+        [[ $2 != */* && -x $dst/$2 ]] || fail "Program aplikace nebyl nalezen: $2"
+        printf 'Spuštění: droiddesk-glibc-native run %q --no-sandbox --disable-dev-shm-usage --password-store=basic\n' "$dst/$2"
+    else
+        printf 'Aplikace je připravena v %s; spusťte droiddesk-glibc-native run CESTA_K_PROGRAMU --no-sandbox --disable-dev-shm-usage --password-store=basic\n' "$dst"
+    fi
+}
+
 need_patchelf() { command -v patchelf >/dev/null || fail 'Chybí patchelf. Spusťte: pkg install patchelf'; }
 
 run_native() {
     ready
     [[ $# -gt 0 ]] || fail 'Použití: droiddesk-glibc-native run PŘÍKAZ [ARGUMENTY]'
     local saved_preload=${LD_PRELOAD-} saved_library=${LD_LIBRARY_PATH-} saved_path=${PATH-}
-    local -a zone=()
-    [[ ! ${TZ+x} ]] || zone=("TZ=$TZ")
+    local timezone=${TZ:-} variable locale
+    local -a saved=("DD_SAVED_PREFIX=$PREFIX")
+    while IFS= read -r variable; do
+        saved+=("DD_SAVED_$variable=${!variable}")
+    done < <(compgen -e | while IFS= read -r variable; do
+        case $variable in TERMUX_*) printf '%s\n' "$variable" ;; esac
+    done)
+    if [[ -z $timezone ]]; then
+        timezone=$(/system/bin/getprop persist.sys.timezone 2>/dev/null || true)
+    fi
+    locale=$(native_locale)
     exec 63< "$R/etc/resolv.conf"
     # Debian env delegates the initial command to the hook, including PATH and shebangs.
     exec "$PREFIX/bin/env" -i \
-        "HOME=${HOME:-$R/root}" "TERM=${TERM:-xterm-256color}" "LANG=${LANG:-C.UTF-8}" \
-        'PATH=/usr/local/bin:/usr/bin:/bin' "LOCPATH=$R/usr/lib/locale" \
-        "TZDIR=$R/usr/share/zoneinfo" "${zone[@]}" \
+        "HOME=${HOME:-$R/root}" "TERM=${TERM:-xterm-256color}" "LANG=$locale" \
+        'PATH=/usr/local/bin:/usr/bin:/bin' "LOCPATH=$N/locale:$R/usr/lib/locale" \
+        "TZDIR=$R/usr/share/zoneinfo" "TZ=$timezone" "${saved[@]}" \
         "FONTCONFIG_SYSROOT=$R" 'FONTCONFIG_FILE=/etc/fonts/fonts.conf' \
         "SSL_CERT_FILE=$R/etc/ssl/certs/ca-certificates.crt" "GCONV_PATH=$R/usr/lib/aarch64-linux-gnu/gconv" \
         "DISPLAY=$T/.X11-unix/X0" "TMPDIR=$T" 'GLIBC_TUNABLES=glibc.pthread.rseq=0' \
@@ -144,22 +228,38 @@ run_native() {
 claude_native() {
     ready
     need_python
-    local candidate target
+    local candidate target home=${DD_CLAUDE_HOME:-$R/root}
+    if [[ ${1:-} == --home ]]; then
+        [[ $# -ge 2 ]] || fail 'Použití: droiddesk-glibc-native claude [--home ADRESÁŘ] [ARGUMENTY]'
+        home=$2; shift 2
+    fi
+    case $home in /root|/root/*|/home|/home/*) home=$R$home ;; esac
+    if [[ $home == "$R/root" ]]; then
+        printf 'Varování: Nativní Claude sdílí ~/.claude s relací Claude v prootu.\n' >&2
+    fi
+    # Bun does file access with its own system calls, past pathhook: the built-in Read, Grep,
+    # Glob and Edit tools only see real paths (Tab S10 FE). Start in the real path of the
+    # project directory, like claude-tmux does under proot; DD_CLAUDE_DIR overrides it.
+    local project=${DD_CLAUDE_DIR:-$R/root/projekty/Claude}
+    case $project in /root|/root/*|/home|/home/*) project=$R$project ;; esac
+    mkdir -p "$project" && cd "$project" || fail "Adresář projektu nejde otevřít: $project"
+    # The native auto-updater installed a second 281 MB copy into the config HOME.
+    local -a claude_env=(/usr/bin/env DISABLE_AUTOUPDATER=1)
+    # Installation lookup stays in the Debian home even with an isolated config HOME.
     candidate=$R/root/.local/bin/claude
     if [[ -e $candidate || -L $candidate ]]; then
         target=$(resolve "$candidate")
         if [[ -f $target && $(head -c 4 "$target") == $'\177ELF' ]]; then
-            need_patchelf
-            target=$(patch_one "$target")
-            HOME=$R/root run_native "$target" "$@"
+            # Bun single-file ELFs contain absolute references: never patchelf them.
+            HOME=$home run_native "${claude_env[@]}" "$target" "$@"
         elif [[ -f $target ]]; then
-            HOME=$R/root run_native /usr/bin/node "$target" "$@"
+            HOME=$home run_native "${claude_env[@]}" /usr/bin/node "$target" "$@"
         fi
     fi
     for candidate in "$R/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js" \
                      "$R/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js" \
                      "$R/root/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js"; do
-        if [[ -f $candidate ]]; then HOME=$R/root run_native /usr/bin/node "$candidate" "$@"; fi
+        if [[ -f $candidate ]]; then HOME=$home run_native "${claude_env[@]}" /usr/bin/node "$candidate" "$@"; fi
     done
     fail 'Claude Code nebyl v Debianu nalezen. Nejdříve jej nainstalujte pomocí aplikace.'
 }
@@ -184,9 +284,10 @@ selftest() {
 command=${1:-}; [[ $# == 0 ]] || shift
 case $command in
     setup) setup ;;
-    patch) ready; need_python; need_patchelf; [[ $# -gt 0 ]] || fail 'Použití: droiddesk-glibc-native patch PROGRAM...'; for binary in "$@"; do patch_one "$binary"; done ;;
+    patch) ready; need_python; need_patchelf; [[ $# -gt 0 ]] || fail 'Použití: droiddesk-glibc-native patch PROGRAM...'; for binary in "$@"; do if [[ -d $(source_path "$binary") ]]; then mirror_app "$binary"; else patch_one "$binary"; fi; done ;;
+    app) ready; need_python; need_patchelf; [[ $# == 2 ]] || fail 'Použití: droiddesk-glibc-native app ADRESÁŘ PROGRAM'; mirror_app "$@" ;;
     run) run_native "$@" ;;
     claude) claude_native "$@" ;;
     selftest) selftest ;;
-    *) fail 'Použití: droiddesk-glibc-native {setup|patch PROGRAM...|run PŘÍKAZ [ARGUMENTY]|claude [ARGUMENTY]|selftest}' ;;
+    *) fail 'Použití: droiddesk-glibc-native {setup|patch PROGRAM...|app ADRESÁŘ PROGRAM|run PŘÍKAZ [ARGUMENTY]|claude [ARGUMENTY]|selftest}' ;;
 esac
