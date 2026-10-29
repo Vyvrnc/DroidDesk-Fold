@@ -1,8 +1,8 @@
 # Debian (glibc) programs without proot
 
 Status: spike done on the Galaxy Tab S10 FE (night 2026-10-29/30, fold.89/90). Full notes on the
-tablet in `~/glibc-spike/FINDINGS.md`; this file is the design that came out of it. Nothing of it
-is in the app yet.
+tablet in `~/glibc-spike/FINDINGS.md`; this file is the design that came out of it. Step 1 now
+has an opt-in Termux-side launcher; device validation of this implementation is still required.
 
 ## Why
 
@@ -62,6 +62,47 @@ Blocked calls that matter: the set*uid/gid family except setresuid (apt drops to
 `accept` (accept4 works; servers using plain accept), SysV IPC (shm/sem/msg), POSIX mqueues,
 keyctl, io_uring, futex2, the mount API. So `apt`, `sudo`, and servers stay on proot; returning
 0 instead of ENOSYS for set*id is a possible later step (a design decision: it hides failures).
+
+## How to use (step 1)
+
+Build the shipped arm64 hook with `bash tools/glibc-native/build.sh` before building the app.
+The app installs the launcher and its assets at startup; it never runs setup automatically.
+From a **Termux-side terminal outside proot**, with Debian already installed:
+
+```sh
+droiddesk-glibc-native setup
+droiddesk-glibc-native selftest
+droiddesk-glibc-native run git --version
+droiddesk-glibc-native run /bin/sh -c 'python3 -c "import ssl"; git --version'
+droiddesk-glibc-native claude
+```
+
+This is opt-in: existing Debian and Claude launchers continue to use proot. On failure, use
+those launchers. Native children inherit the path hook, so a tool chain must start through
+this launcher from Termux; launching it under proot still traces its descendants. The hook
+maps Debian system paths into the rootfs and temporary paths into Termux tmp; HOME and shared
+Android paths stay unchanged. `claude` uses the existing Debian root installation and its
+configuration (`HOME` is the physical rootfs `root` directory).
+`getcwd` and `realpath` remove the rootfs prefix only for mapped system directories, preserving
+the physical HOME. Mapping covers interposable libc calls; direct syscalls, static programs,
+libc-internal calls and existing absolute symlinks escaping the rootfs are outside this hook.
+
+Run `setup` again after Debian upgrades. It hashes the source loader, libc, optional libuv
+and shipped helpers, and rebuilds patched copies only when they change. Unknown instruction
+patterns fail with an error before replacing the current copies. Nothing installs packages
+automatically: setup needs Termux `python3` (`pkg install python`).
+
+For a binary that re-executes `/proc/self/exe`, install Termux patchelf with `pkg install
+patchelf`, then run `droiddesk-glibc-native patch /usr/bin/PROGRAM`. It prints the path of a
+copy under `$PREFIX/opt/glibc-native/bin`; launch that path with `run`. RPATH is patched before
+the interpreter in separate calls. A DT_NEEDED entry keeps the hook loaded on re-exec without
+leaking LD_PRELOAD into Termux tools. Existing `$ORIGIN` entries point back to the source
+directory. Re-run `patch` after upgrading that program; `claude` refreshes its native binary
+copy on every launch. The npm Claude installation instead runs Debian node with `cli.js`.
+
+DNS uses inherited fd 63; programs that close it need separate validation. The clean native
+environment keeps Termux loader variables only in `DD_SAVED_*`, restoring them when an
+Android/Termux binary is executed. apt, sudo, and unsupported servers continue to need proot.
 
 ## Plan
 

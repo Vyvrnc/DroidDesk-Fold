@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# Opt-in Debian glibc launcher. Run this from Termux, outside proot.
+set -euo pipefail
+
+PREFIX=${PREFIX:-$(cd "$(dirname "$0")/.." && pwd)}
+R=$PREFIX/var/lib/proot-distro/containers/debian/rootfs
+N=$PREFIX/opt/glibc-native
+PLIB=$N/plib
+SHARE=$N/share
+T=${PREFIX%/usr}/tmp
+LIBPATH=$PLIB:$R/lib/aarch64-linux-gnu:$R/usr/lib/aarch64-linux-gnu:$N/lib
+fail() { printf 'Chyba: %s\n' "$*" >&2; exit 1; }
+need_python() { command -v python3 >/dev/null || fail 'Chybí Termux Python. Spusťte: pkg install python'; }
+
+# Resolve Debian absolute symlinks inside its root, without following them on Android.
+resolve() {
+    python3 - "$R" "$1" <<'PY'
+import os, sys
+root, path = sys.argv[1:]
+for _ in range(40):
+    parts = os.path.normpath(path).split('/')
+    current = '/'
+    for i, part in enumerate(parts):
+        if not part:
+            continue
+        current = os.path.join(current, part)
+        if os.path.islink(current):
+            target = os.readlink(current)
+            if target.startswith('/'):
+                target = root + target if current.startswith(root + '/') else target
+            else:
+                target = os.path.join(os.path.dirname(current), target)
+            path = os.path.join(target, *parts[i + 1:])
+            break
+    else:
+        print(current)
+        break
+else:
+    sys.exit('Příliš mnoho symbolických odkazů: ' + path)
+PY
+}
+
+setup() {
+    need_python
+    [[ -f $SHARE/pathhook.so ]] || fail 'Chybí pathhook.so. Sestavte jej pomocí tools/glibc-native/build.sh a znovu sestavte aplikaci.'
+    [[ -f $SHARE/patch-glibc.py ]] || fail 'Chybí patch-glibc.py v instalaci aplikace.'
+    local ld libc uv signature stage
+    ld=$(resolve "$R/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1")
+    libc=$(resolve "$R/usr/lib/aarch64-linux-gnu/libc.so.6")
+    uv=$(resolve "$R/usr/lib/aarch64-linux-gnu/libuv.so.1")
+    [[ -f $ld && -f $libc ]] || fail 'Chybí Debian glibc. Nejdříve nainstalujte Debian v aplikaci.'
+    mkdir -p "$PLIB" "$N/bin" "$N/lib"
+    signature=$({ sha256sum "$ld" "$libc" "$SHARE/patch-glibc.py" "$SHARE/pathhook.so"; [[ ! -f $uv ]] || sha256sum "$uv"; } | sha256sum)
+    if [[ -f $N/stamp && $(cat "$N/stamp") == "$signature" && -f $PLIB/ld.so && -f $PLIB/libc.so.6 && -f $N/lib/pathhook.so ]] && { [[ ! -f $uv ]] || [[ -f $PLIB/libuv.so.1 ]]; }; then
+        printf 'Nativní glibc je aktuální.\n'
+        return
+    fi
+    stage=$(mktemp -d "$N/.setup.XXXXXX")
+    # Publish only after every required pattern matched; leave the previous setup usable.
+    if ! python3 "$SHARE/patch-glibc.py" ld "$ld" "$stage/ld.so" ||
+       ! python3 "$SHARE/patch-glibc.py" libc "$libc" "$stage/libc.so.6" ||
+       { [[ -f $uv ]] && ! python3 "$SHARE/patch-glibc.py" libuv "$uv" "$stage/libuv.so.1"; }; then
+        rm -rf "$stage"
+        fail 'Úprava glibc selhala. V Debianu se změnily očekávané instrukce; instalace nebyla aktualizována.'
+    fi
+    cp "$SHARE/pathhook.so" "$stage/pathhook.so"
+    chmod 755 "$stage/pathhook.so"
+    mv -f "$stage/ld.so" "$stage/libc.so.6" "$PLIB/"
+    if [[ -f $stage/libuv.so.1 ]]; then mv -f "$stage/libuv.so.1" "$PLIB/"; else rm -f "$PLIB/libuv.so.1"; fi
+    mv -f "$stage/pathhook.so" "$N/lib/pathhook.so"
+    printf '%s\n' "$signature" > "$stage/stamp"
+    mv -f "$stage/stamp" "$N/stamp"
+    rmdir "$stage"
+    printf 'Nativní glibc je připravena.\n'
+}
+
+ready() {
+    [[ -f $N/stamp && -x $PLIB/ld.so && -f $N/lib/pathhook.so ]] || fail 'Nejdříve spusťte: droiddesk-glibc-native setup'
+}
+
+source_path() {
+    local path=$1 dir
+    case $path in
+        /usr/*|/etc/*|/var/*|/opt/*|/lib/*|/bin/*|/sbin/*) path=$R$path ;;
+        /*) ;;
+        */*) path=$PWD/$path ;;
+        *)
+            for dir in /usr/local/bin /usr/bin /bin; do
+                path=$(resolve "$R$dir/$1")
+                if [[ -f $path && -x $path ]]; then printf '%s\n' "$path"; return; fi
+            done
+            fail "Program nebyl nalezen v Debianu: $1" ;;
+    esac
+    resolve "$path"
+}
+
+patch_one() {
+    local src dst hash old_rpath tmp
+    src=$(source_path "$1")
+    [[ -f $src ]] || fail "Soubor neexistuje: $src"
+    hash=$(printf '%s' "$src" | sha256sum); hash=${hash%% *}
+    dst=$N/bin/$(basename "$src")-${hash:0:16}
+    old_rpath=$(patchelf --print-rpath "$src")
+    old_rpath=${old_rpath//\$\{ORIGIN\}/$(dirname "$src")}
+    old_rpath=${old_rpath//\$ORIGIN/$(dirname "$src")}
+    tmp=$(mktemp "$N/bin/.patch.XXXXXX")
+    cp "$src" "$tmp"
+    chmod 755 "$tmp"
+    # Separate calls, RPATH first: the opposite order corrupts some non-PIE ELFs.
+    if ! patchelf --force-rpath --set-rpath "$LIBPATH${old_rpath:+:$old_rpath}" "$tmp" ||
+       ! patchelf --set-interpreter "$PLIB/ld.so" "$tmp" ||
+       ! patchelf --add-needed "$N/lib/pathhook.so" "$tmp"; then
+        rm -f "$tmp"
+        fail "Úprava programu selhala: $src"
+    fi
+    # DT_NEEDED preserves the hook on /proc/self/exe re-exec without LD_PRELOAD.
+    mv -f "$tmp" "$dst"
+    printf '%s\n' "$dst"
+}
+
+need_patchelf() { command -v patchelf >/dev/null || fail 'Chybí patchelf. Spusťte: pkg install patchelf'; }
+
+run_native() {
+    ready
+    [[ $# -gt 0 ]] || fail 'Použití: droiddesk-glibc-native run PŘÍKAZ [ARGUMENTY]'
+    local saved_preload=${LD_PRELOAD-} saved_library=${LD_LIBRARY_PATH-} saved_path=${PATH-}
+    local -a zone=()
+    [[ ! ${TZ+x} ]] || zone=("TZ=$TZ")
+    exec 63< "$R/etc/resolv.conf"
+    # Debian env delegates the initial command to the hook, including PATH and shebangs.
+    exec "$PREFIX/bin/env" -i \
+        "HOME=${HOME:-$R/root}" "TERM=${TERM:-xterm-256color}" "LANG=${LANG:-C.UTF-8}" \
+        'PATH=/usr/local/bin:/usr/bin:/bin' "LOCPATH=$R/usr/lib/locale" \
+        "TZDIR=$R/usr/share/zoneinfo" "${zone[@]}" \
+        "FONTCONFIG_SYSROOT=$R" 'FONTCONFIG_FILE=/etc/fonts/fonts.conf' \
+        "SSL_CERT_FILE=$R/etc/ssl/certs/ca-certificates.crt" "GCONV_PATH=$R/usr/lib/aarch64-linux-gnu/gconv" \
+        "DISPLAY=$T/.X11-unix/X0" "TMPDIR=$T" 'GLIBC_TUNABLES=glibc.pthread.rseq=0' \
+        "DD_ROOTFS=$R" "DD_TMP=$T" "DD_PLIB=$PLIB" "DD_LIBPATH=$LIBPATH" \
+        "DD_SAVED_LD_PRELOAD=$saved_preload" "DD_SAVED_LD_LIBRARY_PATH=$saved_library" "DD_SAVED_PATH=$saved_path" \
+        "$PLIB/ld.so" --library-path "$LIBPATH" --preload "$N/lib/pathhook.so" \
+        "$R/usr/bin/env" -- "$@"
+}
+
+claude_native() {
+    ready
+    need_python
+    local candidate target
+    candidate=$R/root/.local/bin/claude
+    if [[ -e $candidate || -L $candidate ]]; then
+        target=$(resolve "$candidate")
+        if [[ -f $target && $(head -c 4 "$target") == $'\177ELF' ]]; then
+            need_patchelf
+            target=$(patch_one "$target")
+            HOME=$R/root run_native "$target" "$@"
+        elif [[ -f $target ]]; then
+            HOME=$R/root run_native /usr/bin/node "$target" "$@"
+        fi
+    fi
+    for candidate in "$R/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js" \
+                     "$R/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js" \
+                     "$R/root/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js"; do
+        if [[ -f $candidate ]]; then HOME=$R/root run_native /usr/bin/node "$candidate" "$@"; fi
+    done
+    fail 'Claude Code nebyl v Debianu nalezen. Nejdříve jej nainstalujte pomocí aplikace.'
+}
+
+selftest() {
+    ready
+    local failed=0 name
+    for name in true shell python git node; do
+        local -a args
+        case $name in
+            true) args=(/usr/bin/true) ;;
+            shell) args=(/bin/sh -c 'test -f /etc/debian_version && /usr/bin/true && git --version') ;;
+            python) args=(/usr/bin/python3 -c 'import ssl, locale; print(ssl.OPENSSL_VERSION); print(locale.setlocale(locale.LC_ALL, ""))') ;;
+            git) args=(/usr/bin/git --version) ;;
+            node) [[ -x $R/usr/bin/node ]] || { printf 'SKIP node (není nainstalován)\n'; continue; }; args=(/usr/bin/node -e 'console.log(process.version)') ;;
+        esac
+        if (run_native "${args[@]}"); then printf 'OK %s\n' "$name"; else printf 'FAIL %s\n' "$name"; failed=1; fi
+    done
+    return "$failed"
+}
+
+command=${1:-}; [[ $# == 0 ]] || shift
+case $command in
+    setup) setup ;;
+    patch) ready; need_python; need_patchelf; [[ $# -gt 0 ]] || fail 'Použití: droiddesk-glibc-native patch PROGRAM...'; for binary in "$@"; do patch_one "$binary"; done ;;
+    run) run_native "$@" ;;
+    claude) claude_native "$@" ;;
+    selftest) selftest ;;
+    *) fail 'Použití: droiddesk-glibc-native {setup|patch PROGRAM...|run PŘÍKAZ [ARGUMENTY]|claude [ARGUMENTY]|selftest}' ;;
+esac

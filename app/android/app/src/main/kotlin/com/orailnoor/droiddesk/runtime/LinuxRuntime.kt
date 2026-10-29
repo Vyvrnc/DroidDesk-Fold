@@ -1487,6 +1487,17 @@ class LinuxRuntime(private val context: Context) {
                 command.writeText("#!${File(binDir, "bash").absolutePath}\n" + script.substringAfter('\n'))
                 command.setExecutable(true, false)
             }
+            // Opt-in Debian glibc tools; setup is always an explicit user action.
+            File(binDir, "droiddesk-glibc-native").let { command ->
+                val script = context.assets.open("droiddesk/droiddesk-glibc-native").bufferedReader().use { it.readText() }
+                command.writeText("#!${File(binDir, "bash").absolutePath}\n" + script.substringAfter('\n'))
+                command.setExecutable(true, false)
+            }
+            val glibcShare = File(prefixDir, "opt/glibc-native/share").apply { mkdirs() }
+            copyAssetAtomically("droiddesk/glibc-native/patch-glibc.py", File(glibcShare, "patch-glibc.py"))
+            runCatching {
+                copyAssetAtomically("droiddesk/glibc-native/pathhook.so", File(glibcShare, "pathhook.so"))
+            }.onFailure { Log.w(TAG, "Optional glibc-native hook asset is unavailable; run tools/glibc-native/build.sh", it) }
             // The same camera for Termux Chromium (Meet's background blur works there, not in
             // Firefox).
             File(binDir, "chromium-cam").let { launcher ->
