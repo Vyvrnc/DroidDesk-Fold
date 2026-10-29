@@ -426,3 +426,23 @@ RPATH/RUNPATH včetně skutečné závislosti knihovny, obnovu cache a warm star
 XKB access varianty a exec pod `/root` i `/home`, vedle předchozích GUI, D-Bus a NSS testů.
 Android seccomp, MIT-SHM fallback a autentizaci nativního klienta proti Debian Secret
 Service je stále potřeba ověřit na zařízení.
+
+## Status after the night run (Tab S10 FE, fold.98, 2026-10-30)
+
+Native (TracerPid 0, through the patched loader): git, node, python, codex, the Bambu tools,
+Brave (all processes), mpv, WordCraft, SolidCraft, FuCad, OrcaSlicer (software GL),
+tmux and Claude Code in claude-tmux. Under proot by design: apt, dpkg, sudo, wine/Hangover/
+box64/FEX. Falling back to proot automatically: Claude Desktop (Electron, SIGTRAP right after
+it resolves its own executable, cause open), zutty (its 9x18 font is missing in Debian, also
+under proot).
+
+Fixed during the night, each found on the device: setid and the whole seccomp blocklist
+(inline sites and the generic syscall()), accept through accept4, NSS from the rootfs, a
+login shell for the app user, AF_UNIX socket paths, absolute RUNPATH directories, eaccess,
+/root and /home, nftw, hard links as symlinks, the launcher's hot path (0.18-0.21 s for
+`debian-run true` against 0.45 s under proot), the Debian D-Bus for native apps, the claude
+history link.
+
+Open: Remote Control does not reconnect when Claude Code runs natively (needs a second test
+instance on Matěj's account, waiting for his OK), so claude-tmux on the tablet still runs
+with DD_NATIVE=0; Claude Desktop natively.
