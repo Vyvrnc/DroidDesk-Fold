@@ -13,15 +13,20 @@ xfconf-query -c xfwm4 -p /general/theme -n -t string -s Fluent-Dark-xxhdpi
 xfconf-query -c xfce4-panel -p /panels -n -t int -s 2 -a
 xfconf-query -c xfce4-panel -p /panels/panel-2/size -n -t uint -s 65
 xfconf-query -c xfce4-panel -p /panels/panel-2/icon-size -n -t uint -s 55
+xfconf-query -c xfce4-panel -p /plugins/plugin-27 -n -t string -s systray
+xfconf-query -c xfce4-panel -p /plugins/plugin-27/icon-size -n -t int -s 48
+xfconf-query -c xfce4-panel -p /plugins/plugin-26 -n -t string -s genmon
 echo "== wide (first run, nothing changes)"; bash $S wide
 check xsettings /Gdk/WindowScalingFactor 2
 echo "== desktop (defaults)"; bash $S desktop
 check xsettings /Gdk/WindowScalingFactor 1; check xsettings /Xft/DPI 96; check xsettings /Gtk/CursorThemeSize 24
 check xfwm4 /general/theme Fluent-Dark; check xfce4-panel /panels/panel-2/size 40; check xfce4-panel /panels/panel-2/icon-size 28
+check xfce4-panel /plugins/plugin-27/icon-size 24
 echo "== user tweaks the monitor"; xfconf-query -c xfce4-panel -p /panels/panel-2/size -s 36
 echo "== back to wide (phone values)"; bash $S wide
 check xsettings /Gdk/WindowScalingFactor 2; check xsettings /Xft/DPI 100; check xsettings /Gtk/CursorThemeSize 60
 check xfwm4 /general/theme Fluent-Dark-xxhdpi; check xfce4-panel /panels/panel-2/size 65; check xfce4-panel /panels/panel-2/icon-size 55
+check xfce4-panel /plugins/plugin-27/icon-size 48
 echo "== narrow (no profile: takes wide)"; bash $S narrow
 check xfce4-panel /panels/panel-2/size 65
 echo "== desktop again (keeps the tweak)"; bash $S desktop

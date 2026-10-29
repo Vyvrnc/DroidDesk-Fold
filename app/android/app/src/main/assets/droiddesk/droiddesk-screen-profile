@@ -56,6 +56,15 @@ panels() {
     xfconf-query -c xfce4-panel -p /panels 2>/dev/null | grep -E '^[0-9]+$'
 }
 
+# Notification area plugins: their icon size is per screen too (48 on the Fold's panel at
+# scaling 2, far too big on a monitor at scaling 1).
+systrays() {
+    local p
+    for p in $(xfconf-query -c xfce4-panel -l 2>/dev/null | grep -E '^/plugins/plugin-[0-9]+$'); do
+        [ "$(xfconf-query -c xfce4-panel -p "$p" 2>/dev/null)" = systray ] && echo "$p"
+    done
+}
+
 save() {
     local out=$dir/$1.conf tmp
     tmp=$(mktemp "$dir/.save.XXXXXX") || return
@@ -70,6 +79,10 @@ save() {
                 value=$(xfconf-query -c xfce4-panel -p "/panels/panel-$id/$prop" 2>/dev/null) &&
                     echo "xfce4-panel /panels/panel-$id/$prop uint $value"
             done
+        done
+        for p in $(systrays); do
+            value=$(xfconf-query -c xfce4-panel -p "$p/icon-size" 2>/dev/null) &&
+                echo "xfce4-panel $p/icon-size int $value"
         done
     } > "$tmp"
     mv -f "$tmp" "$out"
@@ -110,6 +123,9 @@ desktop_defaults() {
     for id in $(panels); do
         xfconf-query -c xfce4-panel -p "/panels/panel-$id/size" -n -t uint -s 40
         xfconf-query -c xfce4-panel -p "/panels/panel-$id/icon-size" -n -t uint -s 28
+    done
+    for p in $(systrays); do
+        xfconf-query -c xfce4-panel -p "$p/icon-size" -n -t int -s 24
     done
 }
 
