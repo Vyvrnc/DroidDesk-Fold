@@ -165,3 +165,30 @@ loader library mirrors, locale selection, original app filenames and adjacent IC
 and restored Termux variables in bionic-marker children. Run `bash -n` on the launcher and
 `test-container.sh`, then `build.sh` and `test.sh`. Android seccomp, actual locale generation,
 Bun Claude and Chromium windows still require device checks.
+
+## Night run 2026-10-29/30: native first, proot as the fallback (step 2)
+
+Goal (Matěj): run as many Debian programs as possible natively; proot only where native
+cannot work or fails to start.
+
+Almost every Debian program is started through one launcher, `debian-run` (menu entries from
+droiddesk-menu-sync, electron-run, debian-tmux and so claude-tmux/codex-tmux, the USB tools).
+`claude-debian` and `codex-debian` call proot-distro directly. So:
+
+A. pathhook: map AF_UNIX socket paths in connect/bind/sendto (`/tmp/.X11-unix`, the D-Bus
+   session socket `/tmp/dbus-session`, `/tmp/.virgl_test` for virgl, tmux sockets), so X,
+   D-Bus, GPU and tmux work natively without per-program variables.
+B. `droiddesk-glibc-native run`: pass through what a desktop program needs (DISPLAY,
+   DBUS_SESSION_BUS_ADDRESS, the GPU variables the Debian GUI profile sets, LANG/LC_*,
+   TERM, COLORTERM, user variables listed in DD_NATIVE_PASS).
+C. `debian-run` native first: when native glibc is ready and not switched off
+   (`droiddesk-glibc-native off`, DD_NATIVE=0), and the command is not one that needs proot
+   (apt, apt-get, dpkg, sudo, su, passwd, useradd, chroot, mount, systemctl, service,
+   proot-distro maintenance), run it natively; otherwise, or when the native preflight fails
+   (missing setup, command not found in the rootfs), proot. Every decision goes to
+   `$TMPDIR/droiddesk-native.log`. claude-debian and codex-debian the same way.
+D. Setup automatically: after Debian is ready the app runs `droiddesk-glibc-native setup`
+   in the background (0.2 s when current) unless switched off.
+E. Tests per app class on the Tab S10 FE: Claude Code (claude-tmux), Codex, git/node/python,
+   an Electron app, Brave from the menu, GTK apps from Debian, GPU (virgl) programs, the USB
+   tools; native vs proot, what falls back.
