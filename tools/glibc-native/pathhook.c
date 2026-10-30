@@ -629,6 +629,24 @@ long syscall(long nr, ...) {
     long d = va_arg(ap, long), e = va_arg(ap, long), f = va_arg(ap, long);
     va_end(ap);
     if (seccomp_blocked(nr)) { errno = ENOSYS; return -1; }
+    /* libuv calls statx through syscall(): Node's fs.stat/lstat('/usr') failed with ENOENT
+     * and npm's arborist with it (Tab S10 FE). Map the path of the path-taking calls. */
+    char path[PATH_MAX];
+    const char *p = (const char *)b, *mp = NULL;
+    switch (nr) {
+    case SYS_statx: mp = mapped(p, path, c & AT_SYMLINK_NOFOLLOW); break;
+#ifdef SYS_newfstatat
+    case SYS_newfstatat: mp = mapped(p, path, d & AT_SYMLINK_NOFOLLOW); break;
+#endif
+    case SYS_faccessat: mp = mapped(p, path, 0); break;
+#ifdef SYS_faccessat2
+    case SYS_faccessat2: mp = mapped(p, path, d & AT_SYMLINK_NOFOLLOW); break;
+#endif
+    case SYS_readlinkat: mp = mapped(p, path, 1); break;
+    case SYS_openat: mp = mapped(p, path, (c & O_NOFOLLOW) != 0); break;
+    default: p = NULL; break;
+    }
+    if (p) { if (!mp) return -1; b = (long)mp; }
     REAL(syscall, long, long, ...);
     return real_syscall(nr, a, b, c, d, e, f);
 }

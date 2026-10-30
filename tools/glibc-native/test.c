@@ -370,6 +370,12 @@ int main(int argc, char **argv) {
     check(!fstatat(AT_FDCWD, "/etc/absolute-file", &s, AT_SYMLINK_NOFOLLOW) && S_ISLNK(s.st_mode), "fstatat nofollow");
     struct statx sx;
     check(!statx(AT_FDCWD, "/etc/absolute-file", AT_SYMLINK_NOFOLLOW, STATX_TYPE, &sx) && S_ISLNK(sx.stx_mode), "statx nofollow");
+    /* libuv (Node) calls statx through the generic syscall(). */
+    check(!syscall(SYS_statx, AT_FDCWD, "/etc/native-test", 0, STATX_SIZE, &sx) && sx.stx_size == 7, "syscall statx");
+    check(!syscall(SYS_statx, AT_FDCWD, "/etc/absolute-file", AT_SYMLINK_NOFOLLOW, STATX_TYPE, &sx) && S_ISLNK(sx.stx_mode), "syscall statx nofollow");
+    check(!syscall(SYS_faccessat, AT_FDCWD, "/etc/native-test", R_OK), "syscall faccessat");
+    int sfd = (int)syscall(SYS_openat, AT_FDCWD, "/etc/native-test", O_RDONLY | O_CLOEXEC);
+    check(sfd >= 0, "syscall openat"); if (sfd >= 0) close(sfd);
     char target[PATH_MAX];
     ssize_t size = readlink("/etc/absolute-file", target, sizeof(target) - 1);
     check(size > 0, "readlink absolute link"); target[size] = 0;
