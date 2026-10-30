@@ -1,8 +1,10 @@
 // Android-like seccomp: kcmp through the generic syscall() kills the process, hard links fail
 // with EPERM. With pathhook preloaded, syscall(kcmp) must return ENOSYS and link() must fall
-// back to a symlink. Argument: a writable directory. Prints "seccomp2 ok" on success.
+// back to a copy that survives unlinking the source (npm's cacache), refuse an existing name
+// and copy a symlink as a symlink. Argument: a writable directory. Prints "seccomp2 ok".
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 #include <stddef.h>
@@ -44,7 +46,20 @@ int main(int argc, char **argv) {
     unlink(dst);
     if (link(src, dst)) { perror("link"); return 1; }
     struct stat st;
-    if (lstat(dst, &st) || !S_ISLNK(st.st_mode)) { fprintf(stderr, "link did not become a symlink\n"); return 1; }
+    if (lstat(dst, &st) || !S_ISREG(st.st_mode)) { fprintf(stderr, "link did not become a file\n"); return 1; }
+    if (unlink(src)) { perror("unlink"); return 1; }
+    char buf[8] = {0};
+    f = fopen(dst, "r");
+    if (!f || !fgets(buf, sizeof buf, f) || strcmp(buf, "x")) { fprintf(stderr, "copy lost its content\n"); return 1; }
+    fclose(f);
+    if (link(dst, dst) != -1 || errno != EEXIST) { fprintf(stderr, "existing name: errno=%d\n", errno); return 1; }
+    char sym[512], sym2[512], target[64];
+    snprintf(sym, sizeof sym, "%s/link-sym", argv[1]);
+    snprintf(sym2, sizeof sym2, "%s/link-sym2", argv[1]);
+    unlink(sym); unlink(sym2);
+    if (symlink("some-target", sym) || linkat(AT_FDCWD, sym, AT_FDCWD, sym2, 0)) { perror("symlink link"); return 1; }
+    ssize_t n = readlink(sym2, target, sizeof target - 1);
+    if (n < 0 || (target[n] = 0, strcmp(target, "some-target"))) { fprintf(stderr, "symlink was not copied\n"); return 1; }
     puts("seccomp2 ok");
     return 0;
 }

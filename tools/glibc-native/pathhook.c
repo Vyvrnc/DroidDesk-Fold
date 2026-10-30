@@ -506,33 +506,76 @@ int symlinkat(const char *a, int d, const char *b) {
     REAL(symlinkat, int, const char *, int, const char *); char second[PATH_MAX];
     return real_symlinkat(map(a, 1), d, mapbuf(b, second, 1));
 }
-/* Android forbids hard links for apps (EPERM; proot uses --link2symlink): fall back to a
- * symlink to the source's absolute path, like proot. WebKit's cache in OrcaSlicer needed it
- * (Tab S10 FE). */
-static int link_as_symlink(int olddir, const char *old, int newdir, const char *new) {
-    char abs[PATH_MAX];
-    if (old[0] == '/') {
-        if (strlen(old) >= sizeof abs) { errno = ENAMETOOLONG; return -1; }
-        strcpy(abs, old);
-    } else {
-        char dir[PATH_MAX], fdpath[64];
-        if (olddir == AT_FDCWD) { if (!getcwd(dir, sizeof dir)) return -1; }
-        else {
-            snprintf(fdpath, sizeof fdpath, "/proc/self/fd/%d", olddir);
-            ssize_t n = readlink(fdpath, dir, sizeof dir - 1);
-            if (n < 0) return -1;
-            dir[n] = 0;
-        }
-        if (snprintf(abs, sizeof abs, "%s/%s", dir, old) >= (int)sizeof abs) { errno = ENAMETOOLONG; return -1; }
+/* Android forbids hard links for apps (EPERM). A symlink, like proot without its link2symlink
+ * bookkeeping, broke "link, then unlink the source" (npm's cacache, git objects): the
+ * remaining name dangled (Tab S10 FE, fold.101). Publish a copy instead, atomically and only
+ * when the name is free, as link() would. WebKit's cache in OrcaSlicer needs a fallback too.
+ * Paths arrive mapped, so raw system calls keep them from being mapped twice. */
+static int publish_copy(int olddir, const char *old, int newdir, const char *new, int follow, int link_errno) {
+    static unsigned counter;
+    struct stat existing, source;
+    /* An existing name fails before any copying, as link() does (git and npm expect EEXIST). */
+    if (!fstatat(newdir, new, &existing, AT_SYMLINK_NOFOLLOW)) { errno = EEXIST; return -1; }
+    if (errno != ENOENT) return -1;
+    if (fstatat(olddir, old, &source, follow ? 0 : AT_SYMLINK_NOFOLLOW)) return -1;
+    /* A short temporary name in the destination directory: suffixing a long name could
+     * exceed NAME_MAX. */
+    char tmp[PATH_MAX];
+    const char *slash = strrchr(new, '/');
+    int dirlen = slash ? (int)(slash - new + 1) : 0;
+    if (snprintf(tmp, sizeof tmp, "%.*s.ddlink-%x-%x", dirlen, new, (unsigned)getpid(),
+                 __atomic_add_fetch(&counter, 1, __ATOMIC_RELAXED)) >= (int)sizeof tmp) {
+        errno = ENAMETOOLONG; return -1;
     }
-    REAL(symlinkat, int, const char *, int, const char *);
-    return real_symlinkat(abs, newdir, new);
+    int src = (int)syscall(SYS_openat, olddir, old, O_RDONLY | O_CLOEXEC | O_NONBLOCK | (follow ? 0 : O_NOFOLLOW));
+    if (src < 0) {
+        if (errno != ELOOP || follow) return -1;
+        /* link() without AT_SYMLINK_FOLLOW links the symlink itself. */
+        char target[PATH_MAX];
+        ssize_t n = (ssize_t)syscall(SYS_readlinkat, olddir, old, target, sizeof target - 1);
+        if (n < 0) return -1;
+        target[n] = 0;
+        if (syscall(SYS_symlinkat, target, newdir, tmp) < 0) return -1;
+    } else {
+        struct stat st;
+        int e = fstat(src, &st) ? errno : S_ISREG(st.st_mode) ? 0 : EPERM;
+        if (e) { close(src); errno = e; return -1; }
+        int dst = (int)syscall(SYS_openat, newdir, tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (dst < 0) { e = errno; close(src); errno = e; return -1; }
+        char buf[65536];
+        ssize_t n = 0;
+        int ok = 1;
+        while (ok && (n = read(src, buf, sizeof buf)) != 0) {
+            if (n < 0) { if (errno == EINTR) continue; ok = 0; break; }
+            for (ssize_t done = 0; done < n;) {
+                ssize_t w = write(dst, buf + done, (size_t)(n - done));
+                if (w < 0) { if (errno == EINTR) continue; ok = 0; break; }
+                done += w;
+            }
+        }
+        struct timespec times[2] = {st.st_atim, st.st_mtim};
+        if (ok && (fchmod(dst, st.st_mode & 07777) || futimens(dst, times))) ok = 0;
+        e = errno;
+        close(src);
+        if (close(dst)) { if (ok) e = errno; ok = 0; }
+        if (!ok) { syscall(SYS_unlinkat, newdir, tmp, 0); errno = e; return -1; }
+    }
+    /* A hard link never crosses file systems; neither does its copy. */
+    struct stat copy;
+    long rc = fstatat(newdir, tmp, &copy, AT_SYMLINK_NOFOLLOW);
+    if (!rc && copy.st_dev != source.st_dev) { errno = EXDEV; rc = -1; }
+    /* Without RENAME_NOREPLACE a plain rename could replace a concurrent publisher's file:
+     * report the original link error instead. */
+    if (!rc) rc = syscall(SYS_renameat2, newdir, tmp, newdir, new, 1 /* RENAME_NOREPLACE */);
+    if (rc < 0 && (errno == EINVAL || errno == ENOSYS)) errno = link_errno;
+    if (rc < 0) { int e = errno; syscall(SYS_unlinkat, newdir, tmp, 0); errno = e; return -1; }
+    return 0;
 }
 int link(const char *a, const char *b) {
     REAL(link, int, const char *, const char *); char second[PATH_MAX];
     const char *ma = map(a, 1), *mb = mapbuf(b, second, 1);
     int rc = real_link(ma, mb);
-    if (rc < 0 && (errno == EPERM || errno == EACCES)) rc = link_as_symlink(AT_FDCWD, ma, AT_FDCWD, mb);
+    if (rc < 0 && (errno == EPERM || errno == EACCES)) rc = publish_copy(AT_FDCWD, ma, AT_FDCWD, mb, 0, errno);
     return rc;
 }
 int linkat(int a, const char *p, int b, const char *q, int f) {
@@ -540,7 +583,7 @@ int linkat(int a, const char *p, int b, const char *q, int f) {
     const char *mp = map(p, !(f & AT_SYMLINK_FOLLOW)), *mq = mapbuf(q, second, 1);
     int rc = real_linkat(a, mp, b, mq, f);
     if (rc < 0 && (errno == EPERM || errno == EACCES) && !(f & AT_EMPTY_PATH))
-        rc = link_as_symlink(a, mp, b, mq);
+        rc = publish_copy(a, mp, b, mq, f & AT_SYMLINK_FOLLOW, errno);
     return rc;
 }
 

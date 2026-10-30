@@ -73,7 +73,7 @@ gcc -O2 -Wall -Wextra -Werror -o "$work/acceptseccomp" /repo/tools/glibc-native/
 [[ $(LD_PRELOAD="$work/hook.so" "$work/acceptseccomp") == "accept ok" ]]
 if "$work/acceptseccomp" >/dev/null 2>&1; then echo "accept was not blocked without the hook" >&2; exit 1; fi
 echo "accept via accept4 under seccomp checks OK"
-# syscall(kcmp) killed and hard links refused, as on Android: ENOSYS and a symlink instead.
+# syscall(kcmp) killed and hard links refused, as on Android: ENOSYS and a published copy instead.
 gcc -O2 -Wall -Wextra -Werror -o "$work/seccomp2" /repo/tools/glibc-native/seccomp2.c
 mkdir -p "$work/linktest"
 [[ $(LD_PRELOAD="$work/hook.so" "$work/seccomp2" "$work/linktest") == "seccomp2 ok" ]]
