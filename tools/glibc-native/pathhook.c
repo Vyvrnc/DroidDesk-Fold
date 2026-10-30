@@ -176,11 +176,29 @@ static int system_path(const char *p) {
     for (int i = 0; dirs[i]; ++i) if (pre(p, dirs[i])) return 1;
     return 0;
 }
+/* "/", "/.", "//", "/..": the root itself. */
+static int root_only(const char *p) {
+    for (const char *s = p; *s;) {
+        while (*s == '/') ++s;
+        if (!*s) break;
+        size_t n = strcspn(s, "/");
+        if (!(n == 1 && s[0] == '.') && !(n == 2 && s[0] == '.' && s[1] == '.')) return 0;
+        s += n;
+    }
+    return 1;
+}
 /* Caller-owned stack buffers are private to each thread and nested invocation. */
 static const char *mapped(const char *p, char b[PATH_MAX], int nofollow) {
     if (!p || p[0] != '/') return p;
     const char *root = getenv("DD_ROOTFS"), *tmp = getenv("DD_TMP");
     if (!root || (tmp && pre(p, tmp))) return p;
+    /* The root itself is Debian's: ls / and find / listed Android's root, so native Claude's
+     * find / found nothing in Debian, and cd / broke relative paths. Paths below / are mapped
+     * as before, so /proc, /dev and /storage stay Android's. */
+    if (root_only(p)) {
+        if (snprintf(b, PATH_MAX, "%s", root) >= PATH_MAX) goto toolong;
+        return b;
+    }
     if (tmp && (pre(p, "/tmp") || pre(p, "/dev/shm"))) {
         if (snprintf(b, PATH_MAX, "%s%s", tmp, p + (p[1] == 't' ? 4 : 8)) >= PATH_MAX)
             goto toolong;
@@ -249,6 +267,7 @@ static char *unmap(char *p) {
         size_t n = strlen(root);
         /* Invert only mappings we own; physical HOME (R/root) stays physical. */
         if (system_path(p + n)) memmove(p, p + n, strlen(p + n) + 1);
+        else if (!p[n] || root_only(p + n)) strcpy(p, "/");
     }
     return p;
 }
@@ -501,7 +520,42 @@ int scandir64(const char *p, struct dirent64 ***l, int (*s)(const struct dirent6
     REAL(scandir64, int, const char *, struct dirent64 ***, int (*)(const struct dirent64 *), int (*)(const struct dirent64 **, const struct dirent64 **)); return real_scandir64(map(p, 0), l, s, c); }
 void *dlopen(const char *p, int f) { REAL(dlopen, void *, const char *, int); return real_dlopen(p ? map(p, 0) : NULL, f); }
 
-int chdir(const char *p) { REAL(chdir, int, const char *); return real_chdir(map(p, 0)); }
+/* Relative ".." inside the rootfs must not climb above Debian's root into the physical parent
+ * of the rootfs; clamp it lexically there, as the resolver does for absolute paths. */
+static int clamp_relative(const char *p, char out[PATH_MAX]) {
+    const char *root = getenv("DD_ROOTFS");
+    if (!root || !p || p[0] == '/') return 0;
+    int dots = 0;
+    for (const char *s = p; *s;) {
+        size_t n = strcspn(s, "/");
+        if (n == 2 && s[0] == '.' && s[1] == '.') dots = 1;
+        s += n; while (*s == '/') ++s;
+    }
+    if (!dots || raw_syscall(SYS_getcwd, out, PATH_MAX) <= 0 || !pre(out, root)) return 0;
+    size_t floor = strlen(root), len = strlen(out);
+    int escaped = 0;
+    for (const char *s = p; *s;) {
+        size_t n = strcspn(s, "/");
+        if (n == 2 && s[0] == '.' && s[1] == '.') {
+            if (len <= floor) escaped = 1;
+            while (len > floor && out[len - 1] != '/') --len;
+            if (len > floor) --len;
+            out[len] = 0;
+        } else if (n && !(n == 1 && s[0] == '.')) {
+            if (len + n + 2 >= PATH_MAX) return 0;
+            out[len++] = '/'; memcpy(out + len, s, n); len += n; out[len] = 0;
+        }
+        s += n; while (*s == '/') ++s;
+    }
+    /* Paths that stay inside keep the kernel's semantics (symlinks before ".."). */
+    return escaped;
+}
+int chdir(const char *p) {
+    REAL(chdir, int, const char *);
+    char clamped[PATH_MAX];
+    if (clamp_relative(p, clamped)) return real_chdir(clamped);
+    return real_chdir(map(p, 0));
+}
 char *getcwd(char *b, size_t n) {
     REAL(getcwd, char *, char *, size_t);
     /* Obtain the physical path before applying the caller's logical size limit. */

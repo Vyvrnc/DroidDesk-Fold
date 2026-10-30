@@ -8,6 +8,7 @@ root=$work/rootfs
 mkdir -p "$root"/{etc,var,usr/bin,root,home/test,usr/share/X11/xkb,opt/search/probe} "$work"/{tmp,plib} /system/bin
 ln -s usr/bin "$root/bin"
 printf 'mapped\n' > "$root/etc/native-test"
+touch "$root/dd-root-marker"
 printf 'root fixture\n' > "$root/root/x"
 printf 'home fixture\n' > "$root/home/test/x"
 ln -s /missing-xkb-target "$root/usr/share/X11/xkb/broken"

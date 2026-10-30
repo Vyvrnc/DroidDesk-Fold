@@ -379,6 +379,21 @@ int main(int argc, char **argv) {
     check(!fstatat(AT_FDCWD, "/etc/absolute-file", &s, AT_SYMLINK_NOFOLLOW) && S_ISLNK(s.st_mode), "fstatat nofollow");
     struct statx sx;
     check(!statx(AT_FDCWD, "/etc/absolute-file", AT_SYMLINK_NOFOLLOW, STATX_TYPE, &sx) && S_ISLNK(sx.stx_mode), "statx nofollow");
+    /* The root itself is Debian's: ls /, find /, cd / with relative paths, no climbing out. */
+    DIR *rootdir = opendir("/");
+    int marker = 0;
+    for (struct dirent *de; rootdir && (de = readdir(rootdir));) marker |= !strcmp(de->d_name, "dd-root-marker");
+    if (rootdir) closedir(rootdir);
+    check(marker, "opendir / lists the rootfs");
+    int startdir = open(".", O_RDONLY | O_DIRECTORY);
+    char here[PATH_MAX];
+    check(!chdir("/") && !access("dd-root-marker", F_OK), "cd / then relative path");
+    check(getcwd(here, sizeof here) && !strcmp(here, "/"), "getcwd at the root");
+    check(!chdir("..") && getcwd(here, sizeof here) && !strcmp(here, "/"), "cd .. stays at the root");
+    check(!chdir("usr/../../..") && !access("dd-root-marker", F_OK), "relative escape clamped");
+    char *rr = realpath("/", NULL);
+    check(rr && !strcmp(rr, "/"), "realpath of the root"); free(rr);
+    check(startdir >= 0 && !fchdir(startdir), "back to the test directory"); if (startdir >= 0) close(startdir);
     /* libuv (Node) calls statx through the generic syscall(). */
     check(!syscall(SYS_statx, AT_FDCWD, "/etc/native-test", 0, STATX_SIZE, &sx) && sx.stx_size == 7, "syscall statx");
     check(!syscall(SYS_statx, AT_FDCWD, "/etc/absolute-file", AT_SYMLINK_NOFOLLOW, STATX_TYPE, &sx) && S_ISLNK(sx.stx_mode), "syscall statx nofollow");
