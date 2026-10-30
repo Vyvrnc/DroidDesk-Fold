@@ -525,3 +525,23 @@ Node mkdtemp and fs.watch, pgrep; OrcaSlicer and git (gc, fsck) still fine.
 Still open: `cd /` lands in Android's root; a child started with `env -i` loses the hook;
 programs with raw svc (Go, static, musl) bypass it entirely (a seccomp SIGSYS trap in the
 hook would be the general fix).
+
+Later the same day (fold.101, still unreleased):
+
+- The main tablet session (claude-tmux) now runs natively as well; history and Remote Control
+  continue across the switch. claude-tmux and claude-debian prepare path-links too.
+- Samsung lets apps execute but not read /system/bin: the hook's ELF header read failed with
+  EPERM, so sh and toybox could not start from native programs. Unreadable files on Android
+  partitions now run as bionic programs.
+- Static programs (Go, musl, static-pie) from the rootfs or /tmp run under proot with the same
+  rootfs and cwd (`proot -r ROOT ... /usr/bin/env -i ENV PROGRAM`); physical rootfs and /tmp
+  paths in arguments and environment values become Debian paths, a custom argv[0] is kept via
+  bash's exec -a, proot itself runs without the Termux LD_PRELOAD. codex (static musl) starts in
+  0.12 s that way. A static Go program was not tested on the tablet yet.
+- seccomp-probe.c showed that an app may use seccomp user notifications with ADDFD and read and
+  write the target's memory, so a supervisor without proot is possible; execve would still need
+  ptrace, because user notifications cannot change syscall arguments. Static glibc programs also
+  die on set_robust_list before any filter could help unless it is installed before exec.
+- Seen twice right after the native main session was killed by an APK install: xfce4-session and
+  xfwm4 started but no panel or desktop; the third start worked. Logs were overwritten by the next
+  start, cause unknown.
