@@ -79,6 +79,15 @@ mkdir -p "$work/linktest"
 [[ $(LD_PRELOAD="$work/hook.so" "$work/seccomp2" "$work/linktest") == "seccomp2 ok" ]]
 if "$work/seccomp2" "$work/linktest" >/dev/null 2>&1; then echo "kcmp was not blocked without the hook" >&2; exit 1; fi
 echo "generic syscall() blocklist and hard link fallback checks OK"
+# A mirror program started with a cleaned environment restores the runtime from .dd-env, and
+# Debian's session bus replaces the Termux one (Electron re-launch, keyring dialog).
+mkdir -p "$work/mirror-env"
+cp /usr/bin/printenv "$work/mirror-env/printenv"
+printf 'DD_ROOTFS=/rootfs-test\nDBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-debian\n' > "$work/mirror-env/.dd-env"
+[[ $(env -i LD_PRELOAD="$work/hook.so" "$work/mirror-env/printenv" DD_ROOTFS DBUS_SESSION_BUS_ADDRESS | tr '\n' ' ') == "/rootfs-test unix:path=/tmp/dbus-debian " ]]
+[[ $(env -i DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session LD_PRELOAD="$work/hook.so" "$work/mirror-env/printenv" DBUS_SESSION_BUS_ADDRESS) == "unix:path=/tmp/dbus-debian" ]]
+[[ $(env -i DD_ROOTFS=/x DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session LD_PRELOAD="$work/hook.so" /usr/bin/printenv DBUS_SESSION_BUS_ADDRESS) == "unix:path=/tmp/dbus-debian" ]]
+echo "mirror environment restore checks OK"
 # Source only launcher functions; exercise the same code as the shipped commands.
 (
     export PREFIX=$work/termux

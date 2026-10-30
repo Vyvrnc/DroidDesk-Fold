@@ -68,6 +68,44 @@ __attribute__((constructor)) static void find_self_exe(void) {
     }
     if (a < end && *a && strlen(a) < sizeof self_exe) strcpy(self_exe, a);
 }
+/* Programs from an app mirror (patchelf copies, Electron) can lose the native runtime from
+ * their environment: Electron re-launches itself with a cleaned one, and its D-Bus client then
+ * reached the Termux bus (keyring dialog). The mirror keeps it in .dd-env next to the program;
+ * restore it before anything else runs when DD_ROOTFS is missing. The Termux session bus is
+ * replaced by Debian's, other present values are kept. */
+__attribute__((constructor(101))) static void restore_mirror_env(void) {
+    if (getenv("DD_ROOTFS")) {
+        /* Native Debian programs use Debian's session bus (its keyring), never Termux's. */
+        const char *bus = getenv("DBUS_SESSION_BUS_ADDRESS");
+        if (bus && strstr(bus, "dbus-session")) setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/tmp/dbus-debian", 1);
+        return;
+    }
+    char path[PATH_MAX];
+    ssize_t n = (ssize_t)syscall(SYS_readlinkat, AT_FDCWD, "/proc/self/exe", path, sizeof path - 16);
+    if (n <= 0) return;
+    path[n] = 0;
+    char *slash = strrchr(path, '/');
+    if (!slash) return;
+    strcpy(slash + 1, ".dd-env");
+    int fd = (int)syscall(SYS_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    char buf[4096];
+    ssize_t len = 0, r;
+    while (len < (ssize_t)sizeof buf - 1 && (r = read(fd, buf + len, sizeof buf - 1 - (size_t)len)) > 0) len += r;
+    close(fd);
+    if (len <= 0) return;
+    buf[len] = 0;
+    for (char *line = buf, *next; line && *line; line = next) {
+        next = strchr(line, '\n');
+        if (next) *next++ = 0;
+        char *eq = strchr(line, '=');
+        if (!eq || eq == line) continue;
+        *eq = 0;
+        const char *current = getenv(line);
+        int replace = !strcmp(line, "DBUS_SESSION_BUS_ADDRESS") && (!current || strstr(current, "dbus-session"));
+        setenv(line, eq + 1, replace);
+    }
+}
 static int is_proc_self_exe(const char *p) {
     if (!p) return 0;
     if (!strcmp(p, "/proc/self/exe") || !strcmp(p, "/proc/thread-self/exe")) return 1;

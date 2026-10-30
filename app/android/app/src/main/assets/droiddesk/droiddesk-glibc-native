@@ -420,6 +420,16 @@ electron_mirror_into() {
     else
         command -v patchelf >/dev/null || return 3
     fi
+    # Electron re-launches itself with an environment that has lost the native runtime and
+    # the session bus: libdbus then found the Termux bus through X11 and activated the Termux
+    # keyring (Tab S10 FE, fold.99). pathhook restores these from the mirror when missing.
+    load_library_paths
+    local env_file=$dst/.dd-env env_text
+    env_text="DD_ROOTFS=$R"$'\n'"DD_TMP=$T"$'\n'"DD_PLIB=$PLIB"$'\n'"DD_LIBPATH=$LIBPATH"$'\n'
+    env_text+="DD_NATIVE_ACTIVE=1"$'\n'"DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-debian"$'\n'
+    if [[ ! -f $env_file || $(< "$env_file")$'\n' != "$env_text" ]]; then
+        printf '%s' "$env_text" > "$env_file.new" && mv -f "$env_file.new" "$env_file" || return 2
+    fi
     REPLY=$dst/${target##*/}
 }
 
