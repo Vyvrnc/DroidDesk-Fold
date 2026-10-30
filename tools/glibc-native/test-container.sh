@@ -88,6 +88,11 @@ printf 'DD_ROOTFS=/rootfs-test\nDBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-deb
 [[ $(env -i DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session LD_PRELOAD="$work/hook.so" "$work/mirror-env/printenv" DBUS_SESSION_BUS_ADDRESS) == "unix:path=/tmp/dbus-debian" ]]
 [[ $(env -i DD_ROOTFS=/x DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session LD_PRELOAD="$work/hook.so" /usr/bin/printenv DBUS_SESSION_BUS_ADDRESS) == "unix:path=/tmp/dbus-debian" ]]
 echo "mirror environment restore checks OK"
+# The resolver's own probes must not map themselves again: a deep path took 2^depth stats.
+deep=/opt/deep$(printf '/d%s' $(seq 1 26))
+mkdir -p "$root$deep"
+timeout 10 "$loader" --library-path "$libs" --preload "$work/hook.so" /usr/bin/stat -c %F "$deep" | grep -qx directory
+echo "deep path resolution checks OK"
 # Source only launcher functions; exercise the same code as the shipped commands.
 (
     export PREFIX=$work/termux

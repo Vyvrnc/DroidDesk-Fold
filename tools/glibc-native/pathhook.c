@@ -27,6 +27,20 @@
 #include <ftw.h>
 extern char **environ;
 
+/* The hook's own system calls skip the syscall() interposition below: it maps paths, and
+ * the resolver's probes of physical rootfs paths would map themselves again, recursively. */
+static long raw_syscall(long nr, ...) {
+    static long (*real)(long, ...);
+    long (*fn)(long, ...) = __atomic_load_n(&real, __ATOMIC_ACQUIRE);
+    if (!fn) { fn = (long (*)(long, ...))dlsym(RTLD_NEXT, "syscall"); __atomic_store_n(&real, fn, __ATOMIC_RELEASE); }
+    va_list ap;
+    va_start(ap, nr);
+    long a = va_arg(ap, long), b = va_arg(ap, long), c = va_arg(ap, long);
+    long d = va_arg(ap, long), e = va_arg(ap, long), f = va_arg(ap, long);
+    va_end(ap);
+    return fn(nr, a, b, c, d, e, f);
+}
+
 /* The program this process really runs. Started as "ld.so --library-path ... --preload ...
  * --argv0 NAME PROGRAM ARGS", /proc/self/exe is the loader; programs that re-execute
  * themselves (bun runs its embedded ripgrep as /proc/self/exe with argv0 "rg", so Claude
@@ -50,7 +64,7 @@ static int is_loader(const char *path) {
     return !strcmp(path, want);
 }
 __attribute__((constructor)) static void find_self_exe(void) {
-    int fd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
+    int fd = (int)raw_syscall(SYS_openat, AT_FDCWD, "/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
     if (fd < 0) return;
     char buf[8192];
     ssize_t n = 0, r;
@@ -81,13 +95,13 @@ __attribute__((constructor(101))) static void restore_mirror_env(void) {
         return;
     }
     char path[PATH_MAX];
-    ssize_t n = (ssize_t)syscall(SYS_readlinkat, AT_FDCWD, "/proc/self/exe", path, sizeof path - 16);
+    ssize_t n = (ssize_t)raw_syscall(SYS_readlinkat, AT_FDCWD, "/proc/self/exe", path, sizeof path - 16);
     if (n <= 0) return;
     path[n] = 0;
     char *slash = strrchr(path, '/');
     if (!slash) return;
     strcpy(slash + 1, ".dd-env");
-    int fd = (int)syscall(SYS_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC);
+    int fd = (int)raw_syscall(SYS_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return;
     char buf[4096];
     ssize_t len = 0, r;
@@ -115,7 +129,7 @@ __attribute__((constructor(102))) static void restore_resolv_fd(void) {
     int e = errno;
     if (root && fcntl(63, F_GETFD) < 0 && errno == EBADF &&
         snprintf(path, sizeof path, "%s/etc/resolv.conf", root) < (int)sizeof path) {
-        int fd = (int)syscall(SYS_openat, AT_FDCWD, path, O_RDONLY);
+        int fd = (int)raw_syscall(SYS_openat, AT_FDCWD, path, O_RDONLY);
         if (fd >= 0 && fd != 63) { dup2(fd, 63); close(fd); }
     }
     errno = e;
@@ -184,13 +198,13 @@ static const char *mapped(const char *p, char b[PATH_MAX], int nofollow) {
         /* Raw syscalls avoid recursion through our lstat/readlink wrappers. */
         int found = 0;
         if (!nofollow || *rest) {
-            found = !syscall(SYS_newfstatat, AT_FDCWD, b, &st, AT_SYMLINK_NOFOLLOW);
+            found = !raw_syscall(SYS_newfstatat, AT_FDCWD, b, &st, AT_SYMLINK_NOFOLLOW);
             /* A missing final component is valid for creation; a missing parent is not. */
             if (!found && *rest) return NULL;
         }
         if (found && S_ISLNK(st.st_mode)) {
             if (++links > 40) { errno = ELOOP; return NULL; }
-            ssize_t len = syscall(SYS_readlinkat, AT_FDCWD, b, target, sizeof(target) - 1);
+            ssize_t len = raw_syscall(SYS_readlinkat, AT_FDCWD, b, target, sizeof(target) - 1);
             if (len < 0) return NULL;
             target[len] = 0;
             if (snprintf(next, sizeof(next), "%s%s", target, rest) >= PATH_MAX) goto toolong;
@@ -527,20 +541,20 @@ static int publish_copy(int olddir, const char *old, int newdir, const char *new
                  __atomic_add_fetch(&counter, 1, __ATOMIC_RELAXED)) >= (int)sizeof tmp) {
         errno = ENAMETOOLONG; return -1;
     }
-    int src = (int)syscall(SYS_openat, olddir, old, O_RDONLY | O_CLOEXEC | O_NONBLOCK | (follow ? 0 : O_NOFOLLOW));
+    int src = (int)raw_syscall(SYS_openat, olddir, old, O_RDONLY | O_CLOEXEC | O_NONBLOCK | (follow ? 0 : O_NOFOLLOW));
     if (src < 0) {
         if (errno != ELOOP || follow) return -1;
         /* link() without AT_SYMLINK_FOLLOW links the symlink itself. */
         char target[PATH_MAX];
-        ssize_t n = (ssize_t)syscall(SYS_readlinkat, olddir, old, target, sizeof target - 1);
+        ssize_t n = (ssize_t)raw_syscall(SYS_readlinkat, olddir, old, target, sizeof target - 1);
         if (n < 0) return -1;
         target[n] = 0;
-        if (syscall(SYS_symlinkat, target, newdir, tmp) < 0) return -1;
+        if (raw_syscall(SYS_symlinkat, target, newdir, tmp) < 0) return -1;
     } else {
         struct stat st;
         int e = fstat(src, &st) ? errno : S_ISREG(st.st_mode) ? 0 : EPERM;
         if (e) { close(src); errno = e; return -1; }
-        int dst = (int)syscall(SYS_openat, newdir, tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        int dst = (int)raw_syscall(SYS_openat, newdir, tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
         if (dst < 0) { e = errno; close(src); errno = e; return -1; }
         char buf[65536];
         ssize_t n = 0;
@@ -558,7 +572,7 @@ static int publish_copy(int olddir, const char *old, int newdir, const char *new
         e = errno;
         close(src);
         if (close(dst)) { if (ok) e = errno; ok = 0; }
-        if (!ok) { syscall(SYS_unlinkat, newdir, tmp, 0); errno = e; return -1; }
+        if (!ok) { raw_syscall(SYS_unlinkat, newdir, tmp, 0); errno = e; return -1; }
     }
     /* A hard link never crosses file systems; neither does its copy. */
     struct stat copy;
@@ -566,9 +580,9 @@ static int publish_copy(int olddir, const char *old, int newdir, const char *new
     if (!rc && copy.st_dev != source.st_dev) { errno = EXDEV; rc = -1; }
     /* Without RENAME_NOREPLACE a plain rename could replace a concurrent publisher's file:
      * report the original link error instead. */
-    if (!rc) rc = syscall(SYS_renameat2, newdir, tmp, newdir, new, 1 /* RENAME_NOREPLACE */);
+    if (!rc) rc = raw_syscall(SYS_renameat2, newdir, tmp, newdir, new, 1 /* RENAME_NOREPLACE */);
     if (rc < 0 && (errno == EINVAL || errno == ENOSYS)) errno = link_errno;
-    if (rc < 0) { int e = errno; syscall(SYS_unlinkat, newdir, tmp, 0); errno = e; return -1; }
+    if (rc < 0) { int e = errno; raw_syscall(SYS_unlinkat, newdir, tmp, 0); errno = e; return -1; }
     return 0;
 }
 int link(const char *a, const char *b) {
@@ -643,7 +657,7 @@ long syscall(long nr, ...) {
     case SYS_faccessat2: mp = mapped(p, path, d & AT_SYMLINK_NOFOLLOW); break;
 #endif
     case SYS_readlinkat: mp = mapped(p, path, 1); break;
-    case SYS_openat: mp = mapped(p, path, (c & O_NOFOLLOW) != 0); break;
+    case SYS_openat: mp = mapped(p, path, open_nofollow((int)c)); break;
     default: p = NULL; break;
     }
     if (p) { if (!mp) return -1; b = (long)mp; }
