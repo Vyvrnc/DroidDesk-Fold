@@ -271,17 +271,39 @@ static char *unmap(char *p) {
     }
     return p;
 }
+/* Renaming or removing "/" would act on the whole rootfs. */
+static int is_root(const char *p) { return p && p[0] == '/' && root_only(p) && getenv("DD_ROOTFS"); }
+/* A directory fd for "/" is the rootfs (see mapped). Relative paths from it must resolve like
+ * absolute ones, or openat(rootfd, "proc/self/status") would land in the rootfs's empty
+ * /proc. Such fds are remembered when opened and checked against the rootfs before use. */
+static unsigned char root_fds[4096 / 8];
+static void note_root_fd(int fd, int d, const char *p) {
+    if (fd < 0 || fd >= 4096 || !p || (p[0] != '/' && d != AT_FDCWD)) return;
+    if (p[0] == '/' && root_only(p)) __atomic_or_fetch(&root_fds[fd >> 3], (unsigned char)(1u << (fd & 7)), __ATOMIC_RELAXED);
+    else __atomic_and_fetch(&root_fds[fd >> 3], (unsigned char)~(1u << (fd & 7)), __ATOMIC_RELAXED);
+}
+static const char *dirfd_path(int d, const char *p, char b[PATH_MAX]) {
+    if (!p || !*p || p[0] == '/' || d < 0 || d >= 4096 ||
+        !(__atomic_load_n(&root_fds[d >> 3], __ATOMIC_RELAXED) & (1u << (d & 7)))) return p;
+    const char *root = getenv("DD_ROOTFS");
+    struct stat a, r;
+    if (!root || fstat(d, &a) || raw_syscall(SYS_newfstatat, AT_FDCWD, root, &r, 0) ||
+        a.st_dev != r.st_dev || a.st_ino != r.st_ino) return p;
+    return snprintf(b, PATH_MAX, "/%s", p) < PATH_MAX ? b : p;
+}
 #define REAL(name, ret, ...) \
     static ret (*cache_##name)(__VA_ARGS__); \
     ret (*real_##name)(__VA_ARGS__) = __atomic_load_n(&cache_##name, __ATOMIC_ACQUIRE); \
     if (!real_##name) { real_##name = dlsym(RTLD_NEXT, #name); \
         __atomic_store_n(&cache_##name, real_##name, __ATOMIC_RELEASE); } \
     typedef ret result_type __attribute__((unused)); \
-    char pathbuf[PATH_MAX] __attribute__((unused))
+    char pathbuf[PATH_MAX] __attribute__((unused)); \
+    char dirbuf[PATH_MAX] __attribute__((unused))
 #define mapbuf(p, b, f) ({ const char *mp = mapped(p, b, f); \
     if (!mp) { return _Generic((result_type)0, \
         FILE *: NULL, DIR *: NULL, char *: NULL, void *: NULL, default: -1); } mp; })
 #define map(p, f) mapbuf(p, pathbuf, f)
+#define mapd(d, p, f) mapbuf(dirfd_path(d, p, dirbuf), pathbuf, f)
 
 /* NSS files opens paths internally, bypassing open/fopen interposition. Use the
  * glibc file parsers on streams opened with real fopen, without consulting NSS.
@@ -480,36 +502,38 @@ static int open_nofollow(int flags) {
 }
 
 int open(const char *p, int f, ...) { mode_t m = 0; if ((f & O_CREAT) || (f & O_TMPFILE) == O_TMPFILE) { va_list a; va_start(a, f); m = va_arg(a, int); va_end(a); }
-    REAL(open, int, const char *, int, ...); return real_open(map(p, open_nofollow(f)), f, m); }
+    REAL(open, int, const char *, int, ...); { int fd = real_open(map(p, open_nofollow(f)), f, m); note_root_fd(fd, AT_FDCWD, p); return fd; } }
 int open64(const char *p, int f, ...) { mode_t m = 0; if ((f & O_CREAT) || (f & O_TMPFILE) == O_TMPFILE) { va_list a; va_start(a, f); m = va_arg(a, int); va_end(a); }
-    REAL(open64, int, const char *, int, ...); return real_open64(map(p, open_nofollow(f)), f, m); }
+    REAL(open64, int, const char *, int, ...); { int fd = real_open64(map(p, open_nofollow(f)), f, m); note_root_fd(fd, AT_FDCWD, p); return fd; } }
 int openat(int d, const char *p, int f, ...) { mode_t m = 0; if ((f & O_CREAT) || (f & O_TMPFILE) == O_TMPFILE) { va_list a; va_start(a, f); m = va_arg(a, int); va_end(a); }
-    REAL(openat, int, int, const char *, int, ...); return real_openat(d, map(p, open_nofollow(f)), f, m); }
+    REAL(openat, int, int, const char *, int, ...); { int fd = real_openat(d, mapd(d, p, open_nofollow(f)), f, m); note_root_fd(fd, d, p); return fd; } }
 int openat64(int d, const char *p, int f, ...) { mode_t m = 0; if ((f & O_CREAT) || (f & O_TMPFILE) == O_TMPFILE) { va_list a; va_start(a, f); m = va_arg(a, int); va_end(a); }
-    REAL(openat64, int, int, const char *, int, ...); return real_openat64(d, map(p, open_nofollow(f)), f, m); }
+    REAL(openat64, int, int, const char *, int, ...); { int fd = real_openat64(d, mapd(d, p, open_nofollow(f)), f, m); note_root_fd(fd, d, p); return fd; } }
 FILE *fopen(const char *p, const char *m) { REAL(fopen, FILE *, const char *, const char *); return real_fopen(map(p, 0), m); }
 FILE *fopen64(const char *p, const char *m) { REAL(fopen64, FILE *, const char *, const char *); return real_fopen64(map(p, 0), m); }
 int stat(const char *p, struct stat *s) { REAL(stat, int, const char *, struct stat *); return real_stat(map(p, 0), s); }
 int lstat(const char *p, struct stat *s) { REAL(lstat, int, const char *, struct stat *); return real_lstat(map(p, 1), s); }
 int stat64(const char *p, struct stat64 *s) { REAL(stat64, int, const char *, struct stat64 *); return real_stat64(map(p, 0), s); }
 int lstat64(const char *p, struct stat64 *s) { REAL(lstat64, int, const char *, struct stat64 *); return real_lstat64(map(p, 1), s); }
-int fstatat(int d, const char *p, struct stat *s, int f) { REAL(fstatat, int, int, const char *, struct stat *, int); return real_fstatat(d, map(p, f & AT_SYMLINK_NOFOLLOW), s, f); }
-int fstatat64(int d, const char *p, struct stat64 *s, int f) { REAL(fstatat64, int, int, const char *, struct stat64 *, int); return real_fstatat64(d, map(p, f & AT_SYMLINK_NOFOLLOW), s, f); }
-int statx(int d, const char *p, int f, unsigned m, struct statx *s) { REAL(statx, int, int, const char *, int, unsigned, struct statx *); return real_statx(d, map(p, f & AT_SYMLINK_NOFOLLOW), f, m, s); }
+int fstatat(int d, const char *p, struct stat *s, int f) { REAL(fstatat, int, int, const char *, struct stat *, int); return real_fstatat(d, mapd(d, p, f & AT_SYMLINK_NOFOLLOW), s, f); }
+int fstatat64(int d, const char *p, struct stat64 *s, int f) { REAL(fstatat64, int, int, const char *, struct stat64 *, int); return real_fstatat64(d, mapd(d, p, f & AT_SYMLINK_NOFOLLOW), s, f); }
+int statx(int d, const char *p, int f, unsigned m, struct statx *s) { REAL(statx, int, int, const char *, int, unsigned, struct statx *); return real_statx(d, mapd(d, p, f & AT_SYMLINK_NOFOLLOW), f, m, s); }
 int access(const char *p, int m) { REAL(access, int, const char *, int); return real_access(map(p, 0), m); }
 int euidaccess(const char *p, int m) { REAL(euidaccess, int, const char *, int); return real_euidaccess(map(p, 0), m); }
 int eaccess(const char *p, int m) { REAL(eaccess, int, const char *, int); return real_eaccess(map(p, 0), m); }
 /* Preserve AT_EACCESS and AT_SYMLINK_NOFOLLOW for the real libc call. */
-int faccessat(int d, const char *p, int m, int f) { REAL(faccessat, int, int, const char *, int, int); return real_faccessat(d, map(p, f & AT_SYMLINK_NOFOLLOW), m, f); }
+int faccessat(int d, const char *p, int m, int f) { REAL(faccessat, int, int, const char *, int, int); return real_faccessat(d, mapd(d, p, f & AT_SYMLINK_NOFOLLOW), m, f); }
 DIR *opendir(const char *p) { REAL(opendir, DIR *, const char *); return real_opendir(map(p, 0)); }
 ssize_t readlink(const char *p, char *b, size_t n) { if (*self_exe && is_proc_self_exe(p)) return copy_self_exe(b, n);
     REAL(readlink, ssize_t, const char *, char *, size_t); return real_readlink(map(p, 1), b, n); }
 ssize_t readlinkat(int d, const char *p, char *b, size_t n) { if (*self_exe && is_proc_self_exe(p)) return copy_self_exe(b, n);
-    REAL(readlinkat, ssize_t, int, const char *, char *, size_t); return real_readlinkat(d, map(p, 1), b, n); }
+    REAL(readlinkat, ssize_t, int, const char *, char *, size_t); return real_readlinkat(d, mapd(d, p, 1), b, n); }
 char *realpath(const char *p, char *r) { REAL(realpath, char *, const char *, char *); return unmap(real_realpath(map(p, 0), r)); }
 int mkdir(const char *p, mode_t m) { REAL(mkdir, int, const char *, mode_t); return real_mkdir(map(p, 1), m); }
 int unlink(const char *p) { REAL(unlink, int, const char *); return real_unlink(map(p, 1)); }
-int rename(const char *a, const char *b) { REAL(rename, int, const char *, const char *); char second[PATH_MAX]; const char *ma = map(a, 1); return real_rename(ma, mapbuf(b, second, 1)); }
+int rename(const char *a, const char *b) { REAL(rename, int, const char *, const char *); char second[PATH_MAX];
+    if (is_root(a) || is_root(b)) { errno = EBUSY; return -1; }
+    const char *ma = map(a, 1); return real_rename(ma, mapbuf(b, second, 1)); }
 int __open_2(const char *p, int f) { REAL(__open_2, int, const char *, int); return real___open_2(map(p, open_nofollow(f)), f); }
 int __open64_2(const char *p, int f) { REAL(__open64_2, int, const char *, int); return real___open64_2(map(p, open_nofollow(f)), f); }
 int __openat_2(int d, const char *p, int f) { REAL(__openat_2, int, int, const char *, int); return real___openat_2(d, map(p, open_nofollow(f)), f); }
@@ -529,6 +553,7 @@ static int clamp_relative(const char *p, char out[PATH_MAX]) {
     for (const char *s = p; *s;) {
         size_t n = strcspn(s, "/");
         if (n == 2 && s[0] == '.' && s[1] == '.') dots = 1;
+        else if (n && !(n == 1 && s[0] == '.')) return 0;
         s += n; while (*s == '/') ++s;
     }
     if (!dots || raw_syscall(SYS_getcwd, out, PATH_MAX) <= 0 || !pre(out, root)) return 0;
@@ -569,15 +594,15 @@ char *getcwd(char *b, size_t n) {
 }
 char *get_current_dir_name(void) { return getcwd(NULL, 0); }
 char *canonicalize_file_name(const char *p) { return realpath(p, NULL); }
-int mkdirat(int d, const char *p, mode_t m) { REAL(mkdirat, int, int, const char *, mode_t); return real_mkdirat(d, map(p, 1), m); }
-int unlinkat(int d, const char *p, int f) { REAL(unlinkat, int, int, const char *, int); return real_unlinkat(d, map(p, 1), f); }
-int rmdir(const char *p) { REAL(rmdir, int, const char *); return real_rmdir(map(p, 1)); }
+int mkdirat(int d, const char *p, mode_t m) { REAL(mkdirat, int, int, const char *, mode_t); return real_mkdirat(d, mapd(d, p, 1), m); }
+int unlinkat(int d, const char *p, int f) { REAL(unlinkat, int, int, const char *, int); return real_unlinkat(d, mapd(d, p, 1), f); }
+int rmdir(const char *p) { REAL(rmdir, int, const char *); if (is_root(p)) { errno = EBUSY; return -1; } return real_rmdir(map(p, 1)); }
 int chmod(const char *p, mode_t m) { REAL(chmod, int, const char *, mode_t); return real_chmod(map(p, 0), m); }
-int fchmodat(int d, const char *p, mode_t m, int f) { REAL(fchmodat, int, int, const char *, mode_t, int); return real_fchmodat(d, map(p, f & AT_SYMLINK_NOFOLLOW), m, f); }
+int fchmodat(int d, const char *p, mode_t m, int f) { REAL(fchmodat, int, int, const char *, mode_t, int); return real_fchmodat(d, mapd(d, p, f & AT_SYMLINK_NOFOLLOW), m, f); }
 int chown(const char *p, uid_t u, gid_t g) { REAL(chown, int, const char *, uid_t, gid_t); return real_chown(map(p, 0), u, g); }
 int lchown(const char *p, uid_t u, gid_t g) { REAL(lchown, int, const char *, uid_t, gid_t); return real_lchown(map(p, 1), u, g); }
-int fchownat(int d, const char *p, uid_t u, gid_t g, int f) { REAL(fchownat, int, int, const char *, uid_t, gid_t, int); return real_fchownat(d, map(p, f & AT_SYMLINK_NOFOLLOW), u, g, f); }
-int utimensat(int d, const char *p, const struct timespec t[2], int f) { REAL(utimensat, int, int, const char *, const struct timespec *, int); return real_utimensat(d, map(p, f & AT_SYMLINK_NOFOLLOW), t, f); }
+int fchownat(int d, const char *p, uid_t u, gid_t g, int f) { REAL(fchownat, int, int, const char *, uid_t, gid_t, int); return real_fchownat(d, mapd(d, p, f & AT_SYMLINK_NOFOLLOW), u, g, f); }
+int utimensat(int d, const char *p, const struct timespec t[2], int f) { REAL(utimensat, int, int, const char *, const struct timespec *, int); return real_utimensat(d, mapd(d, p, f & AT_SYMLINK_NOFOLLOW), t, f); }
 int utimes(const char *p, const struct timeval t[2]) { REAL(utimes, int, const char *, const struct timeval *); return real_utimes(map(p, 0), t); }
 int truncate(const char *p, off_t n) { REAL(truncate, int, const char *, off_t); return real_truncate(map(p, 0), n); }
 int truncate64(const char *p, off64_t n) { REAL(truncate64, int, const char *, off64_t); return real_truncate64(map(p, 0), n); }
@@ -664,8 +689,8 @@ int link(const char *a, const char *b) {
     return rc;
 }
 int linkat(int a, const char *p, int b, const char *q, int f) {
-    REAL(linkat, int, int, const char *, int, const char *, int); char second[PATH_MAX];
-    const char *mp = map(p, !(f & AT_SYMLINK_FOLLOW)), *mq = mapbuf(q, second, 1);
+    REAL(linkat, int, int, const char *, int, const char *, int); char second[PATH_MAX], dirbuf2[PATH_MAX];
+    const char *mp = mapd(a, p, !(f & AT_SYMLINK_FOLLOW)), *mq = mapbuf(dirfd_path(b, q, dirbuf2), second, 1);
     int rc = real_linkat(a, mp, b, mq, f);
     if (rc < 0 && (errno == EPERM || errno == EACCES) && !(f & AT_EMPTY_PATH))
         rc = publish_copy(a, mp, b, mq, f & AT_SYMLINK_FOLLOW, errno);
@@ -716,32 +741,37 @@ long syscall(long nr, ...) {
     if (seccomp_blocked(nr)) { errno = ENOSYS; return -1; }
     /* libuv calls statx through syscall(): Node's fs.stat/lstat('/usr') failed with ENOENT
      * and npm's arborist with it (Tab S10 FE). Map the path of the path-taking calls. */
-    char path[PATH_MAX];
+    char path[PATH_MAX], relative[PATH_MAX];
     const char *p = (const char *)b, *mp = NULL;
+    /* Only the path-taking calls below have a dirfd in a and a path in b. */
+#define AT(p) dirfd_path((int)a, p, relative)
     switch (nr) {
-    case SYS_statx: mp = mapped(p, path, c & AT_SYMLINK_NOFOLLOW); break;
+    case SYS_statx: mp = mapped(AT(p), path, c & AT_SYMLINK_NOFOLLOW); break;
 #ifdef SYS_newfstatat
-    case SYS_newfstatat: mp = mapped(p, path, d & AT_SYMLINK_NOFOLLOW); break;
+    case SYS_newfstatat: mp = mapped(AT(p), path, d & AT_SYMLINK_NOFOLLOW); break;
 #endif
-    case SYS_faccessat: mp = mapped(p, path, 0); break;
+    case SYS_faccessat: mp = mapped(AT(p), path, 0); break;
 #ifdef SYS_faccessat2
-    case SYS_faccessat2: mp = mapped(p, path, d & AT_SYMLINK_NOFOLLOW); break;
+    case SYS_faccessat2: mp = mapped(AT(p), path, d & AT_SYMLINK_NOFOLLOW); break;
 #endif
-    case SYS_readlinkat: mp = mapped(p, path, 1); break;
-    case SYS_openat: mp = mapped(p, path, open_nofollow((int)c)); break;
+    case SYS_readlinkat: mp = mapped(AT(p), path, 1); break;
+    case SYS_openat: mp = mapped(AT(p), path, open_nofollow((int)c)); break;
     default: p = NULL; break;
     }
+#undef AT
     if (p) { if (!mp) return -1; b = (long)mp; }
     REAL(syscall, long, long, ...);
     return real_syscall(nr, a, b, c, d, e, f);
 }
 int renameat(int a, const char *p, int b, const char *q) {
-    REAL(renameat, int, int, const char *, int, const char *); char second[PATH_MAX];
-    return real_renameat(a, map(p, 1), b, mapbuf(q, second, 1));
+    REAL(renameat, int, int, const char *, int, const char *); char second[PATH_MAX], dirbuf2[PATH_MAX];
+    if (is_root(p) || is_root(q)) { errno = EBUSY; return -1; }
+    return real_renameat(a, mapd(a, p, 1), b, mapbuf(dirfd_path(b, q, dirbuf2), second, 1));
 }
 int renameat2(int a, const char *p, int b, const char *q, unsigned f) {
-    REAL(renameat2, int, int, const char *, int, const char *, unsigned); char second[PATH_MAX];
-    return real_renameat2(a, map(p, 1), b, mapbuf(q, second, 1), f);
+    REAL(renameat2, int, int, const char *, int, const char *, unsigned); char second[PATH_MAX], dirbuf2[PATH_MAX];
+    if (is_root(p) || is_root(q)) { errno = EBUSY; return -1; }
+    return real_renameat2(a, mapd(a, p, 1), b, mapbuf(dirfd_path(b, q, dirbuf2), second, 1), f);
 }
 
 /* Socket names are length-delimited, unlike file paths. Keep abstract, unnamed,
@@ -1280,9 +1310,9 @@ int execle(const char *path, const char *arg, ...) {
 int creat(const char *p, mode_t m) { return open(p, O_CREAT | O_WRONLY | O_TRUNC, m); }
 int creat64(const char *p, mode_t m) { return open(p, O_CREAT | O_WRONLY | O_TRUNC, m); }
 int mkfifo(const char *p, mode_t m) { REAL(mkfifo, int, const char *, mode_t); return real_mkfifo(map(p, 1), m); }
-int mkfifoat(int d, const char *p, mode_t m) { REAL(mkfifoat, int, int, const char *, mode_t); return real_mkfifoat(d, map(p, 1), m); }
+int mkfifoat(int d, const char *p, mode_t m) { REAL(mkfifoat, int, int, const char *, mode_t); return real_mkfifoat(d, mapd(d, p, 1), m); }
 int mknod(const char *p, mode_t m, dev_t v) { REAL(mknod, int, const char *, mode_t, dev_t); return real_mknod(map(p, 1), m, v); }
-int mknodat(int d, const char *p, mode_t m, dev_t v) { REAL(mknodat, int, int, const char *, mode_t, dev_t); return real_mknodat(d, map(p, 1), m, v); }
+int mknodat(int d, const char *p, mode_t m, dev_t v) { REAL(mknodat, int, int, const char *, mode_t, dev_t); return real_mknodat(d, mapd(d, p, 1), m, v); }
 int utime(const char *p, const struct utimbuf *t) { REAL(utime, int, const char *, const struct utimbuf *); return real_utime(map(p, 0), t); }
 int lutimes(const char *p, const struct timeval t[2]) { REAL(lutimes, int, const char *, const struct timeval *); return real_lutimes(map(p, 1), t); }
 long pathconf(const char *p, int n) { REAL(pathconf, long, const char *, int); return real_pathconf(map(p, 0), n); }

@@ -390,7 +390,16 @@ int main(int argc, char **argv) {
     check(!chdir("/") && !access("dd-root-marker", F_OK), "cd / then relative path");
     check(getcwd(here, sizeof here) && !strcmp(here, "/"), "getcwd at the root");
     check(!chdir("..") && getcwd(here, sizeof here) && !strcmp(here, "/"), "cd .. stays at the root");
-    check(!chdir("usr/../../..") && !access("dd-root-marker", F_OK), "relative escape clamped");
+    check(!chdir("../..") && !access("dd-root-marker", F_OK), "relative escape clamped");
+    check(chdir("missing/../..") < 0 && errno == ENOENT, "missing component keeps ENOENT");
+    int rootfd = open("/", O_RDONLY | O_DIRECTORY);
+    int procfd = rootfd >= 0 ? openat(rootfd, "proc/self/status", O_RDONLY) : -1;
+    check(procfd >= 0, "root dirfd reaches the real /proc"); if (procfd >= 0) close(procfd);
+    struct stat rst;
+    check(rootfd >= 0 && !fstatat(rootfd, "etc/native-test", &rst, 0) && rst.st_size == 7, "root dirfd maps Debian paths");
+    if (rootfd >= 0) close(rootfd);
+    check(rename("/", "/tmp/root-moved") < 0 && errno == EBUSY, "rename of the root refused");
+    check(rmdir("/") < 0 && errno == EBUSY, "rmdir of the root refused");
     char *rr = realpath("/", NULL);
     check(rr && !strcmp(rr, "/"), "realpath of the root"); free(rr);
     check(startdir >= 0 && !fchdir(startdir), "back to the test directory"); if (startdir >= 0) close(startdir);
