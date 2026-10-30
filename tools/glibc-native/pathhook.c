@@ -935,7 +935,15 @@ static int prepare_proot(const char *target, char *const argv[], char *const env
     c->argv = v;
     /* proot itself is a Termux program: Termux environment plus its loader and scratch dir. */
     char **bionic_env = child_env(env, 1);
-    size_t m = count(bionic_env);
+    /* proot passes its environment to the guest's /usr/bin/env, whose glibc loader printed an
+     * error for the Termux socket hook in LD_PRELOAD (Tab S10 FE). proot needs neither:
+     * its RUNPATH points at the Termux libraries. */
+    size_t m = 0;
+    for (size_t i = 0; bionic_env && bionic_env[i]; ++i) {
+        if (envkey(bionic_env[i], "LD_PRELOAD") || envkey(bionic_env[i], "LD_LIBRARY_PATH")) free(bionic_env[i]);
+        else bionic_env[m++] = bionic_env[i];
+    }
+    if (bionic_env) bionic_env[m] = NULL;
     char **grown = bionic_env ? realloc(bionic_env, (m + 3) * sizeof *bionic_env) : NULL;
     if (!grown) { free_vector(bionic_env); errno = ENOMEM; return -1; }
     c->env = grown;

@@ -98,11 +98,12 @@ timeout 10 "$loader" --library-path "$libs" --preload "$work/hook.so" /usr/bin/s
 echo "deep path resolution checks OK"
 # Static programs (Go, musl) bypass the hook: they run under proot with the same rootfs.
 mkdir -p /termux/usr/bin /termux/usr/libexec/proot
-printf '#!/bin/sh\necho "loader=$PROOT_LOADER"\nfor a in "$@"; do echo "arg=$a"; done\n' > /termux/usr/bin/proot
+printf '#!/bin/sh\necho "loader=$PROOT_LOADER"\necho "preload=${LD_PRELOAD-unset}"\nfor a in "$@"; do echo "arg=$a"; done\n' > /termux/usr/bin/proot
 chmod +x /termux/usr/bin/proot
 printf 'int main(void) { return 0; }\n' | gcc -static -x c - -o "$root/usr/bin/static-tool"
 out=$("$loader" --library-path "$libs" --preload "$work/hook.so" "$root/usr/bin/sh" -c 'cd /usr && exec /usr/bin/static-tool one "two words"')
 grep -qx "loader=/termux/usr/libexec/proot/loader" <<< "$out"
+grep -qx "preload=unset" <<< "$out"
 grep -qx "arg=-r" <<< "$out" && grep -qx "arg=$root" <<< "$out"
 grep -qx "arg=-w" <<< "$out" && grep -qx "arg=/usr" <<< "$out"
 grep -qx "arg=$work/tmp:/tmp" <<< "$out"
