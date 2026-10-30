@@ -120,6 +120,14 @@ grep -qx "arg=TMPDIR=/tmp/x" <<< "$out"
 grep -qx "arg=MYPATH=/usr/bin:/opt:/tmp" <<< "$out"
 grep -qx "arg=/etc/native-test" <<< "$out"
 grep -qx "arg=/bin/bash" <<< "$out" && grep -qx "arg=applet" <<< "$out"
+# Outside the rootfs (Termux home): same path, its directory bound in; Termux files stay native.
+mkdir -p "$work/home/node_modules/.bin" /termux/usr/libexec/static
+cp "$root/usr/bin/static-tool" "$work/home/node_modules/.bin/esb"
+out=$("$loader" --library-path "$libs" --preload "$work/hook.so" "$root/usr/bin/sh" -c "cd $work/home && exec node_modules/.bin/esb x")
+grep -qx "arg=$work/home/node_modules/.bin/esb" <<< "$out"
+grep -qx "arg=$work/home/node_modules/.bin" <<< "$out" && grep -qx "arg=$work/home" <<< "$out"
+cp "$root/usr/bin/static-tool" /termux/usr/libexec/static/tool
+[[ -z $("$loader" --library-path "$libs" --preload "$work/hook.so" "$root/usr/bin/sh" -c /termux/usr/libexec/static/tool) ]]
 echo "static program via proot checks OK"
 # Source only launcher functions; exercise the same code as the shipped commands.
 (

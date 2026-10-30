@@ -895,8 +895,17 @@ static int prepare_proot(const char *target, char *const argv[], char *const env
         if (snprintf(absolute, sizeof absolute, "%s/%s", cwd, target) >= (int)sizeof absolute) { errno = ENAMETOOLONG; return -1; }
         target = absolute;
     }
-    if (!virtual_path(target, root, tmp, program) ||
-        snprintf(proot, sizeof proot, "%s/bin/proot", prefix) >= (int)sizeof proot ||
+    /* Outside the rootfs (npm packages in the Termux home: esbuild, turbo, biome) the program
+     * keeps its path and its directory is bound in. Termux's own static files stay native. */
+    char program_dir[PATH_MAX] = "";
+    if (!virtual_path(target, root, tmp, program)) {
+        const char *slash = strrchr(target, '/');
+        if (pre(target, prefix) || !slash || strlen(target) >= sizeof program) { errno = ENOENT; return -1; }
+        strcpy(program, target);
+        snprintf(program_dir, sizeof program_dir, "%.*s", (int)(slash - target), target);
+        if (!*program_dir) strcpy(program_dir, "/");
+    }
+    if (snprintf(proot, sizeof proot, "%s/bin/proot", prefix) >= (int)sizeof proot ||
         snprintf(loader, sizeof loader, "%s/libexec/proot/loader", prefix) >= (int)sizeof loader ||
         access(proot, X_OK)) { errno = ENOENT; return -1; }
     int outside = !virtual_path(cwd, root, tmp, vcwd);
@@ -919,6 +928,7 @@ static int prepare_proot(const char *target, char *const argv[], char *const env
     ADD("-b"); if (ok && asprintf(&v[k++], "%s:/tmp", tmp) < 0) { v[k - 1] = NULL; ok = 0; }
     ADD("-b"); ADD("/storage");
     if (outside) { ADD("-b"); ADD(cwd); }
+    if (*program_dir && (!outside || strcmp(program_dir, cwd))) { ADD("-b"); ADD(program_dir); }
     ADD("-w"); ADD(vcwd);
     ADD("/usr/bin/env"); ADD("-i");
     for (size_t i = 0; ok && i < envs; ++i) {
