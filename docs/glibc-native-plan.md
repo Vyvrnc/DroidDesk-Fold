@@ -489,3 +489,39 @@ dbus-debian, no Termux keyring). Whether it picks up the existing login is still
 checked by hand. Remaining open: Remote Control with natively running Claude Code (test on a
 second instance waits for Matěj's OK), the duplicate app-user line in the rootfs
 /etc/passwd from fold.95 (harmless, not removed).
+
+## Native Claude Code and the hook coverage audit (fold.101, 2026-10-30)
+
+Remote Control works with natively running Claude Code: it connects by itself and reattaches
+to the same session after /exit and --continue (tested on a second instance with an isolated
+HOME). Switching the main tablet session between proot and native was not tested; it stays
+under proot (DD_NATIVE=0).
+
+Found by that instance (it also wrote a coverage audit, ~/glibc-spike/AUDIT-pathhook-fold101.md
+on the tablet) and fixed in fold.101:
+
+- DNS in the Bash tool: Bun closes every fd above 2 when it spawns, so children lost fd 63
+  (resolv.conf). pathhook reopens it in a constructor.
+- MCP servers via npx: Bun looks up commands in PATH with its own system calls. The launcher
+  keeps `$N/path-links` (links to the real files of Debian's PATH, rebuilt under a lock when a
+  target changes, swapped atomically) last in native Claude's PATH.
+- Hard links: the symlink fallback broke "link, then unlink the source" (npm cacache). The
+  fallback now publishes a copy with RENAME_NOREPLACE (EEXIST first, EXDEV across file
+  systems, symlinks as symlinks).
+- libuv calls statx through syscall(): the interposed syscall() maps the path of statx,
+  newfstatat, faccessat(2), readlinkat and openat. The hook's own calls use raw_syscall()
+  (otherwise each resolver probe mapped itself again: 2^depth stats).
+- glibc internals past the PLT: system() and popen() keep glibc's implementation but hand
+  Android's sh `exec <loader> ... <rootfs>/usr/bin/sh -c -- CMD`; mkstemp and relatives,
+  mkdtemp and tmpfile are implemented on the hooked open/mkdir; execl/execle, creat,
+  mkfifo(at), mknod(at), utime, lutimes, pathconf, freopen, inotify_add_watch and the xattr
+  calls map paths; comm comes from --argv0 (pgrep).
+
+Verified on the tablet: GoogleWorkspace MCP connects natively (5.4 s warm); Node fs.stat on
+Debian paths matches proot (statSync 0.13 s natively vs 0.64 s via debian-run and 0.74 s
+under proot; mapping overhead ~5 % on a 10-level path); Python os.system/popen/tempfile,
+Node mkdtemp and fs.watch, pgrep; OrcaSlicer and git (gc, fsck) still fine.
+
+Still open: `cd /` lands in Android's root; a child started with `env -i` loses the hook;
+programs with raw svc (Go, static, musl) bypass it entirely (a seccomp SIGSYS trap in the
+hook would be the general fix).
