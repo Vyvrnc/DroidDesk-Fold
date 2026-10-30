@@ -397,6 +397,15 @@ int main(int argc, char **argv) {
     check(procfd >= 0, "root dirfd reaches the real /proc"); if (procfd >= 0) close(procfd);
     struct stat rst;
     check(rootfd >= 0 && !fstatat(rootfd, "etc/native-test", &rst, 0) && rst.st_size == 7, "root dirfd maps Debian paths");
+    int dupfd = rootfd >= 0 ? dup(rootfd) : -1;
+    procfd = dupfd >= 0 ? openat(dupfd, "proc/self/status", O_RDONLY) : -1;
+    check(procfd >= 0, "duplicated root dirfd reaches the real /proc"); if (procfd >= 0) close(procfd);
+    check(dupfd >= 0 && renameat(dupfd, ".", AT_FDCWD, "/tmp/root-moved") < 0 && errno == EBUSY, "renameat of the root fd refused");
+    if (dupfd >= 0) close(dupfd);
+    DIR *rd = opendir("/");
+    procfd = rd ? openat(dirfd(rd), "proc/self/status", O_RDONLY) : -1;
+    check(procfd >= 0, "opendir root fd reaches the real /proc"); if (procfd >= 0) close(procfd);
+    if (rd) closedir(rd);
     if (rootfd >= 0) close(rootfd);
     check(rename("/", "/tmp/root-moved") < 0 && errno == EBUSY, "rename of the root refused");
     check(rmdir("/") < 0 && errno == EBUSY, "rmdir of the root refused");
