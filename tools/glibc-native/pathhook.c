@@ -839,6 +839,116 @@ static int inspect(const char *file, char interp[PATH_MAX], char script[256]) {
     }
     int e = errno; close(fd); errno = e; return result;
 }
+/* Programs without glibc's loader (static Go, musl, static-pie) issue system calls this hook
+ * never sees: Debian paths would reach Android unmapped. Run them under proot with the same
+ * rootfs instead; their environment is passed through env -i, so proot's own Termux
+ * environment stays out of the program. Physical rootfs and /tmp paths in arguments and
+ * environment values are invisible inside proot and become their Debian paths. */
+static int virtual_path(const char *physical, const char *root, const char *tmp, char out[PATH_MAX]) {
+    if (pre(physical, root)) {
+        const char *rest = physical + strlen(root);
+        return snprintf(out, PATH_MAX, "%s", *rest ? rest : "/") < PATH_MAX;
+    }
+    if (tmp && pre(physical, tmp))
+        return snprintf(out, PATH_MAX, "/tmp%s", physical + strlen(tmp)) < PATH_MAX;
+    return 0;
+}
+/* NAME=VALUE or a plain argument; colon lists (PATH) are translated per component. */
+static char *guest_string(const char *s, const char *root, const char *tmp, int is_env) {
+    const char *value = s;
+    if (is_env) { const char *eq = strchr(s, '='); value = eq ? eq + 1 : s + strlen(s); }
+    size_t cap = strlen(s) + 1;
+    char *out = malloc(cap), part[PATH_MAX], mapped_part[PATH_MAX];
+    if (!out) return NULL;
+    size_t len = (size_t)(value - s);
+    memcpy(out, s, len);
+    for (const char *p = value;;) {
+        const char *end = is_env ? strchr(p, ':') : NULL;
+        size_t n = end ? (size_t)(end - p) : strlen(p);
+        const char *piece = p;
+        if (n < sizeof part) {
+            memcpy(part, p, n); part[n] = 0;
+            if (virtual_path(part, root, tmp, mapped_part)) { piece = mapped_part; n = strlen(mapped_part); }
+        }
+        if (len + n + 2 > cap) {
+            cap = (len + n + 2) * 2;
+            char *grown = realloc(out, cap);
+            if (!grown) { free(out); return NULL; }
+            out = grown;
+        }
+        memcpy(out + len, piece, n); len += n;
+        if (!end) break;
+        out[len++] = ':';
+        p = end + 1;
+    }
+    out[len] = 0;
+    return out;
+}
+static int prepare_proot(const char *target, char *const argv[], char *const env[], struct command *c) {
+    const char *root = getenv("DD_ROOTFS"), *tmp = getenv("DD_TMP"), *prefix = getenv("DD_SAVED_PREFIX");
+    char proot[PATH_MAX], loader[PATH_MAX], program[PATH_MAX], cwd[PATH_MAX], vcwd[PATH_MAX], absolute[PATH_MAX];
+    if (!root || !tmp || !prefix) { errno = ENOENT; return -1; }
+    long len = raw_syscall(SYS_getcwd, cwd, sizeof cwd);
+    if (len <= 0) strcpy(cwd, "/");
+    if (target[0] != '/') {
+        /* ./tool: mapped() leaves relative names alone. */
+        if (snprintf(absolute, sizeof absolute, "%s/%s", cwd, target) >= (int)sizeof absolute) { errno = ENAMETOOLONG; return -1; }
+        target = absolute;
+    }
+    if (!virtual_path(target, root, tmp, program) ||
+        snprintf(proot, sizeof proot, "%s/bin/proot", prefix) >= (int)sizeof proot ||
+        snprintf(loader, sizeof loader, "%s/libexec/proot/loader", prefix) >= (int)sizeof loader ||
+        access(proot, X_OK)) { errno = ENOENT; return -1; }
+    int outside = !virtual_path(cwd, root, tmp, vcwd);
+    if (outside) strcpy(vcwd, cwd);
+    char **program_env = child_env(env, 0);
+    if (!program_env) return -1;
+    size_t n = count(argv), envs = count(program_env);
+    const char *argv0 = n ? argv[0] : program, *base = strrchr(program, '/');
+    const char *a0base = strrchr(argv0, '/');
+    /* Multicall programs (BusyBox) select by argv[0]; env cannot set it, bash's exec -a can. */
+    int keep_argv0 = strcmp(a0base ? a0base + 1 : argv0, base ? base + 1 : program) != 0;
+    char **v = calloc(n + envs + 40, sizeof *v);
+    if (!v) { free_vector(program_env); errno = ENOMEM; return -1; }
+    size_t k = 0;
+    int ok = 1;
+#define ADD(s) do { if (ok && !(v[k++] = strdup(s))) ok = 0; } while (0)
+    ADD(proot); ADD("-L"); ADD("--link2symlink"); ADD("--sysvipc"); ADD("--kill-on-exit");
+    ADD("-r"); ADD(root);
+    ADD("-b"); ADD("/dev"); ADD("-b"); ADD("/proc"); ADD("-b"); ADD("/sys");
+    ADD("-b"); if (ok && asprintf(&v[k++], "%s:/tmp", tmp) < 0) { v[k - 1] = NULL; ok = 0; }
+    ADD("-b"); ADD("/storage");
+    if (outside) { ADD("-b"); ADD(cwd); }
+    ADD("-w"); ADD(vcwd);
+    ADD("/usr/bin/env"); ADD("-i");
+    for (size_t i = 0; ok && i < envs; ++i) {
+        if (!strncmp(program_env[i], "DD_", 3)) continue;
+        if (!(v[k++] = guest_string(program_env[i], root, tmp, 1))) ok = 0;
+    }
+    if (keep_argv0) { ADD("/bin/bash"); ADD("-c"); ADD("exec -a \"$0\" \"$@\""); ADD(argv0); }
+    ADD(program);
+    for (size_t i = 1; ok && i < n; ++i)
+        if (!(v[k++] = guest_string(argv[i], root, tmp, 0))) ok = 0;
+#undef ADD
+    free_vector(program_env);
+    if (!ok) { free_vector(v); errno = ENOMEM; return -1; }
+    c->argv = v;
+    /* proot itself is a Termux program: Termux environment plus its loader and scratch dir. */
+    char **bionic_env = child_env(env, 1);
+    size_t m = count(bionic_env);
+    char **grown = bionic_env ? realloc(bionic_env, (m + 3) * sizeof *bionic_env) : NULL;
+    if (!grown) { free_vector(bionic_env); errno = ENOMEM; return -1; }
+    c->env = grown;
+    c->env[m] = c->env[m + 1] = c->env[m + 2] = NULL;
+    if (asprintf(&c->env[m], "PROOT_LOADER=%s", loader) < 0) { c->env[m] = NULL; errno = ENOMEM; return -1; }
+    if (asprintf(&c->env[m + 1], "PROOT_TMP_DIR=%s/proot", tmp) < 0) { c->env[m + 1] = NULL; errno = ENOMEM; return -1; }
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof dir, "%s/proot", tmp);
+    raw_syscall(SYS_mkdirat, AT_FDCWD, dir, 0700);
+    c->file = strdup(proot);
+    if (!c->file) { errno = ENOMEM; return -1; }
+    return 0;
+}
 static int prepare(const char *file, char *const argv[], char *const env[], struct command *c, int depth) {
     if (depth > 8) { errno = ELOOP; return -1; }
     if (*self_exe && (is_proc_self_exe(file) ||
@@ -849,6 +959,15 @@ static int prepare(const char *file, char *const argv[], char *const env[], stru
     if (!target) return -1;
     if (access(target, X_OK)) return -1;
     int kind = inspect(target, interp, script);
+    /* Samsung lets apps execute but not read /system/bin: reading the ELF header failed with
+     * EPERM, so sh and toybox could not start (Tab S10 FE). Android partitions hold only
+     * bionic programs. */
+    if (kind < 0 && (errno == EPERM || errno == EACCES) &&
+        (pre(target, "/system") || pre(target, "/apex") || pre(target, "/vendor") ||
+         pre(target, "/product") || pre(target, "/odm") || pre(target, "/system_ext"))) {
+        kind = 1;
+        strcpy(interp, "/system/bin/linker64");
+    }
     if (kind < 0) return -1;
     size_t n = count(argv);
     if (kind == 2) {
@@ -869,6 +988,11 @@ static int prepare(const char *file, char *const argv[], char *const env[], stru
     }
     int glibc = !strcmp(interp, "/lib/ld-linux-aarch64.so.1") || !strcmp(interp, "/lib64/ld-linux-x86-64.so.2");
     int bionic = !strcmp(interp, "/system/bin/linker64") || !strcmp(interp, "/system/bin/linker");
+    if (kind == 1 && !glibc && !bionic && !is_loader(target)) {
+        if (!prepare_proot(target, argv, env, c)) return 0;
+        if (errno != ENOENT) return -1;
+        dispose(c); memset(c, 0, sizeof *c);
+    }
     c->env = child_env(env, bionic);
     if (!c->env) return -1;
     if (glibc) {

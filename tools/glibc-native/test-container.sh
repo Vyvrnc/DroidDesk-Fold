@@ -96,6 +96,30 @@ deep=/opt/deep$(printf '/d%s' $(seq 1 26))
 mkdir -p "$root$deep"
 timeout 10 "$loader" --library-path "$libs" --preload "$work/hook.so" /usr/bin/stat -c %F "$deep" | grep -qx directory
 echo "deep path resolution checks OK"
+# Static programs (Go, musl) bypass the hook: they run under proot with the same rootfs.
+mkdir -p /termux/usr/bin /termux/usr/libexec/proot
+printf '#!/bin/sh\necho "loader=$PROOT_LOADER"\nfor a in "$@"; do echo "arg=$a"; done\n' > /termux/usr/bin/proot
+chmod +x /termux/usr/bin/proot
+printf 'int main(void) { return 0; }\n' | gcc -static -x c - -o "$root/usr/bin/static-tool"
+out=$("$loader" --library-path "$libs" --preload "$work/hook.so" "$root/usr/bin/sh" -c 'cd /usr && exec /usr/bin/static-tool one "two words"')
+grep -qx "loader=/termux/usr/libexec/proot/loader" <<< "$out"
+grep -qx "arg=-r" <<< "$out" && grep -qx "arg=$root" <<< "$out"
+grep -qx "arg=-w" <<< "$out" && grep -qx "arg=/usr" <<< "$out"
+grep -qx "arg=$work/tmp:/tmp" <<< "$out"
+grep -qx "arg=/usr/bin/static-tool" <<< "$out" && grep -qx "arg=two words" <<< "$out"
+grep -qx "arg=PATH=/usr/bin:/bin" <<< "$out"
+! grep -q "^arg=DD_" <<< "$out"
+! grep -q "^arg=/bin/bash" <<< "$out"
+# Relative program, physical paths in environment values and arguments, custom argv[0].
+cp /bin/bash "$root/usr/bin/bash"
+out=$(TMPDIR=$work/tmp/x MYPATH="$root/usr/bin:/opt:$work/tmp" "$loader" --library-path "$libs" --preload "$work/hook.so" \
+    "$root/usr/bin/bash" -c "cd /usr/bin && exec -a applet ./static-tool $root/etc/native-test")
+grep -qx "arg=/usr/bin/static-tool" <<< "$out"
+grep -qx "arg=TMPDIR=/tmp/x" <<< "$out"
+grep -qx "arg=MYPATH=/usr/bin:/opt:/tmp" <<< "$out"
+grep -qx "arg=/etc/native-test" <<< "$out"
+grep -qx "arg=/bin/bash" <<< "$out" && grep -qx "arg=applet" <<< "$out"
+echo "static program via proot checks OK"
 # Source only launcher functions; exercise the same code as the shipped commands.
 (
     export PREFIX=$work/termux

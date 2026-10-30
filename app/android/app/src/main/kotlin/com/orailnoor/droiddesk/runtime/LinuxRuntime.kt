@@ -811,6 +811,8 @@ class LinuxRuntime(private val context: Context) {
         claudeTmuxLauncher.writeText(
             """
             #!${File(binDir, "bash").absolutePath}
+            # Bun finds MCP commands (npx, uvx) only through real paths: see path-links.
+            [ ! -x "${binDir.absolutePath}/droiddesk-glibc-native" ] || "${binDir.absolutePath}/droiddesk-glibc-native" path-links >/dev/null 2>&1 || true
             exec "${binDir.absolutePath}/debian-tmux" claude bash -lc 'mkdir -p ~/projekty/Claude; cd ~/projekty/Claude || cd ~; PATH="${'$'}HOME/.local/bin:${'$'}PATH"
                     # proot has no uid map, so Claude Code (2.1.289+) turns local cross-session
                     # messaging off unless it gets a socket path. One socket per session; the
@@ -823,6 +825,8 @@ class LinuxRuntime(private val context: Context) {
                     for s in ${'$'}d/*.sock; do [ -e "${'$'}s" ] || continue; p=${'$'}{s##*/}; kill -0 ${'$'}{p%.sock} 2>/dev/null || rm -f "${'$'}s"; done
                     if [ -n "${'$'}{DD_ROOTFS:-}" ]; then
                         export DISABLE_AUTOUPDATER=1
+                        links=${'$'}{DD_SAVED_PREFIX:-}/opt/glibc-native/path-links
+                        [ ! -d "${'$'}links" ] || PATH=${'$'}PATH:${'$'}links
                         real=${'$'}(pwd -P); virt=${'$'}{real#"${'$'}DD_ROOTFS"}
                         p=${'$'}HOME/.claude/projects; mkdir -p "${'$'}p"
                         key=${'$'}(printf %s "${'$'}real" | sed "s/[^A-Za-z0-9]/-/g")
