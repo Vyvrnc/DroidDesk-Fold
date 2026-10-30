@@ -545,3 +545,19 @@ Later the same day (fold.101, still unreleased):
 - Seen twice right after the native main session was killed by an APK install: xfce4-session and
   xfwm4 started but no panel or desktop; the third start worked. Logs were overwritten by the next
   start, cause unknown.
+
+## The root is Debian's (fold.102, 2026-10-30)
+
+`ls /` and `find /` listed Android's root, so a native `find / -name x` found nothing in Debian
+and `cd /` broke relative paths. Now:
+
+- "/" itself ("/", "/.", "//", "/..") maps to the rootfs; getcwd/realpath report the rootfs as
+  "/". Paths below "/" are mapped as before, so /proc, /dev, /storage and /data stay Android's
+  (the rootfs has empty mount-point directories for them, so `ls /` shows both).
+- Relative paths from a directory fd of the rootfs (opendir("/"), open("/"), dup, raw syscalls)
+  resolve like absolute ones: every real dirfd of a relative *at call is compared with the
+  rootfs (one fstat; `find /usr` over 80k files takes 0.3 s on the tablet).
+- rename/rmdir/unlink of the root, also through renameat(rootfd, "."), fail with EBUSY.
+- A relative chdir made only of "." and ".." stops at the root; other relative paths keep the
+  kernel's semantics and errors.
+- `.l2s` in the root is proot's link2symlink storage: keep it.
