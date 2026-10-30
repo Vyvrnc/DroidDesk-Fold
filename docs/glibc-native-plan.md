@@ -480,3 +480,12 @@ Container regressions cover an Electron fixture built from test.c with resources
 the selected mirror argv behind env/gpu-run/electron-run, native HOME and self re-exec,
 warm reuse without scanning/patching, mtime-only and size changes, resources/app detection,
 .rodata versus an unrelated embedded string, and the missing-patchelf side channel/log/hint.
+
+Update (fold.99-100, same night): Claude Desktop runs natively from an automatic patchelf
+mirror (Electron needs the real executable as the process image; window in 1.7 s warm), and
+uses Debian's session bus and keyring (pathhook restores the runtime and the bus from the
+mirror's .dd-env after Electron's re-launch; verified by strace: connects only to
+dbus-debian, no Termux keyring). Whether it picks up the existing login is still to be
+checked by hand. Remaining open: Remote Control with natively running Claude Code (test on a
+second instance waits for Matěj's OK), the duplicate app-user line in the rootfs
+/etc/passwd from fold.95 (harmless, not removed).
