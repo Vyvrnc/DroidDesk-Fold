@@ -402,6 +402,86 @@ PY
          [[ ! -v MESA_X && $GALLIUM_DRIVER == llvmpipe && $LIBGL_ALWAYS_SOFTWARE == 1 ]]
      ')
 
+    # Electron must keep the real executable as the process image, including behind wrappers.
+    (
+        appdir=$root/opt/electron-fixture
+        mirror=$N/apps/electron-fixture/brave
+        mkdir -p "$appdir/resources"
+        cp "$root/usr/bin/probe" "$appdir/brave"
+        printf 'asar fixture\n' > "$appdir/resources/app.asar"
+        printf 'ICU fixture\n' > "$appdir/icudtl.dat"
+        ln -s /opt/electron-fixture/brave "$root/usr/bin/electron-alias"
+        original=$(sha256sum "$appdir/brave")
+        eval "$(declare -f mirror_app | sed '1s/mirror_app/real_mirror_app/')"
+        mirror_app() { printf 'build\n' >> "$work/electron-builds"; real_mirror_app "$@"; }
+        # Retain the real launch, while recording the exact argv handed to it.
+        eval "$(declare -f native_launch | sed '1s/native_launch/real_native_launch/')"
+        native_launch() { printf '%s\0' "$@" > "$work/electron-argv"; real_native_launch "$@"; }
+        (LANG=xx_YY.UTF-8 try_native electron-alias context)
+        mapfile -d '' -t actual < "$work/electron-argv"
+        [[ ${#actual[@]} == 2 && ${actual[0]} == "$mirror" && ${actual[1]} == context ]]
+        [[ -f $mirror && ! -L $mirror && -L ${mirror%/*}/resources ]]
+        [[ $(patchelf --print-interpreter "$mirror") == "$PLIB/ld.so" ]]
+        patchelf --print-needed "$mirror" | grep -Fxq "$N/lib/pathhook.so"
+        [[ $(sha256sum "$appdir/brave") == "$original" ]]
+        # Adjacent data, /proc/self/exe re-exec and electron-run flags still work.
+        (LANG=xx_YY.UTF-8 try_native /usr/local/bin/electron-run env -u MESA_X TEST='value with spaces' gpu-run electron-alias app)
+        mapfile -d '' -t actual < "$work/electron-argv"
+        expected=(/usr/local/bin/electron-run env -u MESA_X 'TEST=value with spaces' gpu-run "$mirror" app)
+        [[ ${#actual[@]} == ${#expected[@]} ]]
+        for index in "${!expected[@]}"; do [[ ${actual[index]} == "${expected[index]}" ]]; done
+        # The warm mirror path must neither inspect ELF data nor patch anything.
+        (electron_elf() { return 99; }; mirror_app() { return 99; }; python3() { return 99; }
+         LANG=xx_YY.UTF-8 try_native electron-alias context)
+        [[ $(wc -l < "$work/electron-builds") == 1 ]]
+        old_stamp=$(< "${mirror%/*}/.electron-stamp")
+        touch -d '2 seconds hence' "$appdir/brave"
+        (LANG=xx_YY.UTF-8 try_native electron-alias context)
+        [[ $(< "${mirror%/*}/.electron-stamp") != "$old_stamp" && $(wc -l < "$work/electron-builds") == 2 ]]
+        old_stamp=$(< "${mirror%/*}/.electron-stamp")
+        cp -p "$appdir/brave" "$work/electron-time"
+        printf '\n' >> "$appdir/brave"
+        touch -r "$work/electron-time" "$appdir/brave"
+        (LANG=xx_YY.UTF-8 try_native electron-alias context)
+        [[ $(< "${mirror%/*}/.electron-stamp") != "$old_stamp" && $(wc -l < "$work/electron-builds") == 3 ]]
+        rm "$appdir/resources/app.asar"
+        mkdir "$appdir/resources/app"
+        electron_elf "$appdir/brave"
+        # A string outside .rodata must not classify an ordinary ELF as Electron.
+        cp "$root/usr/bin/probe" "$appdir/plain"
+        printf 'electron\n' >> "$appdir/plain"
+        mkdir "$root/opt/signature-only"
+        mv "$appdir/plain" "$root/opt/signature-only/plain"
+        if electron_elf "$root/opt/signature-only/plain"; then echo 'matched outside .rodata' >&2; exit 1; fi
+        printf 'const char signature[] = "electron"; int main(void) { return 0; }\n' |
+            gcc -x c - -o "$root/opt/signature-only/electron"
+        electron_elf "$root/opt/signature-only/electron"
+        # Missing Termux patchelf is a preflight decision, never a failed native run.
+        (
+            command() {
+                if [[ ${1:-} == -v && ${2:-} == patchelf ]]; then return 1; fi
+                builtin command "$@"
+            }
+            native_launch() { echo 'unexpected Electron launch' >&2; return 99; }
+            feedback=$work/electron-result
+            : > "$feedback"
+            DD_NATIVE_GUI=0 DD_NATIVE_RESULT=$feedback expect_proot electron-alias 2> "$work/electron-hint"
+            [[ $(< "$feedback") == proot && $(wc -l < "$work/electron-hint") == 1 ]]
+            grep -Fq 'pkg install patchelf' "$work/electron-hint"
+            grep -Fxq 'proot electron-needs-patchelf brave' "$T/droiddesk-native.log"
+            : > "$feedback"
+            DD_NATIVE_GUI=1 DD_NATIVE_RESULT=$feedback expect_proot electron-alias </dev/null > "$work/electron-gui" 2>&1
+            [[ $(< "$feedback") == proot && ! -s $work/electron-gui ]]
+            # First use without patchelf must behave the same as a cached mirror.
+            rm "${mirror%/*}/.electron-stamp"
+            DD_NATIVE_GUI=0 expect_proot electron-alias 2> "$work/electron-hint"
+            [[ ! -f ${mirror%/*}/.electron-stamp && ! -s $N/proot-list ]]
+        )
+        (mirror_app() { return 1; }; expect_proot electron-alias)
+        grep -Fxq 'proot electron-mirror brave' "$T/droiddesk-native.log"
+        echo 'automatic Electron mirror, refresh, argv and patchelf fallback checks OK'
+    )
+
     # Learning is per resolved program, with generic wrappers peeled off.
     mkdir -p "$root/usr/local/bin"
     printf '#!/bin/sh\nprintf "start\\n" >> "$HOME/fast-starts"\nfor arg in "$@"; do :; done\nexit "${arg:-23}"\n' > "$root/usr/bin/fast-app"

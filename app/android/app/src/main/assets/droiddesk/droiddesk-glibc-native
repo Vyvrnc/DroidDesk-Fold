@@ -368,6 +368,61 @@ mirror_app() {
 
 need_patchelf() { command -v patchelf >/dev/null || fail 'Chybí patchelf. Spusťte: pkg install patchelf'; }
 
+electron_elf() {
+    local target=$1 dir=${1%/*}
+    [[ $(head -c 4 "$target") == $'\177ELF' ]] || return 1
+    [[ ! -f $dir/resources/app.asar && ! -d $dir/resources/app ]] || return 0
+    # Reject ordinary ELFs cheaply before inspecting .rodata, without readelf/binutils.
+    LC_ALL=C grep -aFq electron "$target" || return 1
+    python3 - "$target" <<'PY'
+import mmap, struct, sys
+try:
+    with open(sys.argv[1], 'rb') as src, mmap.mmap(src.fileno(), 0, access=mmap.ACCESS_READ) as data:
+        if data[:6] != b'\x7fELF\x02\x01':
+            sys.exit(1)
+        off = struct.unpack_from('<Q', data, 40)[0]
+        size, count, names = struct.unpack_from('<HHH', data, 58)
+        if size < 64 or not count or names >= count or off + size * count > len(data):
+            sys.exit(1)
+        def section(index):
+            return struct.unpack_from('<II4QII2Q', data, off + size * index)
+        strings = section(names)
+        start, length = strings[4:6]
+        table = data[start:start + length]
+        for index in range(count):
+            entry = section(index)
+            name, start, length = entry[0], entry[4], entry[5]
+            if table[name:name + 8] == b'.rodata\0' and start + length <= len(data):
+                sys.exit(0 if data.find(b'electron', start, start + length) >= 0 else 1)
+except (OSError, ValueError, struct.error):
+    pass
+sys.exit(1)
+PY
+}
+
+electron_mirror_into() {
+    local target=$1 dir=${1%/*} name signature= stamp dst
+    name=${dir##*/}
+    [[ -n $name && $name != . && $name != .. ]] || return 1
+    dst=$N/apps/$name
+    stamp=$dst/.electron-stamp
+    # A warm Electron launch needs only stat and a builtin stamp read; no ELF scan.
+    if [[ -f $stamp ]]; then signature=$target$'\n'$(stat -c '%s:%y' -- "$target") || return 2; fi
+    if [[ -z $signature || $(< "$stamp") != "$signature" || ! -f $dst/${target##*/} ]]; then
+        electron_elf "$target" || return 1
+        command -v patchelf >/dev/null || return 3
+        [[ -n $signature ]] || signature=$target$'\n'$(stat -c '%s:%y' -- "$target") || return 2
+        # Reuse app's executable copies, adjacent symlinks and DT_NEEDED hook.
+        # A failed rebuild leaves no valid stamp and is retried on the next launch.
+        rm -f "$stamp"
+        (mirror_app "$dir") > /dev/null || return 2
+        printf '%s\n' "$signature" > "$stamp" || return 2
+    else
+        command -v patchelf >/dev/null || return 3
+    fi
+    REPLY=$dst/${target##*/}
+}
+
 run_native() {
     ready
     load_library_paths
@@ -510,8 +565,10 @@ native_target() { native_target_into "$1" && printf '%s\n' "$REPLY"; }
 native_program_into() {
     local resolved_command=$1 resolved_target=$2 target
     shift 2
+    local argc=$#
     REPLY=
-    # Peel wrappers for identification only; execute the original argv unchanged.
+    REPLY_TARGET= REPLY_INDEX=
+    # Retain the program's argv index so Electron can replace only that word.
     while [[ $# -gt 0 ]]; do
         case ${1##*/} in
             env)
@@ -558,6 +615,7 @@ native_program_into() {
     [[ $target == "$R/"* && -f $target && -x $target ]] || return 1
     case ${target##*/} in env|gpu-run|electron-run|bash|sh|dash|zsh|fish|tmux|xterm|xfce4-terminal) return 1 ;; esac
     program_name_valid "${target##*/}" || return 1
+    REPLY_TARGET=$target REPLY_INDEX=$((argc - $#))
     REPLY=${target##*/}
 }
 native_program() { native_program_into '' '' "$@" && printf '%s\n' "$REPLY"; }
@@ -609,6 +667,8 @@ native_decision() {
 try_native() {
     local cmd=${1:-} reason= target= word body program= gui=0 status started launch_target=
     local stderr_log= stderr_pid= stderr_fd fatal=0
+    local program_target= program_index= mirror_status
+    local -a launch_args=("$@")
     local -a words=()
     if ! native_enabled; then reason=disabled
     elif ! native_ready; then reason=not-ready
@@ -632,7 +692,9 @@ try_native() {
             [[ -n $reason || ( -f $target && -x $target ) ]] || reason=not-found
             [[ -n $reason || $target == "$R/"* ]] || reason=outside-rootfs
             if [[ -z $reason ]]; then
-                if native_program_into "$cmd" "$target" "$@"; then program=$REPLY; fi
+                if native_program_into "$cmd" "$target" "$@"; then
+                    program=$REPLY program_target=$REPLY_TARGET program_index=$REPLY_INDEX
+                fi
                 if [[ -n $program ]]; then
                     if proot_only "$program"; then reason=proot-only
                     elif native_is_learned "$program"; then reason=learned; fi
@@ -650,22 +712,40 @@ try_native() {
     if ! setup_libraries >> "${TMPDIR:-$T}/droiddesk-native-setup.log" 2>&1; then
         native_decision proot libraries "${program:-$cmd}"; request_proot; return 3
     fi
+    if [[ -n $program_target ]]; then
+        if electron_mirror_into "$program_target"; then
+            launch_args[program_index]=$REPLY
+        else
+            mirror_status=$?
+            case $mirror_status in
+                1) ;; # Not an Electron ELF: keep the loader path (including Brave).
+                3)
+                    native_decision proot electron-needs-patchelf "$program"
+                    if [[ $gui != 1 ]]; then
+                        printf 'Pro nativní Electron aplikace spusťte: pkg install patchelf\n' >&2
+                    fi
+                    request_proot; return 3 ;;
+                *) native_decision proot electron-mirror "$program"; request_proot; return 3 ;;
+            esac
+        fi
+    fi
     native_decision native ready "${program:-$cmd}"
     launch_target=$target
-    if [[ $gui != 1 ]]; then native_launch "$@"; return; fi
+    [[ -z $program_index || $program_index != 0 ]] || launch_target=${launch_args[0]}
+    if [[ $gui != 1 ]]; then native_launch "${launch_args[@]}"; return; fi
     started=$SECONDS
     if [[ ${DD_NATIVE_GUI:-0} == 1 ]]; then
         stderr_log=$(mktemp "${TMPDIR:-$T}/droiddesk-native-stderr.XXXXXX") || { request_proot; return 3; }
         # Pass stderr through and retain only its last 16 KiB. Drain before checking.
         exec {stderr_fd}> >(tee -a /dev/stderr | tail -c 16384 > "$stderr_log")
         stderr_pid=$!
-        if (native_launch "$@") 2>&$stderr_fd; then status=0; else status=$?; fi
+        if (native_launch "${launch_args[@]}") 2>&$stderr_fd; then status=0; else status=$?; fi
         exec {stderr_fd}>&-
         wait "$stderr_pid" || true
         if grep -aEq "Bad system call|Trace/breakpoint trap|GPU process isn.t usable|SIGSYS|Segmentation fault|cannot open shared object|Illegal instruction" "$stderr_log"; then fatal=1; fi
         rm -f "$stderr_log"
     else
-        if (native_launch "$@"); then status=0; else status=$?; fi
+        if (native_launch "${launch_args[@]}"); then status=0; else status=$?; fi
     fi
     if (( (status != 0 || fatal) && SECONDS - started < 5 )); then
         proot_list_update add "$program" || printf 'Varování: Fallback pro %s se nepodařilo uložit.\n' "$program" >&2

@@ -345,9 +345,34 @@ Nové aplikace tak používají nativní běh bez ručního `patch`, `app` nebo 
 Před startem se automaticky obnoví odkazy nových Debian knihoven. Verze Debian setupu 16
 obnoví také existující položky menu při příštím spuštění relace.
 
-Electron se spouští z původního adresáře v rootfs. Hook vrací skutečný program pro
-`/proc/self/exe` a zprostředkuje jeho reexec; sousední ICU/resources soubory zůstanou dostupné.
-Ruční mirror není potřeba. Nativní `electron-run` přidává `--disable-dev-shm-usage`.
+Electron se v `try` automaticky spouští z mirroru v
+`$PREFIX/opt/glibc-native/apps/<název původního adresáře>/`. Rozpoznává se vyřešený ELF
+se sousedním `resources/app.asar` nebo adresářem `resources/app`; náhradní detekce hledá
+`electron` v `.rodata` (nejprve levný grep, potom kontrola ELF sekce). Mirror používá
+stejnou funkci jako ruční `app`: symlinky na data a patchelf kopie spustitelných souborů,
+RPATH jako první, interpreter v samostatném volání a pathhook přes `DT_NEEDED`.
+Jádro tak vidí skutečný program jako process image; samotné přepsání `/proc/self/exe`
+v hooku nestačí. Brave bez Electron signatury nadále používá původní loaderovou cestu.
+
+Při prvním startu se mirror vytvoří, při změně velikosti nebo mtime původního programu
+se obnoví. `.electron-stamp` obsahuje fyzickou cestu, velikost a mtime včetně zlomků sekund.
+Aktuální mirror potřebuje jen stat a přečtení stampu, bez ELF skenu, Pythonu a patchování.
+Kontrola nesleduje samostatné aktualizace pomocných ELF souborů při nezměněném hlavním
+programu; data jsou symlinky. Adresáře aplikací se stejným basename sdílejí mirror;
+cesta ve stampu při přepnutí zdroje vynutí obnovu.
+
+Je nutný Termux `patchelf` (`pkg install patchelf`). Pokud chybí, `try` vyžádá proot
+existujícím side channel a zapíše `proot electron-needs-patchelf NAME`; nezkouší vadný
+start přes loader ani neukládá naučený fallback. Terminál vypíše jeden český instalační
+tip, GUI zůstane bez tohoto výpisu. Chyba tvorby mirroru také vyžádá proot, s důvodem
+`electron-mirror`.
+
+V argv se nahradí jen program za `env`, `gpu-run`, `electron-run` a ostatními podporovanými
+prefixy. Argumenty a proměnné zůstávají zachované, stejně jako Debian `HOME=$R/root`
+a existující přihlášení v `/root/.config/<App>`. Automatický mirror nepřidává přepínače;
+`electron-run` již nativně přidává `--no-sandbox`, `--disable-dev-shm-usage` a na
+non-Adreno `--disable-gpu`. Naučený seznam má stále přednost: dříve naučený Claude
+Desktop potřebuje před novým nativním pokusem `droiddesk-glibc-native reset claude-desktop`.
 
 Pokud označený GUI start bez TTY na stdin **i** stdout skončí chybou nebo signálem před
 uplynutím přibližně pěti sekund, zapíše se vyřešený název programu do
@@ -373,8 +398,8 @@ Wrapper, který skončí před pozdějším pádem odpojeného potomka, zůstáv
 
 Program se pro rozhodování vyhledává za `env` včetně `-i`, `-u NAME`, `--unset=NAME`,
 `--unset NAME`, `-0`, `--` a přiřazení proměnných; také za `gpu-run`, `electron-run`
-a jednoduchými tvary `nice`, `setsid`, `stdbuf`. Spouští se původní argv, takže nastavení
-a rušení proměnných zůstává zachováno. Menu směruje známé Chromium wrappery
+a jednoduchými tvary `nice`, `setsid`, `stdbuf`. Kromě náhrady Electron programu mirrorem
+se spouští původní argv, takže nastavení a rušení proměnných zůstává zachováno. Menu směruje známé Chromium wrappery
 (`brave-browser`, `chromium`, `google-chrome` a uvedené varianty) přes `electron-run`.
 Nativní příznak `--disable-dev-shm-usage` byl již přítomen a zůstává zachován.
 
@@ -432,8 +457,11 @@ Service je stále potřeba ověřit na zařízení.
 Native (TracerPid 0, through the patched loader): git, node, python, codex, the Bambu tools,
 Brave (all processes), mpv, WordCraft, SolidCraft, FuCad, OrcaSlicer (software GL),
 tmux and Claude Code in claude-tmux. Under proot by design: apt, dpkg, sudo, wine/Hangover/
-box64/FEX. Falling back to proot automatically: Claude Desktop (Electron, SIGTRAP right after
-it resolves its own executable, cause open), zutty (its 9x18 font is missing in Debian, also
+box64/FEX. Claude Desktop dies with SIGTRAP within 0.1 s through the patched loader,
+even with ELECTRON_RUN_AS_NODE. The exact early CHECK remains unidentified (program-image
+identity / AT_EXECFN / AT_PHDR / self-integrity); the existing patchelf app mirror runs it
+natively with its window. Automatic Electron mirrors now use that same launch path.
+Falling back to proot automatically: zutty (its 9x18 font is missing in Debian, also
 under proot).
 
 Fixed during the night, each found on the device: setid and the whole seccomp blocklist
@@ -445,4 +473,10 @@ history link.
 
 Open: Remote Control does not reconnect when Claude Code runs natively (needs a second test
 instance on Matěj's account, waiting for his OK), so claude-tmux on the tablet still runs
-with DD_NATIVE=0; Claude Desktop natively.
+with DD_NATIVE=0. Recheck the automatic Claude Desktop mirror on the device after resetting
+its learned fallback; only the manual mirror has been validated there so far.
+
+Container regressions cover an Electron fixture built from test.c with resources/app.asar,
+the selected mirror argv behind env/gpu-run/electron-run, native HOME and self re-exec,
+warm reuse without scanning/patching, mtime-only and size changes, resources/app detection,
+.rodata versus an unrelated embedded string, and the missing-patchelf side channel/log/hint.
