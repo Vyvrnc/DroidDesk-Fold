@@ -784,6 +784,94 @@ native_launch() {
     run_native /bin/bash -lc 'cd ~; exec "$@"' debian-run "$@"
 }
 
+update_path_links() {
+    # Bun looks up commands (MCP servers: npx, uvx, node) with its own system calls, past
+    # pathhook, and found nothing in Debian's /usr/bin (Tab S10 FE). This directory holds a
+    # link to the real file for every program in Debian's PATH and goes last in Claude's
+    # PATH: Bun finds the link, exec still goes through pathhook. Rebuilt when a target changes.
+    python3 - "$R" "$N/path-links" <<'PY'
+import fcntl, os, shutil, sys, tempfile
+
+root, dest = sys.argv[1:]
+dirs = ['/usr/local/sbin', '/usr/local/bin', '/usr/sbin', '/usr/bin', '/sbin', '/bin']
+
+def resolve(path):
+    # Like resolve_into: absolute link targets stay inside the Debian rootfs; targets that
+    # already carry the physical rootfs path (pathhook writes such links) are taken as is.
+    done, parts, hops = [], path.split('/'), 0
+    while parts:
+        part = parts.pop(0)
+        if part in ('', '.'):
+            continue
+        if part == '..':
+            if done:
+                done.pop()
+            continue
+        current = root + '/' + '/'.join(done + [part])
+        if os.path.islink(current):
+            hops += 1
+            if hops > 40:
+                return None
+            target = os.readlink(current)
+            if target == root or target.startswith(root + '/'):
+                target = target[len(root):] or '/'
+            if target.startswith('/'):
+                done = []
+            parts = target.split('/') + parts
+        else:
+            done.append(part)
+    return root + '/' + '/'.join(done)
+
+def wanted():
+    # Resolve every name on each launch (stat only): link chains outside PATH and
+    # executable bits change without touching the PATH directories.
+    links, seen = [], set()
+    for directory in dirs:
+        real_dir = resolve(directory)
+        if not real_dir or not os.path.isdir(real_dir):
+            continue
+        for name in sorted(os.listdir(real_dir)):
+            if name in seen or name.startswith('.'):
+                continue
+            target = resolve(directory + '/' + name)
+            if target and os.path.isfile(target) and os.access(target, os.X_OK):
+                seen.add(name)
+                links.append((name, target))
+    return links
+
+def current_manifest():
+    try:
+        with open(os.path.join(dest, '.manifest'), encoding='utf-8', errors='surrogateescape') as f:
+            return f.read()
+    except OSError:
+        return None
+
+parent = os.path.dirname(dest)
+with open(dest + '.lock', 'w') as lock:
+    # Parallel launches would otherwise publish each other's half-built directory.
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    links = wanted()
+    manifest = ''.join(f'{name}\0{target}\n' for name, target in links)
+    if current_manifest() == manifest:
+        sys.exit(0)
+    stage = tempfile.mkdtemp(prefix=os.path.basename(dest) + '.', dir=parent)
+    for name, target in links:
+        os.symlink(target, os.path.join(stage, name))
+    with open(os.path.join(stage, '.manifest'), 'w', encoding='utf-8', errors='surrogateescape') as f:
+        f.write(manifest)
+    os.chmod(stage, 0o755)
+    # dest is a link to the current version, swapped atomically for running processes.
+    previous = os.path.join(parent, os.readlink(dest)) if os.path.islink(dest) else None
+    if os.path.isdir(dest) and not os.path.islink(dest):
+        shutil.rmtree(dest)
+    link = stage + '.link'
+    os.symlink(os.path.basename(stage), link)
+    os.replace(link, dest)
+    if previous and previous != stage and os.path.dirname(previous) == parent and os.path.isdir(previous):
+        shutil.rmtree(previous, ignore_errors=True)
+PY
+}
+
 claude_native() {
     ready
     need_python
@@ -804,6 +892,11 @@ claude_native() {
     mkdir -p "$project" && cd "$project" || fail "Adresář projektu nejde otevřít: $project"
     # The native auto-updater installed a second 281 MB copy into the config HOME.
     local -a claude_env=(/usr/bin/env DISABLE_AUTOUPDATER=1)
+    if update_path_links; then
+        claude_env+=("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$N/path-links")
+    else
+        printf 'Varování: Odkazy na programy pro MCP servery se nepodařilo připravit.\n' >&2
+    fi
     # Installation lookup stays in the Debian home even with an isolated config HOME.
     candidate=$R/root/.local/bin/claude
     if [[ -e $candidate || -L $candidate ]]; then

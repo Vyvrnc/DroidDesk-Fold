@@ -103,6 +103,47 @@ echo "mirror environment restore checks OK"
     cp /usr/bin/env "$root/usr/bin/env"
     cp /bin/bash "$root/usr/bin/bash"
     cp "$root/etc/native-test" "$root/etc/resolv.conf"
+    # Bun closes fd 63 when it spawns; the hook reopens resolv.conf in the child.
+    [[ $("$loader" --library-path "$libs" --preload "$work/hook.so" /bin/cat /proc/self/fd/63 63<&-) == mapped ]]
+    echo "resolv.conf fd restore checks OK"
+    # Links for Bun's PATH lookup: relative and alternatives links resolve inside the rootfs.
+    mkdir -p "$root/usr/share/npm" "$root/etc/alternatives"
+    printf '#!/bin/sh\necho npx-ok "$@"\n' > "$root/usr/share/npm/npx-cli.js"
+    chmod +x "$root/usr/share/npm/npx-cli.js"
+    ln -s ../share/npm/npx-cli.js "$root/usr/bin/npx"
+    ln -s /usr/bin/probe "$root/etc/alternatives/editor"
+    ln -s /etc/alternatives/editor "$root/usr/bin/editor"
+    printf 'data\n' > "$root/usr/bin/not-executable"
+    update_path_links
+    [[ $(readlink "$N/path-links/npx") == "$root/usr/share/npm/npx-cli.js" ]]
+    [[ $(readlink "$N/path-links/editor") == "$root/usr/bin/probe" ]]
+    [[ ! -e $N/path-links/not-executable && -L $N/path-links/sh ]]
+    links_inode=$(stat -c %i "$N/path-links")
+    update_path_links
+    [[ $(stat -c %i "$N/path-links") == "$links_inode" ]]
+    [[ $("$loader" --library-path "$libs" --preload "$work/hook.so" "$root/usr/bin/sh" -c "$N/path-links/npx arg") == "npx-ok arg" ]]
+    rm "$root/usr/bin/npx"
+    update_path_links
+    [[ ! -e $N/path-links/npx && -L $N/path-links/editor ]]
+    # Changes outside PATH directories and links written with the physical rootfs path.
+    mkdir -p "$root/opt/tool/v1" "$root/opt/tool/v2"
+    printf '#!/bin/sh\n' | tee "$root/opt/tool/v1/tool" > "$root/opt/tool/v2/tool"
+    chmod +x "$root/opt/tool/v1/tool" "$root/opt/tool/v2/tool"
+    ln -s /opt/tool/v1 "$root/opt/tool/current"
+    ln -s /opt/tool/current/tool "$root/usr/bin/tool"
+    ln -s "$root/opt/tool/v1/tool" "$root/usr/bin/physical-tool"
+    update_path_links
+    [[ $(readlink "$N/path-links/tool") == "$root/opt/tool/v1/tool" ]]
+    [[ $(readlink "$N/path-links/physical-tool") == "$root/opt/tool/v1/tool" ]]
+    ln -sfn /opt/tool/v2 "$root/opt/tool/current"
+    chmod -x "$root/opt/tool/v1/tool"
+    update_path_links
+    [[ $(readlink "$N/path-links/tool") == "$root/opt/tool/v2/tool" && ! -e $N/path-links/physical-tool ]]
+    [[ $(find "$N" -maxdepth 1 -name 'path-links.*' -type d | wc -l) == 1 ]]
+    # Parallel launches never publish a partial directory.
+    for i in 1 2 3 4; do update_path_links & done; wait
+    [[ -L $N/path-links/sh && -L $N/path-links/tool && $(find "$N" -maxdepth 1 -name 'path-links.*' -type d | wc -l) == 1 ]]
+    echo "PATH link checks OK"
     touch "$N/stamp"
     mkdir -p "$root/usr/lib/locale/C.utf8"
     ln -s /opt/native-test.so "$root/usr/lib/aarch64-linux-gnu/libnative-alias.so"

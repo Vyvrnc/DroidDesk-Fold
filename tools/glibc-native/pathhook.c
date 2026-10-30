@@ -106,6 +106,20 @@ __attribute__((constructor(101))) static void restore_mirror_env(void) {
         setenv(line, eq + 1, replace);
     }
 }
+/* The patched libc reads resolv.conf from fd 63, which the launcher opens. Bun closes every
+ * fd above 2 when it spawns, so the Bash tool of native Claude had no DNS (Tab S10 FE).
+ * Reopen it here; inheritable like the launcher's, so later children keep it. */
+__attribute__((constructor(102))) static void restore_resolv_fd(void) {
+    const char *root = getenv("DD_ROOTFS");
+    char path[PATH_MAX];
+    int e = errno;
+    if (root && fcntl(63, F_GETFD) < 0 && errno == EBADF &&
+        snprintf(path, sizeof path, "%s/etc/resolv.conf", root) < (int)sizeof path) {
+        int fd = (int)syscall(SYS_openat, AT_FDCWD, path, O_RDONLY);
+        if (fd >= 0 && fd != 63) { dup2(fd, 63); close(fd); }
+    }
+    errno = e;
+}
 static int is_proc_self_exe(const char *p) {
     if (!p) return 0;
     if (!strcmp(p, "/proc/self/exe") || !strcmp(p, "/proc/thread-self/exe")) return 1;
