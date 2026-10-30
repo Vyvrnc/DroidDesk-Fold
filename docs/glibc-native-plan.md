@@ -537,7 +537,7 @@ Later the same day (fold.101, still unreleased):
   rootfs and cwd (`proot -r ROOT ... /usr/bin/env -i ENV PROGRAM`); physical rootfs and /tmp
   paths in arguments and environment values become Debian paths, a custom argv[0] is kept via
   bash's exec -a, proot itself runs without the Termux LD_PRELOAD. codex (static musl) starts in
-  0.12 s that way. A static Go program was not tested on the tablet yet.
+  0.12 s that way. Static programs outside the rootfs (npm packages in the Termux home) keep their path with their directory bound in: esbuild 0.28.2 (Go) bundles Debian paths in 57 ms.
 - seccomp-probe.c showed that an app may use seccomp user notifications with ADDFD and read and
   write the target's memory, so a supervisor without proot is possible; execve would still need
   ptrace, because user notifications cannot change syscall arguments. Static glibc programs also
