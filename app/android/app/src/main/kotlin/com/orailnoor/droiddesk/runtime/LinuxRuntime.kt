@@ -601,6 +601,8 @@ class LinuxRuntime(private val context: Context) {
             export TMPDIR="${tmpDir.absolutePath}"
             native="${binDir.absolutePath}/droiddesk-glibc-native"
             if [ -x "${'$'}native" ] && native_result=${'$'}(mktemp "${'$'}TMPDIR/droiddesk-native-result.XXXXXX"); then
+                # Bun finds MCP commands (npx, uvx) only through real paths: see path-links.
+                "${'$'}native" path-links >/dev/null 2>&1 || true
                 DD_NATIVE_RESULT="${'$'}native_result" "${'$'}native" try bash -lc 'mkdir -p ~/projekty/Claude; cd ~/projekty/Claude || cd ~; PATH="${'$'}HOME/.local/bin:${'$'}PATH"
                     # proot has no uid map, so Claude Code (2.1.289+) turns local cross-session
                     # messaging off unless it gets a socket path. One socket per session; the
@@ -610,6 +612,8 @@ class LinuxRuntime(private val context: Context) {
                     for s in ${'$'}d/*.sock; do [ -e "${'$'}s" ] || continue; p=${'$'}{s##*/}; kill -0 ${'$'}{p%.sock} 2>/dev/null || rm -f "${'$'}s"; done
                     if [ -n "${'$'}{DD_ROOTFS:-}" ]; then
                         export DISABLE_AUTOUPDATER=1
+                        links=${'$'}{DD_SAVED_PREFIX:-}/opt/glibc-native/path-links
+                        [ ! -d "${'$'}links" ] || PATH=${'$'}PATH:${'$'}links
                         real=${'$'}(pwd -P); virt=${'$'}{real#"${'$'}DD_ROOTFS"}
                         p=${'$'}HOME/.claude/projects; mkdir -p "${'$'}p"
                         key=${'$'}(printf %s "${'$'}real" | sed "s/[^A-Za-z0-9]/-/g")

@@ -944,6 +944,7 @@ case $command in
     reset) native_reset "$@" ;;
     learn) native_learn "$@" ;;
     claude) claude_native "$@" ;;
+    path-links) ready; need_python; update_path_links ;;
     selftest) selftest ;;
-    *) fail 'Použití: droiddesk-glibc-native {setup|on|off|status|learn NÁZEV|reset NÁZEV|--all|try PŘÍKAZ [ARGUMENTY]|patch PROGRAM...|app ADRESÁŘ PROGRAM|run PŘÍKAZ [ARGUMENTY]|claude [ARGUMENTY]|selftest}' ;;
+    *) fail 'Použití: droiddesk-glibc-native {setup|on|off|status|learn NÁZEV|reset NÁZEV|--all|try PŘÍKAZ [ARGUMENTY]|patch PROGRAM...|app ADRESÁŘ PROGRAM|run PŘÍKAZ [ARGUMENTY]|claude [ARGUMENTY]|path-links|selftest}' ;;
 esac
