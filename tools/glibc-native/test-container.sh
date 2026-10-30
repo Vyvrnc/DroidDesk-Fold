@@ -68,6 +68,9 @@ for how in proc loader; do
     [[ $out == "selfexec child --no-config exe-ok" ]] || { echo "self re-exec ($how): $out" >&2; exit 1; }
 done
 echo "self re-exec checks OK"
+# Process name from --argv0 instead of "ld.so" (pgrep, pkill).
+[[ $("$work/plib/ld.so" --library-path "$libs" --preload "$work/hook.so" --argv0 /opt/x/my-probe "$root/usr/bin/probe" comm) == my-probe ]]
+echo "process name checks OK"
 # accept under a filter that kills the accept syscall (Android): the hook must use accept4.
 gcc -O2 -Wall -Wextra -Werror -o "$work/acceptseccomp" /repo/tools/glibc-native/acceptseccomp.c
 [[ $(LD_PRELOAD="$work/hook.so" "$work/acceptseccomp") == "accept ok" ]]

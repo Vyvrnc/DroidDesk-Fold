@@ -25,6 +25,14 @@
 #include <grp.h>
 #include <pthread.h>
 #include <ftw.h>
+#include <signal.h>
+#include <time.h>
+#include <utime.h>
+#include <sys/inotify.h>
+#include <sys/prctl.h>
+#include <sys/random.h>
+#include <sys/wait.h>
+#include <sys/xattr.h>
 extern char **environ;
 
 /* The hook's own system calls skip the syscall() interposition below: it maps paths, and
@@ -72,15 +80,24 @@ __attribute__((constructor)) static void find_self_exe(void) {
     close(fd);
     if (n <= 0) return;
     buf[n] = 0;
-    char *a = buf, *end = buf + n;
+    char *a = buf, *end = buf + n, *argv0 = NULL;
     if (!is_loader(a)) return;
     for (a += strlen(a) + 1; a < end; a += strlen(a) + 1) {
-        if (ld_option_with_value(a)) { a += strlen(a) + 1; continue; }
+        if (ld_option_with_value(a)) {
+            if (!strcmp(a, "--argv0") && a + strlen(a) + 1 < end) argv0 = a + strlen(a) + 1;
+            a += strlen(a) + 1; continue;
+        }
         if (!strcmp(a, "--")) { a += strlen(a) + 1; break; }
         if (ld_option(a)) continue;
         break;
     }
     if (a < end && *a && strlen(a) < sizeof self_exe) strcpy(self_exe, a);
+    /* Every native process was called "ld.so": pgrep, pkill and top showed only the loader. */
+    const char *name = argv0 && *argv0 ? argv0 : self_exe;
+    if (*name) {
+        const char *base = strrchr(name, '/');
+        prctl(PR_SET_NAME, base && base[1] ? base + 1 : name, 0, 0, 0);
+    }
 }
 /* Programs from an app mirror (patchelf copies, Electron) can lose the native runtime from
  * their environment: Electron re-launches itself with a cleaned one, and its D-Bus client then
@@ -927,3 +944,161 @@ static int spawn_command(pid_t *pid, const char *file, const posix_spawn_file_ac
 }
 int posix_spawn(pid_t *pid, const char *p, const posix_spawn_file_actions_t *f, const posix_spawnattr_t *t, char *const a[], char *const e[]) { return spawn_command(pid, p, f, t, a, e, 0); }
 int posix_spawnp(pid_t *pid, const char *p, const posix_spawn_file_actions_t *f, const posix_spawnattr_t *t, char *const a[], char *const e[]) { return spawn_command(pid, p, f, t, a, e, 1); }
+
+/* glibc's system() and popen() exec /bin/sh with internal calls past this hook: on Android
+ * that ran mksh with Debian's PATH (Python os.system, audit on Tab S10 FE). Keep glibc's
+ * implementations (signals, streams, pclose) and hand Android's sh a command that execs
+ * Debian's sh through the loader and this hook. */
+static void shell_quote(char **out, const char *s) {
+    *(*out)++ = '\'';
+    for (; *s; ++s) {
+        if (*s == '\'') { memcpy(*out, "'\\''", 4); *out += 4; }
+        else *(*out)++ = *s;
+    }
+    *(*out)++ = '\'';
+    *(*out)++ = ' ';
+}
+/* NULL with *failed unset: no native runtime here, run the command as glibc would. */
+static char *debian_shell_command(const char *cmd, int *failed) {
+    const char *plib = getenv("DD_PLIB"), *lp = getenv("DD_LIBPATH");
+    char sh[PATH_MAX], loader[PATH_MAX];
+    Dl_info own;
+    *failed = 0;
+    if (!cmd || !plib || !lp) return NULL;
+    *failed = 1;
+    if (!dladdr((void *)debian_shell_command, &own) || !own.dli_fname) { errno = ENOENT; return NULL; }
+    char *(*raw_realpath)(const char *, char *) = dlsym(RTLD_NEXT, "realpath");
+    char *hook = raw_realpath(own.dli_fname, NULL);
+    const char *shell = mapped("/bin/sh", sh, 0);
+    if (!hook || !shell || snprintf(loader, sizeof loader, "%s/ld.so", plib) >= (int)sizeof loader) {
+        free(hook); return NULL;
+    }
+    const char *parts[] = {loader, "--library-path", lp, "--preload", hook, "--argv0", "sh", shell, "-c", "--", cmd};
+    size_t size = sizeof "exec ";
+    for (size_t i = 0; i < sizeof parts / sizeof parts[0]; ++i) size += strlen(parts[i]) * 4 + 3;
+    char *line = malloc(size), *out = line;
+    if (!line) errno = ENOMEM;
+    else {
+        *failed = 0;
+        memcpy(out, "exec ", 5); out += 5;
+        for (size_t i = 0; i < sizeof parts / sizeof parts[0]; ++i) shell_quote(&out, parts[i]);
+        out[-1] = 0;
+    }
+    free(hook);
+    return line;
+}
+int system(const char *cmd) {
+    REAL(system, int, const char *);
+    int failed;
+    char *line = debian_shell_command(cmd, &failed);
+    if (failed) return -1;
+    int rc = real_system(line ? line : cmd);
+    int e = errno; free(line); errno = e;
+    return rc;
+}
+FILE *popen(const char *cmd, const char *mode) {
+    REAL(popen, FILE *, const char *, const char *);
+    int failed;
+    char *line = debian_shell_command(cmd, &failed);
+    if (failed) return NULL;
+    FILE *f = real_popen(line ? line : cmd, mode);
+    int e = errno; free(line); errno = e;
+    return f;
+}
+
+/* mkstemp and relatives open with internal calls: /tmp was Android's, so EACCES. The name
+ * keeps the caller's Debian path; open and mkdir below go through the hook. */
+static int make_temp(char *name, int suffix, int flags, int directory) {
+    static const char letters[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    size_t len = name ? strlen(name) : 0;
+    if (suffix < 0 || len < 6 + (size_t)suffix || memcmp(name + len - suffix - 6, "XXXXXX", 6)) {
+        errno = EINVAL; return -1;
+    }
+    char *x = name + len - suffix - 6;
+    int saved = errno;
+    for (int attempt = 0; attempt < 238328; ++attempt) {
+        unsigned char r[6];
+        if (getrandom(r, sizeof r, 0) != (ssize_t)sizeof r) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            uint64_t v = (uint64_t)now.tv_nsec ^ ((uint64_t)getpid() << 20) ^ (uint64_t)attempt * 7919;
+            for (int i = 0; i < 6; ++i) { r[i] = (unsigned char)v; v >>= 8; }
+        }
+        for (int i = 0; i < 6; ++i) x[i] = letters[r[i] % 62];
+        int fd = directory ? mkdir(name, 0700)
+                           : open(name, (flags & ~O_ACCMODE) | O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0) { errno = saved; return fd; }
+        if (errno != EEXIST) return -1;
+    }
+    errno = EEXIST; return -1;
+}
+int mkstemp(char *t) { return make_temp(t, 0, 0, 0); }
+int mkstemp64(char *t) { return make_temp(t, 0, 0, 0); }
+int mkostemp(char *t, int f) { return make_temp(t, 0, f, 0); }
+int mkostemp64(char *t, int f) { return make_temp(t, 0, f, 0); }
+int mkstemps(char *t, int s) { return make_temp(t, s, 0, 0); }
+int mkstemps64(char *t, int s) { return make_temp(t, s, 0, 0); }
+int mkostemps(char *t, int s, int f) { return make_temp(t, s, f, 0); }
+int mkostemps64(char *t, int s, int f) { return make_temp(t, s, f, 0); }
+char *mkdtemp(char *t) { return make_temp(t, 0, 0, 1) ? NULL : t; }
+FILE *tmpfile(void) {
+    char name[] = "/tmp/tmpfXXXXXX";
+    int fd = make_temp(name, 0, 0, 0);
+    if (fd < 0) return NULL;
+    unlink(name);
+    FILE *f = fdopen(fd, "w+");
+    if (!f) { int e = errno; close(fd); errno = e; }
+    return f;
+}
+FILE *tmpfile64(void) { return tmpfile(); }
+
+/* execl and execle build argv and call execve internally. */
+static int exec_list(const char *path, const char *arg, va_list ap, int with_env) {
+    va_list count;
+    va_copy(count, ap);
+    size_t n = 1;
+    while (va_arg(count, const char *)) ++n;
+    va_end(count);
+    const char **argv = calloc(n + 1, sizeof *argv);
+    if (!argv) { errno = ENOMEM; return -1; }
+    argv[0] = arg;
+    for (size_t i = 1; i < n; ++i) argv[i] = va_arg(ap, const char *);
+    (void)va_arg(ap, const char *);
+    char *const *env = with_env ? va_arg(ap, char *const *) : environ;
+    int rc = execute(path, (char *const *)argv, env, 0);
+    int e = errno; free(argv); errno = e;
+    return rc;
+}
+int execl(const char *path, const char *arg, ...) {
+    va_list ap; va_start(ap, arg);
+    int rc = exec_list(path, arg, ap, 0);
+    va_end(ap); return rc;
+}
+int execle(const char *path, const char *arg, ...) {
+    va_list ap; va_start(ap, arg);
+    int rc = exec_list(path, arg, ap, 1);
+    va_end(ap); return rc;
+}
+
+/* Path functions glibc implements without the wrapped entry points (audit, Tab S10 FE). */
+int creat(const char *p, mode_t m) { return open(p, O_CREAT | O_WRONLY | O_TRUNC, m); }
+int creat64(const char *p, mode_t m) { return open(p, O_CREAT | O_WRONLY | O_TRUNC, m); }
+int mkfifo(const char *p, mode_t m) { REAL(mkfifo, int, const char *, mode_t); return real_mkfifo(map(p, 1), m); }
+int mkfifoat(int d, const char *p, mode_t m) { REAL(mkfifoat, int, int, const char *, mode_t); return real_mkfifoat(d, map(p, 1), m); }
+int mknod(const char *p, mode_t m, dev_t v) { REAL(mknod, int, const char *, mode_t, dev_t); return real_mknod(map(p, 1), m, v); }
+int mknodat(int d, const char *p, mode_t m, dev_t v) { REAL(mknodat, int, int, const char *, mode_t, dev_t); return real_mknodat(d, map(p, 1), m, v); }
+int utime(const char *p, const struct utimbuf *t) { REAL(utime, int, const char *, const struct utimbuf *); return real_utime(map(p, 0), t); }
+int lutimes(const char *p, const struct timeval t[2]) { REAL(lutimes, int, const char *, const struct timeval *); return real_lutimes(map(p, 1), t); }
+long pathconf(const char *p, int n) { REAL(pathconf, long, const char *, int); return real_pathconf(map(p, 0), n); }
+FILE *freopen(const char *p, const char *m, FILE *f) { REAL(freopen, FILE *, const char *, const char *, FILE *); return real_freopen(p ? map(p, 0) : NULL, m, f); }
+FILE *freopen64(const char *p, const char *m, FILE *f) { REAL(freopen64, FILE *, const char *, const char *, FILE *); return real_freopen64(p ? map(p, 0) : NULL, m, f); }
+/* fs.watch (vite, nodemon, tsc --watch) watched Android paths. */
+int inotify_add_watch(int fd, const char *p, uint32_t m) { REAL(inotify_add_watch, int, int, const char *, uint32_t); return real_inotify_add_watch(fd, map(p, (m & IN_DONT_FOLLOW) != 0), m); }
+ssize_t getxattr(const char *p, const char *n, void *v, size_t s) { REAL(getxattr, ssize_t, const char *, const char *, void *, size_t); return real_getxattr(map(p, 0), n, v, s); }
+ssize_t lgetxattr(const char *p, const char *n, void *v, size_t s) { REAL(lgetxattr, ssize_t, const char *, const char *, void *, size_t); return real_lgetxattr(map(p, 1), n, v, s); }
+int setxattr(const char *p, const char *n, const void *v, size_t s, int f) { REAL(setxattr, int, const char *, const char *, const void *, size_t, int); return real_setxattr(map(p, 0), n, v, s, f); }
+int lsetxattr(const char *p, const char *n, const void *v, size_t s, int f) { REAL(lsetxattr, int, const char *, const char *, const void *, size_t, int); return real_lsetxattr(map(p, 1), n, v, s, f); }
+ssize_t listxattr(const char *p, char *l, size_t s) { REAL(listxattr, ssize_t, const char *, char *, size_t); return real_listxattr(map(p, 0), l, s); }
+ssize_t llistxattr(const char *p, char *l, size_t s) { REAL(llistxattr, ssize_t, const char *, char *, size_t); return real_llistxattr(map(p, 1), l, s); }
+int removexattr(const char *p, const char *n) { REAL(removexattr, int, const char *, const char *); return real_removexattr(map(p, 0), n); }
+int lremovexattr(const char *p, const char *n) { REAL(lremovexattr, int, const char *, const char *); return real_lremovexattr(map(p, 1), n); }

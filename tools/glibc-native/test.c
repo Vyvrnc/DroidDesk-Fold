@@ -19,6 +19,9 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/syscall.h>
+#include <sys/inotify.h>
+#include <sys/prctl.h>
+#include <sys/xattr.h>
 #include <stddef.h>
 #include <unistd.h>
 
@@ -253,6 +256,12 @@ static void unix_sockets(void) {
 }
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "nss")) { nss(); return 0; }
+    if (argc > 1 && !strcmp(argv[1], "comm")) {
+        char name[17] = {0};
+        prctl(PR_GET_NAME, name, 0, 0, 0);
+        puts(name);
+        return 0;
+    }
     if (argc > 1 && !strcmp(argv[1], "unix")) { unix_sockets(); return 0; }
     if (argc > 1 && !strcmp(argv[1], "context")) {
         check(getenv("DD_NATIVE_ACTIVE") && !strcmp(getenv("DD_NATIVE_ACTIVE"), "1"), "native active marker");
@@ -376,6 +385,37 @@ int main(int argc, char **argv) {
     check(!syscall(SYS_faccessat, AT_FDCWD, "/etc/native-test", R_OK), "syscall faccessat");
     int sfd = (int)syscall(SYS_openat, AT_FDCWD, "/etc/native-test", O_RDONLY | O_CLOEXEC);
     check(sfd >= 0, "syscall openat"); if (sfd >= 0) close(sfd);
+    /* glibc internals past the PLT (audit, Tab S10 FE): Debian sh, /tmp, inotify, xattr. */
+    check(system("read l < /etc/native-test && test \"$l\" = mapped") == 0, "system runs Debian sh");
+    FILE *pf = popen("read l < /etc/native-test; echo \"$l\"", "r");
+    char pline[32] = {0};
+    check(pf && fgets(pline, sizeof pline, pf) && !strcmp(pline, "mapped\n"), "popen read");
+    check(pf && pclose(pf) == 0, "pclose status");
+    pf = popen("echo \"it's\"", "r");
+    check(pf && fgets(pline, sizeof pline, pf) && !strcmp(pline, "it's\n"), "popen quoting");
+    check(pf && pclose(pf) == 0, "popen quoting status");
+    check(WEXITSTATUS(system("exit 3")) == 3, "system exit status");
+    pf = popen("read l; test \"$l\" = sent", "w");
+    check(pf && fputs("sent\n", pf) >= 0, "popen write");
+    check(pf && pclose(pf) == 0, "popen write status");
+    char tname[] = "/tmp/ddtestXXXXXX", treal[PATH_MAX];
+    int tfd = mkstemp(tname);
+    snprintf(treal, sizeof treal, "%s/%s", getenv("DD_TMP"), tname + 5);
+    check(tfd >= 0 && !strncmp(tname, "/tmp/ddtest", 11) && !access(treal, F_OK), "mkstemp in DD_TMP");
+    if (tfd >= 0) { close(tfd); unlink(tname); }
+    char sname[] = "/tmp/ddtestXXXXXX.txt";
+    tfd = mkstemps(sname, 4);
+    check(tfd >= 0 && !strcmp(sname + strlen(sname) - 4, ".txt"), "mkstemps suffix");
+    if (tfd >= 0) { close(tfd); unlink(sname); }
+    char dname[] = "/tmp/ddtestXXXXXX";
+    check(mkdtemp(dname) && !rmdir(dname), "mkdtemp in DD_TMP");
+    FILE *tf = tmpfile();
+    check(tf && fputs("x", tf) >= 0, "tmpfile"); if (tf) fclose(tf);
+    int ifd = inotify_init1(IN_CLOEXEC);
+    check(ifd >= 0 && inotify_add_watch(ifd, "/etc/native-test", IN_MODIFY) >= 0, "inotify watch mapped");
+    if (ifd >= 0) close(ifd);
+    char xv[8];
+    check(getxattr("/etc/native-test", "user.dd-test", xv, sizeof xv) < 0 && errno != ENOENT, "getxattr mapped");
     char target[PATH_MAX];
     ssize_t size = readlink("/etc/absolute-file", target, sizeof(target) - 1);
     check(size > 0, "readlink absolute link"); target[size] = 0;
