@@ -87,7 +87,8 @@ class LinuxRuntime(private val context: Context) {
         // 17: NO_AT_BRIDGE for Debian GTK apps (droiddesk-gui.sh).
         // 18: ripgrep (native Claude Code: Grep and Glob through the hook).
         // 19: Mesa 26.2.6-1 (glxgears/glmark2 crash fixed).
-        private const val DEBIAN_SETUP_VERSION = 19
+        // 20: wmctrl, xdotool, x11-utils for droiddesk-zones.
+        private const val DEBIAN_SETUP_VERSION = 20
         private const val MESA_KGSL_SHA256 = "13c78f6ebe3f7ceafad61133e788997ef76bbe1d3dbfd5937c9f25e92114f4da"
         // Craft app ids (table in assets/droiddesk/craft-install.sh); also guards the shell command.
         private val CRAFT_ID = Regex("[a-z]{1,20}craft")
@@ -1028,7 +1029,7 @@ class LinuxRuntime(private val context: Context) {
             set -e
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
-            apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates dbus-x11 xz-utils pulseaudio-utils libnotify-bin tmux proxychains4 xclip libxcb-keysyms1 ripgrep
+            apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates dbus-x11 xz-utils pulseaudio-utils libnotify-bin tmux proxychains4 xclip libxcb-keysyms1 ripgrep wmctrl xdotool x11-utils
             # Debian's own session bus and keyring (droiddesk-session-bus, started by the app):
             # Electron's safeStorage and other libsecret apps keep their secrets there.
             apt-get install -y --no-install-recommends dbus-daemon dbus-bin gnome-keyring libsecret-1-0
@@ -1651,6 +1652,24 @@ class LinuxRuntime(private val context: Context) {
      * session (Claude Code without the desktop) has them after an update too.
      */
     fun writeDeviceTools() {
+        // Window zones for wide monitors (FancyZones-like): the script lives in Debian (xdotool,
+        // wmctrl), the Termux wrapper is what the XFCE shortcuts call.
+        runCatching {
+            val debianBin = File(debianRootfs(baseDir), "usr/local/bin")
+            if (debianBin.isDirectory) {
+                val zones = File(debianBin, "droiddesk-zones")
+                copyAssetAtomically("droiddesk/droiddesk-zones", zones)
+                zones.setExecutable(true, false)
+                File(binDir, "droiddesk-zones").let { command ->
+                    command.writeText(
+                        "#!${File(binDir, "bash").absolutePath}\n" +
+                            "exec \"${File(binDir, "debian-run").absolutePath}\" /usr/local/bin/droiddesk-zones \"${'$'}@\"\n",
+                    )
+                    command.setExecutable(true, false)
+                }
+            }
+        }.onFailure { Log.w(TAG, "Writing droiddesk-zones failed: ${it.message}") }
+
         // USB flash drives and card readers through UsbBridge.
         runCatching {
             val usbClient = File(binDir, "droiddesk-usb.py")
@@ -2014,6 +2033,31 @@ class LinuxRuntime(private val context: Context) {
                     xfconf-query -c thunar -p /misc-thumbnail-mode >/dev/null 2>&1 ||
                         xfconf-query -c thunar -p /misc-thumbnail-mode -n -t string -s THUNAR_THUMBNAIL_MODE_ALWAYS
                     mkdir -p "${'$'}(dirname "${'$'}marker3")" && touch "${'$'}marker3"
+                fi
+
+                # Window zones (droiddesk-zones, 25|50|25 on 32:9): Super+Ctrl+1/2/3 into a zone,
+                # +4/+5 across two, Super+Ctrl+Left/Right one zone over. A custom command set
+                # replaces the default one, so it starts as a copy of the defaults. Keys the
+                # user already bound stay theirs.
+                marker5="${'$'}HOME/.config/droiddesk/xfce-zones-v1"
+                if [ ! -f "${'$'}marker5" ] && command -v xfconf-query >/dev/null; then
+                    ks=xfce4-keyboard-shortcuts
+                    if ! xfconf-query -c ${'$'}ks -p /commands/custom/override >/dev/null 2>&1; then
+                        xfconf-query -c ${'$'}ks -l | grep '^/commands/default/' | while read -r prop; do
+                            value=${'$'}(xfconf-query -c ${'$'}ks -p "${'$'}prop") || continue
+                            xfconf-query -c ${'$'}ks -p "/commands/custom/${'$'}{prop#/commands/default/}" -n -t string -s "${'$'}value"
+                        done
+                        xfconf-query -c ${'$'}ks -p /commands/custom/override -n -t bool -s true
+                    fi
+                    zones="${File(binDir, "droiddesk-zones").absolutePath}"
+                    for pair in "<Super><Primary>1=1" "<Super><Primary>2=2" "<Super><Primary>3=3" \
+                        "<Super><Primary>4=1-2" "<Super><Primary>5=2-3" \
+                        "<Super><Primary>Left=left" "<Super><Primary>Right=right"; do
+                        key="/commands/custom/${'$'}{pair%%=*}"
+                        xfconf-query -c ${'$'}ks -p "${'$'}key" >/dev/null 2>&1 ||
+                            xfconf-query -c ${'$'}ks -p "${'$'}key" -n -t string -s "${'$'}zones ${'$'}{pair#*=}"
+                    done
+                    mkdir -p "${'$'}(dirname "${'$'}marker5")" && touch "${'$'}marker5"
                 fi
 
                 # The look chosen on the Fold: Fluent (vinceliuice, Termux packages

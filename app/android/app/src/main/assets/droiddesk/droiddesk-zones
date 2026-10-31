@@ -1,0 +1,75 @@
+#!/bin/bash
+# droiddesk-zones: FancyZones-like window zones for XFCE on wide monitors.
+#   droiddesk-zones N            put the active window into zone N (1 = leftmost)
+#   droiddesk-zones A-B          span zones A to B (e.g. 1-2)
+#   droiddesk-zones left|right   move the active window one zone to the side
+#   droiddesk-zones layout       print the zones (pixels) and where they come from
+# Zones are column widths in percent, from ~/.config/droiddesk/zones (one line, e.g.
+# "25 50 25"); without it: 25 50 25 on 32:9 and wider, 33 34 33 on 21:9, 50 50 otherwise.
+# Needs xdotool, xprop and wmctrl (Debian: xdotool x11-utils wmctrl; debian-setup installs them).
+set -euo pipefail
+export DISPLAY=${DISPLAY:-:0}
+
+die() { echo "droiddesk-zones: $*" >&2; exit 1; }
+for tool in xdotool xprop wmctrl; do command -v "$tool" >/dev/null || die "chybí $tool"; done
+
+# Work area of the current desktop: x, y, width, height without panels.
+read -r wx wy ww wh < <(xprop -root _NET_WORKAREA | sed 's/.*= //; s/,/ /g' | awk '{print $1, $2, $3, $4}')
+[[ ${ww:-0} -gt 0 && ${wh:-0} -gt 0 ]] || die "pracovní plochu nejde zjistit"
+
+conf=${XDG_CONFIG_HOME:-$HOME/.config}/droiddesk/zones
+source=config
+if [[ -r $conf ]] && read -r -a widths < "$conf" && (( ${#widths[@]} > 0 )); then :
+else
+    source=default
+    if (( ww * 10 >= wh * 28 )); then widths=(25 50 25)
+    elif (( ww * 10 >= wh * 21 )); then widths=(33 34 33)
+    else widths=(50 50)
+    fi
+fi
+total=0; for w in "${widths[@]}"; do [[ $w =~ ^[0-9]+$ ]] || die "neplatná šířka zóny: $w"; total=$((total + w)); done
+(( total > 0 )) || die "součet šířek je 0"
+
+# Column edges in pixels; the last edge is exactly the right border.
+edges=("$wx"); acc=0
+for w in "${widths[@]}"; do acc=$((acc + w)); edges+=($((wx + ww * acc / total))); done
+count=${#widths[@]}
+
+if [[ ${1:-} == layout ]]; then
+    echo "work area ${ww}x${wh}+${wx}+${wy}, zones (${source}): ${widths[*]}"
+    for ((i = 0; i < count; i++)); do echo "zone $((i + 1)): x ${edges[i]}..${edges[i + 1]}"; done
+    exit 0
+fi
+
+win=$(xdotool getactivewindow) || die "žádné aktivní okno"
+
+# Zone index (0-based) of the window's center, for left/right.
+current_zone() {
+    local cx i
+    eval "$(xdotool getwindowgeometry --shell "$win" | grep -E '^(X|Y|WIDTH|HEIGHT)=')"
+    cx=$((X + WIDTH / 2))
+    for ((i = 0; i < count; i++)); do (( cx < edges[i + 1] )) && { echo "$i"; return; }; done
+    echo $((count - 1))
+}
+
+case ${1:-} in
+    left|right)
+        z=$(current_zone)
+        if [[ $1 == left ]]; then z=$((z > 0 ? z - 1 : 0)); else z=$((z < count - 1 ? z + 1 : count - 1)); fi
+        first=$z; last=$z ;;
+    [0-9]-[0-9]) first=$((${1%-*} - 1)); last=$((${1#*-} - 1)) ;;
+    [0-9]) first=$(($1 - 1)); last=$first ;;
+    *) die "použití: droiddesk-zones N | A-B | left | right | layout" ;;
+esac
+(( first >= 0 && last < count && first <= last )) || die "zóna mimo rozsah 1-$count"
+
+# xfwm4 ignores moves of a maximized window: unmaximize first (xdotool 3.20160805 in trixie
+# has no windowstate, so wmctrl).
+wmctrl -i -r "$win" -b remove,maximized_vert,maximized_horz || die "okno nejde odmaximalizovat"
+# Under xfwm4 windowmove places the frame and windowsize sizes the client: move to the zone
+# edge, shrink the size by the decorations (Fold 7, 49" DeX monitor).
+read -r fl fr ft fb < <(xprop -id "$win" _NET_FRAME_EXTENTS 2>/dev/null | sed -n 's/.*= //p' | tr -d ',' ) || true
+fl=${fl:-0}; fr=${fr:-0}; ft=${ft:-0}; fb=${fb:-0}
+x=${edges[first]}; y=$wy
+w=$((edges[last + 1] - edges[first] - fl - fr)); h=$((wh - ft - fb))
+xdotool windowsize "$win" "$w" "$h" windowmove "$win" "$x" "$y"
