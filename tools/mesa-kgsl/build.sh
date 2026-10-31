@@ -6,17 +6,17 @@
 # Run from the repo root. Takes a few hours under emulation. See NOTES.md.
 set -euo pipefail
 
-MESA_VERSION=26.2.3
+MESA_VERSION=26.2.6
 # Bump when the build changes for the same Mesa version (asset name and tag).
-ASSET_REVISION=2
-MESA_SHA256=1628058a8d2c0615975de5a15ab7bbb9638c50000b5bed9456ff423ea034a81f
-TERMUX_PACKAGES_COMMIT=dab70fe87265d1e0f56375e47e27d17a1bf607b4
+ASSET_REVISION=1
+MESA_SHA256=b9436b3e1a8be76fbd4823dc884f90596ab7c6ac5e1867a305e66ffccfb31a92
+TERMUX_PACKAGES_COMMIT=84f9775ddbeda5eb04ceabd7c86f340ac4c9ccbb
 OUT_DIR="${OUT_DIR:-$HOME/DroidDesk-build}"
 to_host() { command -v cygpath >/dev/null && cygpath -m "$1" || echo "$1"; }
 
 mkdir -p "$OUT_DIR"
 MSYS_NO_PATHCONV=1 docker run --rm --platform linux/arm64 \
-    -v "$(to_host "$OUT_DIR"):/out" debian:trixie bash -c "
+    -v "$(to_host "$OUT_DIR"):/out" -v "$(to_host "$PWD/tools/mesa-kgsl"):/patches:ro" debian:trixie bash -c "
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
@@ -38,6 +38,8 @@ for p in 0014-replace-turnip-wait_timestamp_safe-assert.patch \
          0018-disable-general-layout-in-zink-for-turnip.patch; do
     curl -fsSL https://raw.githubusercontent.com/termux/termux-packages/$TERMUX_PACKAGES_COMMIT/packages/mesa/\$p | patch -p1
 done
+# Our own fixes (glxgears and glmark2 crashed on the drisw swap interval).
+for p in /patches/*.patch; do patch -p1 < \$p; done
 
 meson setup build --prefix=/opt/mesa-kgsl --libdir=lib/aarch64-linux-gnu -Dbuildtype=release \
     -Dvulkan-drivers=freedreno -Dfreedreno-kmds=msm,kgsl -Dgallium-drivers=zink,softpipe -Dplatforms=x11 \
@@ -46,6 +48,7 @@ meson setup build --prefix=/opt/mesa-kgsl --libdir=lib/aarch64-linux-gnu -Dbuild
     -Dvideo-codecs= -Dbuild-tests=false
 ninja -C build
 DESTDIR=/tmp/stage ninja -C build install
+echo $MESA_VERSION-$ASSET_REVISION > /tmp/stage/opt/mesa-kgsl/.droiddesk-version
 tar -C /tmp/stage -cJf /out/mesa-kgsl-$MESA_VERSION-$ASSET_REVISION-arm64.tar.xz opt/mesa-kgsl
 sha256sum /out/mesa-kgsl-$MESA_VERSION-$ASSET_REVISION-arm64.tar.xz
 "
