@@ -654,28 +654,31 @@ class LinuxRuntime(private val context: Context) {
                         p=${'$'}HOME/.claude/projects; mkdir -p "${'$'}p"
                         key=${'$'}(printf %s "${'$'}real" | sed "s/[^A-Za-z0-9]/-/g")
                         vkey=${'$'}(printf %s "${'$'}virt" | sed "s/[^A-Za-z0-9]/-/g")
-                        if [ "${'$'}virt" != "${'$'}real" ] && [ -d "${'$'}p/${'$'}vkey" ]; then
-                            # A native start before this link existed left a separate history directory (Fold 7):
-                            # move its sessions into the shared one without overwriting, then link.
-                            if [ -d "${'$'}p/${'$'}key" ] && [ ! -L "${'$'}p/${'$'}key" ]; then
-                                # Same name on both sides (memory notes): keep both, the native one as NAME.native.
-                                for e in "${'$'}p/${'$'}key"/* "${'$'}p/${'$'}key"/.[!.]*; do
+                        # One history for native and proot sessions. The native directory (physical path) is the
+                        # real one: Claude Code keeps its auto-memory there and replaced a symlinked native
+                        # directory by an empty one (Fold 7, 2.1.316). The proot directory becomes a link to it;
+                        # its sessions move over first, without overwriting (a clash is kept as NAME.proot).
+                        if [ "${'$'}virt" != "${'$'}real" ]; then
+                            [ ! -L "${'$'}p/${'$'}key" ] || rm -f "${'$'}p/${'$'}key"
+                            mkdir -p "${'$'}p/${'$'}key"
+                            if [ -d "${'$'}p/${'$'}vkey" ] && [ ! -L "${'$'}p/${'$'}vkey" ]; then
+                                for e in "${'$'}p/${'$'}vkey"/* "${'$'}p/${'$'}vkey"/.[!.]*; do
                                     [ -e "${'$'}e" ] || continue; n=${'$'}{e##*/}
-                                    if [ -d "${'$'}e" ] && [ -d "${'$'}p/${'$'}vkey/${'$'}n" ]; then
+                                    if [ -d "${'$'}e" ] && [ -d "${'$'}p/${'$'}key/${'$'}n" ]; then
                                         for f in "${'$'}e"/* "${'$'}e"/.[!.]*; do
-                                            [ -e "${'$'}f" ] || continue; t=${'$'}p/${'$'}vkey/${'$'}n/${'$'}{f##*/}
-                                            [ ! -e "${'$'}t" ] || t=${'$'}t.native
+                                            [ -e "${'$'}f" ] || continue; t=${'$'}p/${'$'}key/${'$'}n/${'$'}{f##*/}
+                                            [ ! -e "${'$'}t" ] || t=${'$'}t.proot
                                             mv -n "${'$'}f" "${'$'}t"
                                         done
                                         rmdir "${'$'}e" 2>/dev/null
                                     else
-                                        t=${'$'}p/${'$'}vkey/${'$'}n; [ ! -e "${'$'}t" ] || t=${'$'}t.native
+                                        t=${'$'}p/${'$'}key/${'$'}n; [ ! -e "${'$'}t" ] || t=${'$'}t.proot
                                         mv -n "${'$'}e" "${'$'}t"
                                     fi
                                 done
-                                rmdir "${'$'}p/${'$'}key" 2>/dev/null
+                                rmdir "${'$'}p/${'$'}vkey" 2>/dev/null
                             fi
-                            [ -e "${'$'}p/${'$'}key" ] || ln -s "${'$'}vkey" "${'$'}p/${'$'}key"
+                            [ -e "${'$'}p/${'$'}vkey" ] || ln -s "${'$'}key" "${'$'}p/${'$'}vkey"
                         fi
                     fi
                     exec claude --messaging-socket-path "${'$'}d/${'$'}${'$'}.sock" "${'$'}@"' claude "${'$'}@"
@@ -718,28 +721,31 @@ class LinuxRuntime(private val context: Context) {
                         p=${'$'}HOME/.claude/projects; mkdir -p "${'$'}p"
                         key=${'$'}(printf %s "${'$'}real" | sed "s/[^A-Za-z0-9]/-/g")
                         vkey=${'$'}(printf %s "${'$'}virt" | sed "s/[^A-Za-z0-9]/-/g")
-                        if [ "${'$'}virt" != "${'$'}real" ] && [ -d "${'$'}p/${'$'}vkey" ]; then
-                            # A native start before this link existed left a separate history directory (Fold 7):
-                            # move its sessions into the shared one without overwriting, then link.
-                            if [ -d "${'$'}p/${'$'}key" ] && [ ! -L "${'$'}p/${'$'}key" ]; then
-                                # Same name on both sides (memory notes): keep both, the native one as NAME.native.
-                                for e in "${'$'}p/${'$'}key"/* "${'$'}p/${'$'}key"/.[!.]*; do
+                        # One history for native and proot sessions. The native directory (physical path) is the
+                        # real one: Claude Code keeps its auto-memory there and replaced a symlinked native
+                        # directory by an empty one (Fold 7, 2.1.316). The proot directory becomes a link to it;
+                        # its sessions move over first, without overwriting (a clash is kept as NAME.proot).
+                        if [ "${'$'}virt" != "${'$'}real" ]; then
+                            [ ! -L "${'$'}p/${'$'}key" ] || rm -f "${'$'}p/${'$'}key"
+                            mkdir -p "${'$'}p/${'$'}key"
+                            if [ -d "${'$'}p/${'$'}vkey" ] && [ ! -L "${'$'}p/${'$'}vkey" ]; then
+                                for e in "${'$'}p/${'$'}vkey"/* "${'$'}p/${'$'}vkey"/.[!.]*; do
                                     [ -e "${'$'}e" ] || continue; n=${'$'}{e##*/}
-                                    if [ -d "${'$'}e" ] && [ -d "${'$'}p/${'$'}vkey/${'$'}n" ]; then
+                                    if [ -d "${'$'}e" ] && [ -d "${'$'}p/${'$'}key/${'$'}n" ]; then
                                         for f in "${'$'}e"/* "${'$'}e"/.[!.]*; do
-                                            [ -e "${'$'}f" ] || continue; t=${'$'}p/${'$'}vkey/${'$'}n/${'$'}{f##*/}
-                                            [ ! -e "${'$'}t" ] || t=${'$'}t.native
+                                            [ -e "${'$'}f" ] || continue; t=${'$'}p/${'$'}key/${'$'}n/${'$'}{f##*/}
+                                            [ ! -e "${'$'}t" ] || t=${'$'}t.proot
                                             mv -n "${'$'}f" "${'$'}t"
                                         done
                                         rmdir "${'$'}e" 2>/dev/null
                                     else
-                                        t=${'$'}p/${'$'}vkey/${'$'}n; [ ! -e "${'$'}t" ] || t=${'$'}t.native
+                                        t=${'$'}p/${'$'}key/${'$'}n; [ ! -e "${'$'}t" ] || t=${'$'}t.proot
                                         mv -n "${'$'}e" "${'$'}t"
                                     fi
                                 done
-                                rmdir "${'$'}p/${'$'}key" 2>/dev/null
+                                rmdir "${'$'}p/${'$'}vkey" 2>/dev/null
                             fi
-                            [ -e "${'$'}p/${'$'}key" ] || ln -s "${'$'}vkey" "${'$'}p/${'$'}key"
+                            [ -e "${'$'}p/${'$'}vkey" ] || ln -s "${'$'}key" "${'$'}p/${'$'}vkey"
                         fi
                     fi
                     exec claude --messaging-socket-path "${'$'}d/${'$'}${'$'}.sock" "${'$'}@"' claude "${'$'}@"
@@ -924,28 +930,31 @@ class LinuxRuntime(private val context: Context) {
                         p=${'$'}HOME/.claude/projects; mkdir -p "${'$'}p"
                         key=${'$'}(printf %s "${'$'}real" | sed "s/[^A-Za-z0-9]/-/g")
                         vkey=${'$'}(printf %s "${'$'}virt" | sed "s/[^A-Za-z0-9]/-/g")
-                        if [ "${'$'}virt" != "${'$'}real" ] && [ -d "${'$'}p/${'$'}vkey" ]; then
-                            # A native start before this link existed left a separate history directory (Fold 7):
-                            # move its sessions into the shared one without overwriting, then link.
-                            if [ -d "${'$'}p/${'$'}key" ] && [ ! -L "${'$'}p/${'$'}key" ]; then
-                                # Same name on both sides (memory notes): keep both, the native one as NAME.native.
-                                for e in "${'$'}p/${'$'}key"/* "${'$'}p/${'$'}key"/.[!.]*; do
+                        # One history for native and proot sessions. The native directory (physical path) is the
+                        # real one: Claude Code keeps its auto-memory there and replaced a symlinked native
+                        # directory by an empty one (Fold 7, 2.1.316). The proot directory becomes a link to it;
+                        # its sessions move over first, without overwriting (a clash is kept as NAME.proot).
+                        if [ "${'$'}virt" != "${'$'}real" ]; then
+                            [ ! -L "${'$'}p/${'$'}key" ] || rm -f "${'$'}p/${'$'}key"
+                            mkdir -p "${'$'}p/${'$'}key"
+                            if [ -d "${'$'}p/${'$'}vkey" ] && [ ! -L "${'$'}p/${'$'}vkey" ]; then
+                                for e in "${'$'}p/${'$'}vkey"/* "${'$'}p/${'$'}vkey"/.[!.]*; do
                                     [ -e "${'$'}e" ] || continue; n=${'$'}{e##*/}
-                                    if [ -d "${'$'}e" ] && [ -d "${'$'}p/${'$'}vkey/${'$'}n" ]; then
+                                    if [ -d "${'$'}e" ] && [ -d "${'$'}p/${'$'}key/${'$'}n" ]; then
                                         for f in "${'$'}e"/* "${'$'}e"/.[!.]*; do
-                                            [ -e "${'$'}f" ] || continue; t=${'$'}p/${'$'}vkey/${'$'}n/${'$'}{f##*/}
-                                            [ ! -e "${'$'}t" ] || t=${'$'}t.native
+                                            [ -e "${'$'}f" ] || continue; t=${'$'}p/${'$'}key/${'$'}n/${'$'}{f##*/}
+                                            [ ! -e "${'$'}t" ] || t=${'$'}t.proot
                                             mv -n "${'$'}f" "${'$'}t"
                                         done
                                         rmdir "${'$'}e" 2>/dev/null
                                     else
-                                        t=${'$'}p/${'$'}vkey/${'$'}n; [ ! -e "${'$'}t" ] || t=${'$'}t.native
+                                        t=${'$'}p/${'$'}key/${'$'}n; [ ! -e "${'$'}t" ] || t=${'$'}t.proot
                                         mv -n "${'$'}e" "${'$'}t"
                                     fi
                                 done
-                                rmdir "${'$'}p/${'$'}key" 2>/dev/null
+                                rmdir "${'$'}p/${'$'}vkey" 2>/dev/null
                             fi
-                            [ -e "${'$'}p/${'$'}key" ] || ln -s "${'$'}vkey" "${'$'}p/${'$'}key"
+                            [ -e "${'$'}p/${'$'}vkey" ] || ln -s "${'$'}key" "${'$'}p/${'$'}vkey"
                         fi
                     fi
                     exec claude --messaging-socket-path "${'$'}d/${'$'}${'$'}.sock" "${'$'}@"' claude "${'$'}@"
