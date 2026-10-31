@@ -639,6 +639,9 @@ class LinuxRuntime(private val context: Context) {
                     for s in ${'$'}d/*.sock; do [ -e "${'$'}s" ] || continue; p=${'$'}{s##*/}; kill -0 ${'$'}{p%.sock} 2>/dev/null || rm -f "${'$'}s"; done
                     if [ -n "${'$'}{DD_ROOTFS:-}" ]; then
                         export DISABLE_AUTOUPDATER=1
+                        # Bun reads files with its own system calls, past pathhook: the built-in rg
+                        # missed Debian paths. Debian rg goes through the hook.
+                        command -v rg >/dev/null && export USE_BUILTIN_RIPGREP=0
                         links=${'$'}{DD_SAVED_PREFIX:-}/opt/glibc-native/path-links
                         [ ! -d "${'$'}links" ] || PATH=${'$'}PATH:${'$'}links
                         real=${'$'}(pwd -P); virt=${'$'}{real#"${'$'}DD_ROOTFS"}
@@ -677,6 +680,9 @@ class LinuxRuntime(private val context: Context) {
                     for s in ${'$'}d/*.sock; do [ -e "${'$'}s" ] || continue; p=${'$'}{s##*/}; kill -0 ${'$'}{p%.sock} 2>/dev/null || rm -f "${'$'}s"; done
                     if [ -n "${'$'}{DD_ROOTFS:-}" ]; then
                         export DISABLE_AUTOUPDATER=1
+                        # Bun reads files with its own system calls, past pathhook: the built-in rg
+                        # missed Debian paths. Debian rg goes through the hook.
+                        command -v rg >/dev/null && export USE_BUILTIN_RIPGREP=0
                         real=${'$'}(pwd -P); virt=${'$'}{real#"${'$'}DD_ROOTFS"}
                         p=${'$'}HOME/.claude/projects; mkdir -p "${'$'}p"
                         key=${'$'}(printf %s "${'$'}real" | sed "s/[^A-Za-z0-9]/-/g")
@@ -853,6 +859,9 @@ class LinuxRuntime(private val context: Context) {
                     for s in ${'$'}d/*.sock; do [ -e "${'$'}s" ] || continue; p=${'$'}{s##*/}; kill -0 ${'$'}{p%.sock} 2>/dev/null || rm -f "${'$'}s"; done
                     if [ -n "${'$'}{DD_ROOTFS:-}" ]; then
                         export DISABLE_AUTOUPDATER=1
+                        # Bun reads files with its own system calls, past pathhook: the built-in rg
+                        # missed Debian paths. Debian rg goes through the hook.
+                        command -v rg >/dev/null && export USE_BUILTIN_RIPGREP=0
                         links=${'$'}{DD_SAVED_PREFIX:-}/opt/glibc-native/path-links
                         [ ! -d "${'$'}links" ] || PATH=${'$'}PATH:${'$'}links
                         real=${'$'}(pwd -P); virt=${'$'}{real#"${'$'}DD_ROOTFS"}

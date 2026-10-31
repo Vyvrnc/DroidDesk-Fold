@@ -892,6 +892,8 @@ claude_native() {
     mkdir -p "$project" && cd "$project" || fail "Adresář projektu nejde otevřít: $project"
     # The native auto-updater installed a second 281 MB copy into the config HOME.
     local -a claude_env=(/usr/bin/env DISABLE_AUTOUPDATER=1)
+    # Bun reads files past pathhook; Debian rg goes through it (Grep and Glob see Debian paths).
+    [[ ! -x $R/usr/bin/rg ]] || claude_env+=(USE_BUILTIN_RIPGREP=0)
     if update_path_links; then
         claude_env+=("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$N/path-links")
     else
