@@ -591,6 +591,31 @@ class LinuxRuntime(private val context: Context) {
         )
         appsLauncher.setExecutable(true, false)
 
+        // Native Claude Code runs with its updater off (it writes physical paths proot cannot
+        // follow), so claude-debian and claude-tmux update it under proot in the background:
+        // after a success once a day, after a failure (offline) again in an hour. The mkdir lock
+        // keeps two launchers from starting two downloads.
+        val claudeUpdate = File(binDir, "claude-update-bg")
+        claudeUpdate.writeText(
+            """
+            #!${File(binDir, "bash").absolutePath}
+            t="${tmpDir.absolutePath}"
+            ok=${'$'}t/claude-update.ok; tried=${'$'}t/claude-update.try; lock=${'$'}t/claude-update.lock
+            [ -z "${'$'}(find "${'$'}ok" -mmin -1440 2>/dev/null)" ] || exit 0
+            [ -z "${'$'}(find "${'$'}tried" -mmin -60 2>/dev/null)" ] || exit 0
+            find "${'$'}lock" -maxdepth 0 -mmin +120 -exec rmdir {} + 2>/dev/null
+            mkdir "${'$'}lock" 2>/dev/null || exit 0
+            touch "${'$'}tried"
+            (
+                if TMPDIR="${'$'}t" DD_NATIVE=0 "${binDir.absolutePath}/debian-run" bash -lc 'PATH=${'$'}HOME/.local/bin:${'$'}PATH; command -v claude >/dev/null || exit 0; claude update' < /dev/null > "${'$'}t/claude-update.log" 2>&1; then
+                    touch "${'$'}ok"
+                fi
+                rmdir "${'$'}lock"
+            ) &
+            """.trimIndent() + "\n",
+        )
+        claudeUpdate.setExecutable(true, false)
+
         // Claude Code's native build needs glibc, so it lives in Debian. bash -lc
         // does not read .bashrc, hence the explicit ~/.local/bin.
         val claudeLauncher = File(binDir, "claude-debian")
@@ -599,12 +624,7 @@ class LinuxRuntime(private val context: Context) {
             #!${File(binDir, "bash").absolutePath}
             export DISPLAY="${'$'}{DISPLAY:-:0}"
             export TMPDIR="${tmpDir.absolutePath}"
-            # Native Claude Code runs with its updater off (it writes physical paths proot cannot
-            # follow): update it once a day under proot in the background.
-            if [ -z "${'$'}(find "${'$'}TMPDIR/claude-update.stamp" -mmin -1440 2>/dev/null)" ]; then
-                touch "${'$'}TMPDIR/claude-update.stamp"
-                (DD_NATIVE=0 "${binDir.absolutePath}/debian-run" bash -lc 'PATH=${'$'}HOME/.local/bin:${'$'}PATH; command -v claude >/dev/null && claude update' > "${'$'}TMPDIR/claude-update.log" 2>&1 &)
-            fi
+            "${binDir.absolutePath}/claude-update-bg"
             native="${binDir.absolutePath}/droiddesk-glibc-native"
             if [ -x "${'$'}native" ] && native_result=${'$'}(mktemp "${'$'}TMPDIR/droiddesk-native-result.XXXXXX"); then
                 # Bun finds MCP commands (npx, uvx) only through real paths: see path-links.
@@ -819,12 +839,7 @@ class LinuxRuntime(private val context: Context) {
             #!${File(binDir, "bash").absolutePath}
             # Bun finds MCP commands (npx, uvx) only through real paths: see path-links.
             [ ! -x "${binDir.absolutePath}/droiddesk-glibc-native" ] || "${binDir.absolutePath}/droiddesk-glibc-native" path-links >/dev/null 2>&1 || true
-            # Native Claude Code runs with its updater off: update it once a day under proot.
-            t="${tmpDir.absolutePath}"
-            if [ -z "${'$'}(find "${'$'}t/claude-update.stamp" -mmin -1440 2>/dev/null)" ]; then
-                touch "${'$'}t/claude-update.stamp"
-                (TMPDIR="${'$'}t" DD_NATIVE=0 "${binDir.absolutePath}/debian-run" bash -lc 'PATH=${'$'}HOME/.local/bin:${'$'}PATH; command -v claude >/dev/null && claude update' > "${'$'}t/claude-update.log" 2>&1 &)
-            fi
+            "${binDir.absolutePath}/claude-update-bg"
             exec "${binDir.absolutePath}/debian-tmux" claude bash -lc 'mkdir -p ~/projekty/Claude; cd ~/projekty/Claude || cd ~; PATH="${'$'}HOME/.local/bin:${'$'}PATH"
                     # proot has no uid map, so Claude Code (2.1.289+) turns local cross-session
                     # messaging off unless it gets a socket path. One socket per session; the
