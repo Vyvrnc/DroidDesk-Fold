@@ -652,7 +652,29 @@ class LinuxRuntime(private val context: Context) {
                         p=${'$'}HOME/.claude/projects; mkdir -p "${'$'}p"
                         key=${'$'}(printf %s "${'$'}real" | sed "s/[^A-Za-z0-9]/-/g")
                         vkey=${'$'}(printf %s "${'$'}virt" | sed "s/[^A-Za-z0-9]/-/g")
-                        [ "${'$'}virt" = "${'$'}real" ] || [ -e "${'$'}p/${'$'}key" ] || [ ! -d "${'$'}p/${'$'}vkey" ] || ln -s "${'$'}vkey" "${'$'}p/${'$'}key"
+                        if [ "${'$'}virt" != "${'$'}real" ] && [ -d "${'$'}p/${'$'}vkey" ]; then
+                            # A native start before this link existed left a separate history directory (Fold 7):
+                            # move its sessions into the shared one without overwriting, then link.
+                            if [ -d "${'$'}p/${'$'}key" ] && [ ! -L "${'$'}p/${'$'}key" ]; then
+                                # Same name on both sides (memory notes): keep both, the native one as NAME.native.
+                                for e in "${'$'}p/${'$'}key"/* "${'$'}p/${'$'}key"/.[!.]*; do
+                                    [ -e "${'$'}e" ] || continue; n=${'$'}{e##*/}
+                                    if [ -d "${'$'}e" ] && [ -d "${'$'}p/${'$'}vkey/${'$'}n" ]; then
+                                        for f in "${'$'}e"/* "${'$'}e"/.[!.]*; do
+                                            [ -e "${'$'}f" ] || continue; t=${'$'}p/${'$'}vkey/${'$'}n/${'$'}{f##*/}
+                                            [ ! -e "${'$'}t" ] || t=${'$'}t.native
+                                            mv -n "${'$'}f" "${'$'}t"
+                                        done
+                                        rmdir "${'$'}e" 2>/dev/null
+                                    else
+                                        t=${'$'}p/${'$'}vkey/${'$'}n; [ ! -e "${'$'}t" ] || t=${'$'}t.native
+                                        mv -n "${'$'}e" "${'$'}t"
+                                    fi
+                                done
+                                rmdir "${'$'}p/${'$'}key" 2>/dev/null
+                            fi
+                            [ -e "${'$'}p/${'$'}key" ] || ln -s "${'$'}vkey" "${'$'}p/${'$'}key"
+                        fi
                     fi
                     exec claude --messaging-socket-path "${'$'}d/${'$'}${'$'}.sock" "${'$'}@"' claude "${'$'}@"
                 native_status=${'$'}?
@@ -694,7 +716,29 @@ class LinuxRuntime(private val context: Context) {
                         p=${'$'}HOME/.claude/projects; mkdir -p "${'$'}p"
                         key=${'$'}(printf %s "${'$'}real" | sed "s/[^A-Za-z0-9]/-/g")
                         vkey=${'$'}(printf %s "${'$'}virt" | sed "s/[^A-Za-z0-9]/-/g")
-                        [ "${'$'}virt" = "${'$'}real" ] || [ -e "${'$'}p/${'$'}key" ] || [ ! -d "${'$'}p/${'$'}vkey" ] || ln -s "${'$'}vkey" "${'$'}p/${'$'}key"
+                        if [ "${'$'}virt" != "${'$'}real" ] && [ -d "${'$'}p/${'$'}vkey" ]; then
+                            # A native start before this link existed left a separate history directory (Fold 7):
+                            # move its sessions into the shared one without overwriting, then link.
+                            if [ -d "${'$'}p/${'$'}key" ] && [ ! -L "${'$'}p/${'$'}key" ]; then
+                                # Same name on both sides (memory notes): keep both, the native one as NAME.native.
+                                for e in "${'$'}p/${'$'}key"/* "${'$'}p/${'$'}key"/.[!.]*; do
+                                    [ -e "${'$'}e" ] || continue; n=${'$'}{e##*/}
+                                    if [ -d "${'$'}e" ] && [ -d "${'$'}p/${'$'}vkey/${'$'}n" ]; then
+                                        for f in "${'$'}e"/* "${'$'}e"/.[!.]*; do
+                                            [ -e "${'$'}f" ] || continue; t=${'$'}p/${'$'}vkey/${'$'}n/${'$'}{f##*/}
+                                            [ ! -e "${'$'}t" ] || t=${'$'}t.native
+                                            mv -n "${'$'}f" "${'$'}t"
+                                        done
+                                        rmdir "${'$'}e" 2>/dev/null
+                                    else
+                                        t=${'$'}p/${'$'}vkey/${'$'}n; [ ! -e "${'$'}t" ] || t=${'$'}t.native
+                                        mv -n "${'$'}e" "${'$'}t"
+                                    fi
+                                done
+                                rmdir "${'$'}p/${'$'}key" 2>/dev/null
+                            fi
+                            [ -e "${'$'}p/${'$'}key" ] || ln -s "${'$'}vkey" "${'$'}p/${'$'}key"
+                        fi
                     fi
                     exec claude --messaging-socket-path "${'$'}d/${'$'}${'$'}.sock" "${'$'}@"' claude "${'$'}@"
             """.trimIndent() + "\n",
@@ -878,7 +922,29 @@ class LinuxRuntime(private val context: Context) {
                         p=${'$'}HOME/.claude/projects; mkdir -p "${'$'}p"
                         key=${'$'}(printf %s "${'$'}real" | sed "s/[^A-Za-z0-9]/-/g")
                         vkey=${'$'}(printf %s "${'$'}virt" | sed "s/[^A-Za-z0-9]/-/g")
-                        [ "${'$'}virt" = "${'$'}real" ] || [ -e "${'$'}p/${'$'}key" ] || [ ! -d "${'$'}p/${'$'}vkey" ] || ln -s "${'$'}vkey" "${'$'}p/${'$'}key"
+                        if [ "${'$'}virt" != "${'$'}real" ] && [ -d "${'$'}p/${'$'}vkey" ]; then
+                            # A native start before this link existed left a separate history directory (Fold 7):
+                            # move its sessions into the shared one without overwriting, then link.
+                            if [ -d "${'$'}p/${'$'}key" ] && [ ! -L "${'$'}p/${'$'}key" ]; then
+                                # Same name on both sides (memory notes): keep both, the native one as NAME.native.
+                                for e in "${'$'}p/${'$'}key"/* "${'$'}p/${'$'}key"/.[!.]*; do
+                                    [ -e "${'$'}e" ] || continue; n=${'$'}{e##*/}
+                                    if [ -d "${'$'}e" ] && [ -d "${'$'}p/${'$'}vkey/${'$'}n" ]; then
+                                        for f in "${'$'}e"/* "${'$'}e"/.[!.]*; do
+                                            [ -e "${'$'}f" ] || continue; t=${'$'}p/${'$'}vkey/${'$'}n/${'$'}{f##*/}
+                                            [ ! -e "${'$'}t" ] || t=${'$'}t.native
+                                            mv -n "${'$'}f" "${'$'}t"
+                                        done
+                                        rmdir "${'$'}e" 2>/dev/null
+                                    else
+                                        t=${'$'}p/${'$'}vkey/${'$'}n; [ ! -e "${'$'}t" ] || t=${'$'}t.native
+                                        mv -n "${'$'}e" "${'$'}t"
+                                    fi
+                                done
+                                rmdir "${'$'}p/${'$'}key" 2>/dev/null
+                            fi
+                            [ -e "${'$'}p/${'$'}key" ] || ln -s "${'$'}vkey" "${'$'}p/${'$'}key"
+                        fi
                     fi
                     exec claude --messaging-socket-path "${'$'}d/${'$'}${'$'}.sock" "${'$'}@"' claude "${'$'}@"
             """.trimIndent() + "\n",
