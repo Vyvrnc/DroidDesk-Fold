@@ -975,7 +975,19 @@ static char *guest_string(const char *s, const char *root, const char *tmp, int 
     out[len] = 0;
     return out;
 }
-static int prepare_proot(const char *target, char *const argv[], char *const env[], struct command *c) {
+/* Package management and root tools need proot's fake root: scripts started natively (the
+ * Claude Code installer, craft-install.sh, sudo apt in a native terminal) ran apt and dpkg
+ * without it. The root and package part of proot_only in droiddesk-glibc-native; Wine and
+ * the x86 emulators keep their launcher route (proot-distro with its full bind list). */
+static int proot_only_name(const char *file) {
+    static const char *names[] = {"apt", "apt-get", "apt-cache", "aptitude", "dpkg", "dpkg-reconfigure",
+        "sudo", "su", "passwd", "useradd", "usermod", "groupadd", "chroot", "update-alternatives", NULL};
+    const char *base = strrchr(file, '/');
+    base = base ? base + 1 : file;
+    for (int i = 0; names[i]; ++i) if (!strcmp(base, names[i])) return 1;
+    return 0;
+}
+static int prepare_proot(const char *target, char *const argv[], char *const env[], struct command *c, int fake_root) {
     const char *root = getenv("DD_ROOTFS"), *tmp = getenv("DD_TMP"), *prefix = getenv("DD_SAVED_PREFIX");
     char proot[PATH_MAX], loader[PATH_MAX], program[PATH_MAX], cwd[PATH_MAX], vcwd[PATH_MAX], absolute[PATH_MAX];
     if (!root || !tmp || !prefix) { errno = ENOENT; return -1; }
@@ -1014,6 +1026,7 @@ static int prepare_proot(const char *target, char *const argv[], char *const env
     int ok = 1;
 #define ADD(s) do { if (ok && !(v[k++] = strdup(s))) ok = 0; } while (0)
     ADD(proot); ADD("-L"); ADD("--link2symlink"); ADD("--sysvipc"); ADD("--kill-on-exit");
+    if (fake_root) ADD("-0");
     ADD("-r"); ADD(root);
     ADD("-b"); ADD("/dev"); ADD("-b"); ADD("/proc"); ADD("-b"); ADD("/sys");
     ADD("-b"); if (ok && asprintf(&v[k++], "%s:/tmp", tmp) < 0) { v[k - 1] = NULL; ok = 0; }
@@ -1067,6 +1080,11 @@ static int prepare(const char *file, char *const argv[], char *const env[], stru
     const char *target = mapped(file, path, 0);
     if (!target) return -1;
     if (access(target, X_OK)) return -1;
+    if (depth == 0 && proot_only_name(file)) {
+        if (!prepare_proot(target, argv, env, c, 1)) return 0;
+        if (errno != ENOENT) return -1;
+        dispose(c); memset(c, 0, sizeof *c);
+    }
     int kind = inspect(target, interp, script);
     /* Samsung lets apps execute but not read /system/bin: reading the ELF header failed with
      * EPERM, so sh and toybox could not start (Tab S10 FE). Android partitions hold only
@@ -1098,7 +1116,7 @@ static int prepare(const char *file, char *const argv[], char *const env[], stru
     int glibc = !strcmp(interp, "/lib/ld-linux-aarch64.so.1") || !strcmp(interp, "/lib64/ld-linux-x86-64.so.2");
     int bionic = !strcmp(interp, "/system/bin/linker64") || !strcmp(interp, "/system/bin/linker");
     if (kind == 1 && !glibc && !bionic && !is_loader(target)) {
-        if (!prepare_proot(target, argv, env, c)) return 0;
+        if (!prepare_proot(target, argv, env, c, 0)) return 0;
         if (errno != ENOENT) return -1;
         dispose(c); memset(c, 0, sizeof *c);
     }

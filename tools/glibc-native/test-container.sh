@@ -130,6 +130,14 @@ grep -qx "arg=$work/home/node_modules/.bin" <<< "$out" && grep -qx "arg=$work/ho
 cp "$root/usr/bin/static-tool" /termux/usr/libexec/static/tool
 [[ -z $("$loader" --library-path "$libs" --preload "$work/hook.so" "$root/usr/bin/sh" -c /termux/usr/libexec/static/tool) ]]
 echo "static program via proot checks OK"
+# apt, dpkg and sudo started by native scripts run under proot with fake root; others stay native.
+cp "$root/usr/bin/probe" "$root/usr/bin/apt-get"
+out=$("$loader" --library-path "$libs" --preload "$work/hook.so" "$root/usr/bin/sh" -c 'apt-get install -y curl')
+grep -qx "arg=-0" <<< "$out" && grep -qx "arg=/usr/bin/apt-get" <<< "$out" && grep -qx "arg=curl" <<< "$out"
+out=$("$loader" --library-path "$libs" --preload "$work/hook.so" "$root/usr/bin/sh" -c 'cd /usr && exec /usr/bin/static-tool')
+! grep -qx "arg=-0" <<< "$out"
+rm "$root/usr/bin/apt-get"
+echo "package tools via proot checks OK"
 # Source only launcher functions; exercise the same code as the shipped commands.
 (
     export PREFIX=$work/termux

@@ -599,6 +599,12 @@ class LinuxRuntime(private val context: Context) {
             #!${File(binDir, "bash").absolutePath}
             export DISPLAY="${'$'}{DISPLAY:-:0}"
             export TMPDIR="${tmpDir.absolutePath}"
+            # Native Claude Code runs with its updater off (it writes physical paths proot cannot
+            # follow): update it once a day under proot in the background.
+            if [ -z "${'$'}(find "${'$'}TMPDIR/claude-update.stamp" -mmin -1440 2>/dev/null)" ]; then
+                touch "${'$'}TMPDIR/claude-update.stamp"
+                (DD_NATIVE=0 "${binDir.absolutePath}/debian-run" bash -lc 'PATH=${'$'}HOME/.local/bin:${'$'}PATH; command -v claude >/dev/null && claude update' > "${'$'}TMPDIR/claude-update.log" 2>&1 &)
+            fi
             native="${binDir.absolutePath}/droiddesk-glibc-native"
             if [ -x "${'$'}native" ] && native_result=${'$'}(mktemp "${'$'}TMPDIR/droiddesk-native-result.XXXXXX"); then
                 # Bun finds MCP commands (npx, uvx) only through real paths: see path-links.
@@ -813,6 +819,12 @@ class LinuxRuntime(private val context: Context) {
             #!${File(binDir, "bash").absolutePath}
             # Bun finds MCP commands (npx, uvx) only through real paths: see path-links.
             [ ! -x "${binDir.absolutePath}/droiddesk-glibc-native" ] || "${binDir.absolutePath}/droiddesk-glibc-native" path-links >/dev/null 2>&1 || true
+            # Native Claude Code runs with its updater off: update it once a day under proot.
+            t="${tmpDir.absolutePath}"
+            if [ -z "${'$'}(find "${'$'}t/claude-update.stamp" -mmin -1440 2>/dev/null)" ]; then
+                touch "${'$'}t/claude-update.stamp"
+                (TMPDIR="${'$'}t" DD_NATIVE=0 "${binDir.absolutePath}/debian-run" bash -lc 'PATH=${'$'}HOME/.local/bin:${'$'}PATH; command -v claude >/dev/null && claude update' > "${'$'}t/claude-update.log" 2>&1 &)
+            fi
             exec "${binDir.absolutePath}/debian-tmux" claude bash -lc 'mkdir -p ~/projekty/Claude; cd ~/projekty/Claude || cd ~; PATH="${'$'}HOME/.local/bin:${'$'}PATH"
                     # proot has no uid map, so Claude Code (2.1.289+) turns local cross-session
                     # messaging off unless it gets a socket path. One socket per session; the
