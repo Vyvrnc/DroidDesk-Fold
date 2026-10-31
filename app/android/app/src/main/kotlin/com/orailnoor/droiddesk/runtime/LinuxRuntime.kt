@@ -74,7 +74,7 @@ class LinuxRuntime(private val context: Context) {
         // Release asset built by tools/mesa-kgsl/build.sh (tag mesa-kgsl-<version>).
         // <Mesa version>-<build revision>; -2 adds softpipe so zink can present
         // without kopper (the kopper path flickers without DRI3).
-        private const val MESA_KGSL_VERSION = "26.2.3-2"
+        private const val MESA_KGSL_VERSION = "26.2.6-1"
         // tools/droiddesk-eth, published as release droiddesk-eth-<version>.
         private const val DROIDDESK_ETH_VERSION = "2"
         private const val DROIDDESK_ETH_SHA256 = "daf82991ecc5189b14e12b4a344ad32f0a9d72914a7e1f96a66ea851186511c0"
@@ -86,8 +86,9 @@ class LinuxRuntime(private val context: Context) {
         // 16: Chromium wrapper flags and shared Debian bus for native/proot clients.
         // 17: NO_AT_BRIDGE for Debian GTK apps (droiddesk-gui.sh).
         // 18: ripgrep (native Claude Code: Grep and Glob through the hook).
-        private const val DEBIAN_SETUP_VERSION = 18
-        private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
+        // 19: Mesa 26.2.6-1 (glxgears/glmark2 crash fixed).
+        private const val DEBIAN_SETUP_VERSION = 19
+        private const val MESA_KGSL_SHA256 = "13c78f6ebe3f7ceafad61133e788997ef76bbe1d3dbfd5937c9f25e92114f4da"
         // Craft app ids (table in assets/droiddesk/craft-install.sh); also guards the shell command.
         private val CRAFT_ID = Regex("[a-z]{1,20}craft")
 

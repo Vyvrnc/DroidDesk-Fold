@@ -33,7 +33,11 @@ Tested on Tab S10 FE (native Claude Code session over Remote Control, builds 529
 - History merge of a separate native project directory: simulated in a Debian container
   (sessions, hidden files, memory notes with a name clash kept as `.native`).
 
-Not tested: the history merge on the Fold 7 itself (that is where it is needed; checked after the
+Tested on Fold 7: Mesa 26.2.6-1 (new GPU asset) from its staging tree: glxinfo on zink/Turnip
+(Adreno 830), glxgears, glmark2 GLX score 1916 (crashed before).
+
+Not tested: the release APK with the trailing-slash fix on a device (container test only);
+the Mesa replacement through debian-setup 19; the history merge on the Fold 7 itself (that is where it is needed; checked after the
 update); a resumed session seeing the system prompt note; Wine; Electron apps.
 
 ## 1.0.1-fold.102 (2026-10-30)

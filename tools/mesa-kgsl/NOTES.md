@@ -74,3 +74,16 @@ upstream report / null check.
 Released: tag `mesa-kgsl-26.2.3-2`, asset `mesa-kgsl-26.2.3-2-arm64.tar.xz`,
 sha256 1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2 (6.7 MB). Built natively on the
 Fold 7 with `--prefix=/opt/mesa-kgsl` and `-Dgallium-drivers=zink,softpipe`; contains `.droiddesk-version`.
+
+## Revision `mesa-kgsl-26.2.6-1` (2026-10-31)
+
+Mesa 26.2.6 with termux-packages `84f9775d` patches 0014/0017/0018 and our
+`0001-glx-drisw-swap-interval-null.patch`: glXQueryDrawable(GLX_SWAP_INTERVAL_EXT) called a NULL
+getSwapInterval on drisw screens (zink without kopper), so glxgears and glmark2 (GLX) crashed at start.
+Built natively on the Fold 7 with `build-native.sh` (deps already installed; `ninja install` needed
+the trailing-slash mkdir fix in pathhook, worked around on the phone by creating the directories).
+Tested on the Fold 7 from the staging tree: glxinfo "zink Vulkan 1.4 (Adreno (TM) 830
+(MESA_TURNIP))", Mesa 26.2.6; glxgears runs; glmark2 GLX score 1916 (build 2954, texture 2425,
+phong 1971, terrain 319). Asset `mesa-kgsl-26.2.6-1-arm64.tar.xz`,
+sha256 13c78f6ebe3f7ceafad61133e788997ef76bbe1d3dbfd5937c9f25e92114f4da (6.75 MB, contains
+`.droiddesk-version` 26.2.6-1). debian-setup 19 replaces older trees.
