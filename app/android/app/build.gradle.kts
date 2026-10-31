@@ -29,6 +29,7 @@ android {
         targetSdk = 28 // API 28 completely disables the Android 10+ execve() block
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        manifestPlaceholders["appLabel"] = "DroidDesk"
 
         ndk {
             // ARM64 only — all modern Android phones
@@ -37,6 +38,12 @@ android {
     }
 
     buildTypes {
+        // Debug builds install next to the release app (own data, own Debian), so a test build
+        // never replaces or breaks the installation in daily use.
+        debug {
+            applicationIdSuffix = ".debug"
+            manifestPlaceholders["appLabel"] = "DroidDesk Dev"
+        }
         release {
             // GitHub-distributed testing builds intentionally use Android's
             // debug key so release APKs are directly installable.

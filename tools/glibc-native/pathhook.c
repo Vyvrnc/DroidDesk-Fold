@@ -1026,6 +1026,8 @@ static int prepare_proot(const char *target, char *const argv[], char *const env
     int ok = 1;
 #define ADD(s) do { if (ok && !(v[k++] = strdup(s))) ok = 0; } while (0)
     ADD(proot); ADD("-L"); ADD("--link2symlink"); ADD("--sysvipc"); ADD("--kill-on-exit");
+    /* Quiet: "proot info: vpid 1: terminated with signal 13" after apt-cache ... | head. */
+    ADD("--verbose=-1");
     if (fake_root) ADD("-0");
     ADD("-r"); ADD(root);
     ADD("-b"); ADD("/dev"); ADD("-b"); ADD("/proc"); ADD("-b"); ADD("/sys");

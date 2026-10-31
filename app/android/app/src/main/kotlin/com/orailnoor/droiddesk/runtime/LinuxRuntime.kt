@@ -84,7 +84,8 @@ class LinuxRuntime(private val context: Context) {
         // 14: gnome-keyring + Debian session bus, electron-run, URL schemes in menu-sync (fold.72).
         // 15: automatic native GUI fallback, menu launch context and native Electron shm flag.
         // 16: Chromium wrapper flags and shared Debian bus for native/proot clients.
-        private const val DEBIAN_SETUP_VERSION = 16
+        // 17: NO_AT_BRIDGE for Debian GTK apps (droiddesk-gui.sh).
+        private const val DEBIAN_SETUP_VERSION = 17
         private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
         // Craft app ids (table in assets/droiddesk/craft-install.sh); also guards the shell command.
         private val CRAFT_ID = Regex("[a-z]{1,20}craft")
@@ -1022,6 +1023,8 @@ class LinuxRuntime(private val context: Context) {
             done
             unset IFS droiddesk_dir
             if [ -n "${'$'}droiddesk_ld" ]; then export LD_LIBRARY_PATH="${'$'}droiddesk_ld"; else unset LD_LIBRARY_PATH; fi
+            # No accessibility bus here: GTK apps otherwise wait for AT-SPI at start.
+            export NO_AT_BRIDGE=1
             unset droiddesk_ld
             export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
             export WEBKIT_DISABLE_COMPOSITING_MODE=1
