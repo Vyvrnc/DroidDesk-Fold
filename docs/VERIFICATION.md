@@ -18,6 +18,23 @@ Automated checks before every release: `tools/glibc-native/test.sh` (pathhook an
 regressions in a Debian container) and `tools/check-launchers.py` (`bash -n` over the generated
 launchers).
 
+## 1.0.1-fold.103 (2026-10-31)
+
+Tested on Tab S10 FE (native Claude Code session over Remote Control, builds 5291d48–2bc8ddf):
+
+- `sudo apt-get install` / `remove` of a package and `apt-cache ... | head` from the native Bash
+  tool: run under proot with fake root, no proot messages on stderr.
+- Background Claude Code update under proot: 2.1.314 → 2.1.316, success stamp written, lock removed.
+- debian-setup 18: ripgrep installed, `NO_AT_BRIDGE=1` in Debian login shells;
+  `USE_BUILTIN_RIPGREP=0` reaches Claude; Debian `rg` sees `/etc` and `/usr`.
+- `--append-system-prompt` note: seen by a fresh native `claude -p`.
+- Regressions: git, codex, `/system/bin/sh`, GoogleWorkspace MCP.
+- History merge of a separate native project directory: simulated in a Debian container
+  (sessions, hidden files, memory notes with a name clash kept as `.native`).
+
+Not tested: the history merge on the Fold 7 itself (that is where it is needed; checked after the
+update); a resumed session seeing the system prompt note; Wine; Electron apps.
+
 ## 1.0.1-fold.102 (2026-10-30)
 
 Tested on Tab S10 FE (native Claude Code session over Remote Control):
