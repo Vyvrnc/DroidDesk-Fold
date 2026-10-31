@@ -85,7 +85,8 @@ class LinuxRuntime(private val context: Context) {
         // 15: automatic native GUI fallback, menu launch context and native Electron shm flag.
         // 16: Chromium wrapper flags and shared Debian bus for native/proot clients.
         // 17: NO_AT_BRIDGE for Debian GTK apps (droiddesk-gui.sh).
-        private const val DEBIAN_SETUP_VERSION = 17
+        // 18: ripgrep (native Claude Code: Grep and Glob through the hook).
+        private const val DEBIAN_SETUP_VERSION = 18
         private const val MESA_KGSL_SHA256 = "1972b27f6113ed23cabbc6ab7fa8326c7d423a358bdd8d70014b7ee67c3b81b2"
         // Craft app ids (table in assets/droiddesk/craft-install.sh); also guards the shell command.
         private val CRAFT_ID = Regex("[a-z]{1,20}craft")
@@ -642,6 +643,9 @@ class LinuxRuntime(private val context: Context) {
                         # Bun reads files with its own system calls, past pathhook: the built-in rg
                         # missed Debian paths. Debian rg goes through the hook.
                         command -v rg >/dev/null && export USE_BUILTIN_RIPGREP=0
+                        # Read, Edit, Write and Glob still see Android paths: tell Claude where Debian is.
+                        note="This Claude Code runs natively on Android (DroidDesk). Its Read, Edit, Write and Glob tools and the built-in grep and rg shell functions bypass the Debian path mapping: absolute Debian paths (/etc, /usr, /var, /opt, /root, /home) reach Android instead. For those tools put the rootfs path in front of the Debian path, e.g. ${'$'}{DD_ROOTFS}/etc/hosts. In the Bash tool Debian paths work; use command grep there."
+                        set -- --append-system-prompt "${'$'}note" "${'$'}@"
                         links=${'$'}{DD_SAVED_PREFIX:-}/opt/glibc-native/path-links
                         [ ! -d "${'$'}links" ] || PATH=${'$'}PATH:${'$'}links
                         real=${'$'}(pwd -P); virt=${'$'}{real#"${'$'}DD_ROOTFS"}
@@ -683,6 +687,9 @@ class LinuxRuntime(private val context: Context) {
                         # Bun reads files with its own system calls, past pathhook: the built-in rg
                         # missed Debian paths. Debian rg goes through the hook.
                         command -v rg >/dev/null && export USE_BUILTIN_RIPGREP=0
+                        # Read, Edit, Write and Glob still see Android paths: tell Claude where Debian is.
+                        note="This Claude Code runs natively on Android (DroidDesk). Its Read, Edit, Write and Glob tools and the built-in grep and rg shell functions bypass the Debian path mapping: absolute Debian paths (/etc, /usr, /var, /opt, /root, /home) reach Android instead. For those tools put the rootfs path in front of the Debian path, e.g. ${'$'}{DD_ROOTFS}/etc/hosts. In the Bash tool Debian paths work; use command grep there."
+                        set -- --append-system-prompt "${'$'}note" "${'$'}@"
                         real=${'$'}(pwd -P); virt=${'$'}{real#"${'$'}DD_ROOTFS"}
                         p=${'$'}HOME/.claude/projects; mkdir -p "${'$'}p"
                         key=${'$'}(printf %s "${'$'}real" | sed "s/[^A-Za-z0-9]/-/g")
@@ -862,6 +869,9 @@ class LinuxRuntime(private val context: Context) {
                         # Bun reads files with its own system calls, past pathhook: the built-in rg
                         # missed Debian paths. Debian rg goes through the hook.
                         command -v rg >/dev/null && export USE_BUILTIN_RIPGREP=0
+                        # Read, Edit, Write and Glob still see Android paths: tell Claude where Debian is.
+                        note="This Claude Code runs natively on Android (DroidDesk). Its Read, Edit, Write and Glob tools and the built-in grep and rg shell functions bypass the Debian path mapping: absolute Debian paths (/etc, /usr, /var, /opt, /root, /home) reach Android instead. For those tools put the rootfs path in front of the Debian path, e.g. ${'$'}{DD_ROOTFS}/etc/hosts. In the Bash tool Debian paths work; use command grep there."
+                        set -- --append-system-prompt "${'$'}note" "${'$'}@"
                         links=${'$'}{DD_SAVED_PREFIX:-}/opt/glibc-native/path-links
                         [ ! -d "${'$'}links" ] || PATH=${'$'}PATH:${'$'}links
                         real=${'$'}(pwd -P); virt=${'$'}{real#"${'$'}DD_ROOTFS"}
@@ -951,7 +961,7 @@ class LinuxRuntime(private val context: Context) {
             set -e
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
-            apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates dbus-x11 xz-utils pulseaudio-utils libnotify-bin tmux proxychains4 xclip libxcb-keysyms1
+            apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates dbus-x11 xz-utils pulseaudio-utils libnotify-bin tmux proxychains4 xclip libxcb-keysyms1 ripgrep
             # Debian's own session bus and keyring (droiddesk-session-bus, started by the app):
             # Electron's safeStorage and other libsecret apps keep their secrets there.
             apt-get install -y --no-install-recommends dbus-daemon dbus-bin gnome-keyring libsecret-1-0

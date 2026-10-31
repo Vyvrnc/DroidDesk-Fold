@@ -894,6 +894,8 @@ claude_native() {
     local -a claude_env=(/usr/bin/env DISABLE_AUTOUPDATER=1)
     # Bun reads files past pathhook; Debian rg goes through it (Grep and Glob see Debian paths).
     [[ ! -x $R/usr/bin/rg ]] || claude_env+=(USE_BUILTIN_RIPGREP=0)
+    # Read, Edit, Write and Glob still see Android paths: tell Claude where Debian is.
+    set -- --append-system-prompt "This Claude Code runs natively on Android (DroidDesk). Its Read, Edit, Write and Glob tools and the built-in grep and rg shell functions bypass the Debian path mapping: absolute Debian paths (/etc, /usr, /var, /opt, /root, /home) reach Android instead. For those tools put the rootfs path in front of the Debian path, e.g. $R/etc/hosts. In the Bash tool Debian paths work; use command grep there." "$@"
     if update_path_links; then
         claude_env+=("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$N/path-links")
     else
