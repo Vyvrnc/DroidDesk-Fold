@@ -234,8 +234,10 @@ static const char *mapped(const char *p, char b[PATH_MAX], int nofollow) {
         int found = 0;
         if (!nofollow || *rest) {
             found = !raw_syscall(SYS_newfstatat, AT_FDCWD, b, &st, AT_SYMLINK_NOFOLLOW);
-            /* A missing final component is valid for creation; a missing parent is not. */
-            if (!found && *rest) return NULL;
+            /* A missing final component is valid for creation; a missing parent is not. A
+             * trailing slash is no further component: mkdir("dir/") failed with ENOENT, and
+             * meson's install (os.makedirs) with it (Fold 7). */
+            if (!found && rest[strspn(rest, "/")]) return NULL;
         }
         if (found && S_ISLNK(st.st_mode)) {
             if (++links > 40) { errno = ELOOP; return NULL; }
@@ -256,6 +258,12 @@ static const char *mapped(const char *p, char b[PATH_MAX], int nofollow) {
             if (found && *rest && !S_ISDIR(st.st_mode)) { errno = ENOTDIR; return NULL; }
             memmove(pending, rest, strlen(rest) + 1);
         }
+    }
+    /* Keep a trailing slash: it asks for a directory (open("x/", O_CREAT) is EISDIR). */
+    size_t plen = strlen(p);
+    if (plen && p[plen - 1] == '/' && used > floor && b[used - 1] != '/') {
+        if (used + 1 >= PATH_MAX) goto toolong;
+        b[used++] = '/'; b[used] = 0;
     }
     return b;
 toolong:

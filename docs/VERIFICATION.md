@@ -29,6 +29,7 @@ Tested on Tab S10 FE (native Claude Code session over Remote Control, builds 529
   `USE_BUILTIN_RIPGREP=0` reaches Claude; Debian `rg` sees `/etc` and `/usr`.
 - `--append-system-prompt` note: seen by a fresh native `claude -p`.
 - Regressions: git, codex, `/system/bin/sh`, GoogleWorkspace MCP.
+- `mkdir` of a path with a trailing slash (meson install on the Fold 7 failed): container test.
 - History merge of a separate native project directory: simulated in a Debian container
   (sessions, hidden files, memory notes with a name clash kept as `.native`).
 

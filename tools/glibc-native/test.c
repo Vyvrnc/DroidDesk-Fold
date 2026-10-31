@@ -385,6 +385,12 @@ int main(int argc, char **argv) {
     for (struct dirent *de; rootdir && (de = readdir(rootdir));) marker |= !strcmp(de->d_name, "dd-root-marker");
     if (rootdir) closedir(rootdir);
     check(marker, "opendir / lists the rootfs");
+    /* A trailing slash is no missing component (meson install: os.makedirs("include/EGL/")). */
+    check(!mkdir("/opt/trail-dir/", 0755) && !mkdir("/opt/trail-dir/sub/", 0755) &&
+          !access("/opt/trail-dir/sub", F_OK), "mkdir with a trailing slash");
+    check(mkdir("/opt/missing-parent/x/", 0755) < 0 && errno == ENOENT, "missing parent still ENOENT");
+    check(open("/etc/native-test/", O_RDONLY) < 0 && errno == ENOTDIR, "trailing slash on a file is ENOTDIR");
+    rmdir("/opt/trail-dir/sub"); rmdir("/opt/trail-dir");
     int startdir = open(".", O_RDONLY | O_DIRECTORY);
     char here[PATH_MAX];
     check(!chdir("/") && !access("dd-root-marker", F_OK), "cd / then relative path");
