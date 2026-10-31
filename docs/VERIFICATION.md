@@ -18,6 +18,18 @@ Automated checks before every release: `tools/glibc-native/test.sh` (pathhook an
 regressions in a Debian container) and `tools/check-launchers.py` (`bash -n` over the generated
 launchers).
 
+## 1.0.1-fold.104 (2026-10-31)
+
+Tested on Fold 7 with a 49" monitor over DeX (3840x984, work area 3840x919), by hand from the
+native Claude Code session:
+
+- `droiddesk-zones` (script copy in ~/bin, wmctrl from `apt-get download`): layout 25|50|25 =
+  0..960..2880..3840; zones 1, 2, 3, 1-2, right, left from a maximized window: frame on the zone's
+  left and top edge, no overlap with the panel (xfce4-terminal rounds the size to whole cells).
+
+Not tested: the shortcuts Super+Ctrl+1..5/Left/Right and debian-setup 20 (wmctrl, xdotool,
+x11-utils) from the release APK; windows without size increments.
+
 ## 1.0.1-fold.103 (2026-10-31)
 
 Tested on Tab S10 FE (native Claude Code session over Remote Control, builds 5291d48–2bc8ddf):
