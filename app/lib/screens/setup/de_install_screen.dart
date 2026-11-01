@@ -4,6 +4,7 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:droiddesk/theme/droid_theme.dart';
 import 'package:droiddesk/state/app_state.dart';
+import 'package:droiddesk/services/platform_bridge.dart';
 
 class DEInstallScreen extends StatefulWidget {
   const DEInstallScreen({super.key});
@@ -12,23 +13,100 @@ class DEInstallScreen extends StatefulWidget {
   State<DEInstallScreen> createState() => _DEInstallScreenState();
 }
 
+/// Languages offered for the Linux apps (glibc locale -> name in that language).
+const _languages = <String, String>{
+  'en_US.UTF-8': 'English',
+  'cs_CZ.UTF-8': 'Čeština',
+  'sk_SK.UTF-8': 'Slovenčina',
+  'de_DE.UTF-8': 'Deutsch',
+  'pl_PL.UTF-8': 'Polski',
+  'fr_FR.UTF-8': 'Français',
+  'es_ES.UTF-8': 'Español',
+  'it_IT.UTF-8': 'Italiano',
+};
+
 class _DEInstallScreenState extends State<DEInstallScreen> {
   bool _started = false;
+  String? _language;
   final ScrollController _scrollController = ScrollController();
 
   @override
   void initState() {
     super.initState();
-
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _startInstall();
+    // The language comes first: the install sets it up in Debian.
+    DroidDeskPlatform.getDesktopLanguage().then((locale) {
+      if (!mounted) return;
+      setState(() => _language = _languages.containsKey(locale) ? locale : 'en_US.UTF-8');
     });
   }
 
-  void _startInstall() {
+  Future<void> _startInstall() async {
     if (_started) return;
-    _started = true;
+    final language = _language;
+    if (language != null) await DroidDeskPlatform.setDesktopLanguage(language);
+    if (!mounted) return;
+    setState(() => _started = true);
     context.read<AppState>().installDesktopEnvironment();
+  }
+
+  Widget _buildLanguageStep() {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0F172A),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Language',
+                style: DroidTheme.headingXl.copyWith(color: Colors.white),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Language of the Linux apps: Firefox, LibreOffice, Claude Code and the '
+                'terminal tools. The XFCE desktop itself stays in English.',
+                style: DroidTheme.bodyMd.copyWith(color: Colors.white60),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 24),
+              Expanded(
+                child: _language == null
+                    ? const Center(child: CircularProgressIndicator())
+                    : ListView(
+                        children: [
+                          for (final entry in _languages.entries)
+                            RadioListTile<String>(
+                              value: entry.key,
+                              groupValue: _language,
+                              onChanged: (value) => setState(() => _language = value),
+                              title: Text(
+                                entry.value,
+                                style: DroidTheme.bodyMd.copyWith(color: Colors.white),
+                              ),
+                              activeColor: DroidTheme.primary,
+                            ),
+                        ],
+                      ),
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: _language == null ? null : _startInstall,
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  backgroundColor: DroidTheme.primary,
+                ),
+                child: Text(
+                  'Start installation',
+                  style: DroidTheme.headingSm.copyWith(color: Colors.white),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   @override
@@ -46,6 +124,7 @@ class _DEInstallScreenState extends State<DEInstallScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (!_started) return _buildLanguageStep();
     final state = context.watch<AppState>();
 
     // Auto-scroll terminal

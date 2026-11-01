@@ -94,6 +94,20 @@ class DroidDeskPlatform {
     await _channel.invokeMethod('setupBootstrap');
   }
 
+  // ── Language of the Linux apps (a glibc locale such as cs_CZ.UTF-8) ──
+
+  static Future<String> getDesktopLanguage() async {
+    final result = await _channel.invokeMethod<String>('getDesktopLanguage');
+    return result ?? 'en_US.UTF-8';
+  }
+
+  static Future<bool> setDesktopLanguage(String locale) async {
+    final result = await _channel.invokeMethod<bool>('setDesktopLanguage', {
+      'locale': locale,
+    });
+    return result ?? false;
+  }
+
   // ── Native Desktop Environment Installation (non-root fallback) ──
 
   static Future<bool> installDesktopNative({String de = 'xfce4'}) async {

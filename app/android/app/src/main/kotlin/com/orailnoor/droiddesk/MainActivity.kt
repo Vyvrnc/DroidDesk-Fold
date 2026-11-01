@@ -301,6 +301,13 @@ class MainActivity : FlutterActivity() {
                     }
                 }
 
+                // ── Language of the Linux apps (installer choice) ──
+                "getDesktopLanguage" -> result.success(linuxRuntime.desktopLanguage())
+                "setDesktopLanguage" -> {
+                    val locale = call.argument<String>("locale") ?: ""
+                    result.success(linuxRuntime.setDesktopLanguage(locale))
+                }
+
                 // ── Native Termux desktop install (non-root fallback) ──
                 "installDesktopNative" -> {
                     val desktopEnv = call.argument<String>("de") ?: "xfce4"

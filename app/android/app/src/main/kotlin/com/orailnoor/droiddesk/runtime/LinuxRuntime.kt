@@ -57,6 +57,14 @@ class LinuxRuntime(private val context: Context) {
 
     companion object {
         private const val TAG = "LinuxRuntime"
+        private const val LANGUAGE_FILE = "droiddesk-language"
+        private val LANGUAGE_PATTERN = Regex("[a-z]{2,3}_[A-Z]{2}\\.UTF-8")
+        // Android language -> locale offered in the installer (first match by language code).
+        val SUPPORTED_LANGUAGES = linkedMapOf(
+            "en" to "en_US.UTF-8", "cs" to "cs_CZ.UTF-8", "sk" to "sk_SK.UTF-8",
+            "de" to "de_DE.UTF-8", "pl" to "pl_PL.UTF-8", "fr" to "fr_FR.UTF-8",
+            "es" to "es_ES.UTF-8", "it" to "it_IT.UTF-8",
+        )
         // Process-wide: the activities and the service each have a LinuxRuntime, and per
         // instance every one of them started its own virgl server (three on one socket path
         // after two desktop restarts, Tab S10 FE).
@@ -88,7 +96,8 @@ class LinuxRuntime(private val context: Context) {
         // 18: ripgrep (native Claude Code: Grep and Glob through the hook).
         // 19: Mesa 26.2.6-1 (glxgears/glmark2 crash fixed).
         // 20: wmctrl, xdotool, x11-utils for droiddesk-zones.
-        private const val DEBIAN_SETUP_VERSION = 20
+        // 21: the installer's language as Debian's default locale.
+        private const val DEBIAN_SETUP_VERSION = 21
         private const val MESA_KGSL_SHA256 = "13c78f6ebe3f7ceafad61133e788997ef76bbe1d3dbfd5937c9f25e92114f4da"
         // Craft app ids (table in assets/droiddesk/craft-install.sh); also guards the shell command.
         private val CRAFT_ID = Regex("[a-z]{1,20}craft")
@@ -286,6 +295,23 @@ class LinuxRuntime(private val context: Context) {
                     if (!process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) process.destroyForcibly()
                 }
         }.onFailure { Log.w(TAG, "Killing the desktop processes failed: ${it.message}") }
+    }
+
+    /**
+     * Language of the Linux apps (glibc locale name), chosen before the first install and
+     * defaulting to Android's language. Debian apps follow it (debian-setup generates it and
+     * makes it the default, the session exports it); Termux's XFCE ships no translations.
+     */
+    fun desktopLanguage(): String {
+        val saved = runCatching { File(baseDir, LANGUAGE_FILE).readText().trim() }.getOrNull()
+        if (saved != null && LANGUAGE_PATTERN.matches(saved)) return saved
+        val code = java.util.Locale.getDefault().language
+        return SUPPORTED_LANGUAGES[code] ?: "en_US.UTF-8"
+    }
+
+    fun setDesktopLanguage(locale: String): Boolean {
+        if (!LANGUAGE_PATTERN.matches(locale)) return false
+        return runCatching { writeAtomically(File(baseDir, LANGUAGE_FILE), "$locale\n".toByteArray()) }.isSuccess
     }
 
     fun getInstalledDE(): String {
@@ -1010,8 +1036,8 @@ class LinuxRuntime(private val context: Context) {
         // The proot-distro rootfs ships without basic tools, in UTC and without a
         // locale. Idempotent, so it is safe to rerun by hand on older installs.
         val timeZone = java.util.TimeZone.getDefault().id
-        val locale = java.util.Locale.getDefault()
-        val localeName = "${locale.language}_${locale.country}.UTF-8"
+        // The language chosen in the installer (Android's by default).
+        val localeName = desktopLanguage()
         val mesaKgslUrl = "https://github.com/Vyvrnc/DroidDesk-Fold/releases/download/" +
             "mesa-kgsl-$MESA_KGSL_VERSION/mesa-kgsl-$MESA_KGSL_VERSION-arm64.tar.xz"
         val mesaKgslSha256 = MESA_KGSL_SHA256
@@ -1061,11 +1087,11 @@ class LinuxRuntime(private val context: Context) {
                 sed -i "s/^# *${'$'}name UTF-8/${'$'}name UTF-8/" /etc/locale.gen
             done
             locale-gen
-            echo "LANG=C.UTF-8" > /etc/default/locale
+            echo "LANG=$localeName" > /etc/default/locale
 
             mkdir -p /etc/droiddesk
             cat > /etc/droiddesk/bashrc <<'DROIDDESK_BASHRC'
-            export LANG=C.UTF-8
+            export LANG=$localeName
             export TZ="$timeZone"
             export EDITOR=vim
             export PATH="${'$'}HOME/.local/bin:${'$'}HOME/bin:${'$'}PATH"
@@ -3365,7 +3391,8 @@ class LinuxRuntime(private val context: Context) {
         env["SHELL"] = File(binDir, "bash").absolutePath
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
-        env["LANG"] = "en_US.UTF-8"
+        // The chosen language (installer); Debian apps follow it, Termux XFCE has no translations.
+        env["LANG"] = desktopLanguage()
 
         env["DISPLAY"] = ":0"
         env["XDG_RUNTIME_DIR"] = tmpDir.absolutePath
