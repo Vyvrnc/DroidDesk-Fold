@@ -43,7 +43,11 @@ Tested on Tab S10 FE, clean install (`pm clear`, user 0):
   natively (`apt-get --help` stays English);
 - the mesa-zink swap ran by itself at the next desktop start and removed only mesa-zink;
 - the missing Recommends list comes from this install (installed by hand there, then the desktop
-  had its wallpaper and icons again); the full clean install with the fixed list was not repeated;
+  had its wallpaper and icons again);
+- second clean install with the named Recommends (15:20 to 15:29): mesa 26.2.6 and xfdesktop
+  installed, the desktop came up with wallpaper and icons on the first start; it still lacked
+  the Recommends of the added packages (dconf, glib-networking, file-roller, zenity), named too
+  since then (that last list was installed by hand, not through a third clean install);
 - settings show "Samsung Xclipse 540";
 - GPU kit, virgl off: Termux llvmpipe GL 4.6, Firefox 159 WebGL ok at 2.1 FPS. Virgl on
   (`droiddesk-native-gpu on`): Termux virgl over ANGLE/Vulkan (GL 2.1, GLES 3.1), Firefox WebGL ok
