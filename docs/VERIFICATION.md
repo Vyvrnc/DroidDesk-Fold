@@ -9,7 +9,7 @@ Signing certificate SHA-256: `bb99b57e2d04953588f646c9a2d4d84e98b693f22ab795a70c
 Devices:
 
 - **Tab S10 FE**: Samsung Galaxy Tab S10 FE (SM-X620), Exynos 1580 / Xclipse 540, Android 16.
-- **Fold 7**: Samsung Galaxy Z Fold 7 (SM-F966B), Snapdragon 8 Elite / Adreno 830, Android 16, One UI 8.5.
+- **Fold 7**: Samsung Galaxy Z Fold 7 (SM-F966B), Snapdragon 8 Elite / Adreno 830, Android 17 (Android 16, One UI 8.5 before fold.106).
 
 Unless stated otherwise, every release is installed over the previous one (`adb install -r`,
 same as an Obtainium update) and the existing Debian, settings and Claude Code login are kept.
@@ -20,17 +20,48 @@ launchers).
 
 ## 1.0.1-fold.106 (2026-11-01)
 
-Changed: first install selects Termux's default mirror (Cloudflare CDN) unless one was chosen,
-skips Recommends and clang (80+ MB), Debian dpkg skips fsync and docs; the installer asks for
-the language of the Linux apps; gettext finds the rootfs translations natively.
+Changed:
+- first install selects Termux's default mirror (Cloudflare CDN) unless one was chosen, skips
+  Recommends and clang (80+ MB) but names the Recommends the desktop needs, Debian dpkg skips
+  fsync and docs;
+- the welcome screen asks for the language of the Linux apps; gettext finds the rootfs
+  translations natively;
+- Termux side: main-repo `mesa` (26.2.6) instead of TUR's `mesa-zink` (frozen at 22.0.5); older
+  installs swap it in the background at desktop start, only when apt would remove nothing else;
+  `LIBGL_KOPPER_DISABLE=true` on Adreno;
+- the settings show the GPU's own name (GL_RENDERER, unwrapped from ANGLE);
+- new `droiddesk-gpu-report` and `docs/gpu-test-kit.md`.
 
 Found on Tab S10 FE: a clean install drew mirrors.pku.edu.cn at 19 kB/s (213 MB). Native Debian
 programs stayed English with LANG=cs_CZ.UTF-8 (Czech under proot; Fold 7). Termux ships no
-translations, so XFCE itself stays English.
+translations, so XFCE itself stays English. A clean install without Recommends had a black
+desktop: xfdesktop is only a Recommends of xfce4-session (fixed, 15 packages named).
 
-Tested: bindtextdomain mapping in the container test.
+Tested on Tab S10 FE, clean install (`pm clear`, user 0):
+- install 11:50 to 12:00 (under 10 minutes), packages-cf.termux.dev; the language picker
+  preselected Čeština, cs_CZ.UTF-8 was generated; `ls --help` and `date` in Debian print Czech
+  natively (`apt-get --help` stays English);
+- the mesa-zink swap ran by itself at the next desktop start and removed only mesa-zink;
+- the missing Recommends list comes from this install (installed by hand there, then the desktop
+  had its wallpaper and icons again); the full clean install with the fixed list was not repeated;
+- settings show "Samsung Xclipse 540";
+- GPU kit, virgl off: Termux llvmpipe GL 4.6, Firefox 159 WebGL ok at 2.1 FPS. Virgl on
+  (`droiddesk-native-gpu on`): Termux virgl over ANGLE/Vulkan (GL 2.1, GLES 3.1), Firefox WebGL ok
+  at 56.9 FPS. Debian with `droiddesk-gpu on`: glxinfo fails with BadMatch (X_GetImage), native and
+  under proot (Debian Mesa 25.0.7), not fixed. Both switched off again after the test.
 
-Not tested yet: a clean install on the tablet with the release APK (time, mirror, Czech apps).
+Tested on Fold 7 (Android 17) with the GPU kit, from Debian:
+- Debian: zink on Turnip, GL 4.6, Mesa 26.2.6; Vulkan Adreno 830;
+- Termux before the swap (mesa-zink 22.0.5): zink GL 4.6; Firefox 158 WebGL 117.6 FPS, Chromium
+  156 WebGL 114.8 FPS; after the swap (mesa 26.2.6): zink on Turnip GL 4.6, Firefox 114.9 FPS,
+  Chromium 106.3 FPS; the desktop and scrolling looked fine;
+- Chromium WebGL flickered with artefacts through kopper; same page with
+  LIBGL_KOPPER_DISABLE=true: clean, 58.9 instead of 86.8 FPS;
+- OrcaSlicer (Debian): GL 4.6 on zink, a model loaded and rotated;
+- glmark2 varies too much between runs to compare (Debian 235 to 719 with the same settings);
+- not tested: Electron (none installed), video playback (needs a person watching).
+
+Not tested: a clean install on the Fold; Mali GPUs.
 
 ## 1.0.1-fold.105 (2026-11-01)
 

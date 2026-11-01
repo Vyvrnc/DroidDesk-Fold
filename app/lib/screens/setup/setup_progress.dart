@@ -5,6 +5,7 @@ import 'package:percent_indicator/circular_percent_indicator.dart';
 import 'package:droiddesk/theme/droid_theme.dart';
 import 'package:droiddesk/state/app_state.dart';
 import 'package:droiddesk/screens/home_screen.dart';
+import 'package:droiddesk/screens/gpu_support_screen.dart';
 
 /// Setup progress screen — step 3 of setup wizard.
 /// Shows download, extraction, and configuration progress.
@@ -512,7 +513,9 @@ class _SetupProgressScreenState extends State<SetupProgressScreen> {
     if (state.isSetupComplete) {
       return _PhaseInfo(
         title: 'Setup Complete!',
-        message: 'Your Linux desktop is ready to launch.',
+        message: 'Your Linux desktop is ready to launch.\n'
+            'GPU: ${state.gpuType} (${gpuFamilyFor(state.gpuType).path}). '
+            'What is tested on it: tap GPU on the home screen.',
         progress: 1.0,
         icon: Icons.check_circle_rounded,
         error: false,

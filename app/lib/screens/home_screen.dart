@@ -8,6 +8,7 @@ import 'package:droiddesk/services/platform_bridge.dart';
 import 'package:droiddesk/screens/setup/de_install_screen.dart';
 import 'package:droiddesk/screens/apps/app_catalog_screen.dart';
 import 'package:droiddesk/screens/desktop_tools_screen.dart';
+import 'package:droiddesk/screens/gpu_support_screen.dart';
 
 /// Home dashboard — shown after setup is complete.
 /// Central hub for launching the desktop, terminal, and managing the environment.
@@ -389,7 +390,19 @@ class HomeScreen extends StatelessWidget {
                         _divider(),
                         _infoRow('Desktop', state.selectedDE.toUpperCase()),
                         _divider(),
-                        _infoRow('GPU', state.gpuType),
+                        InkWell(
+                          onTap: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(builder: (_) => const GpuSupportScreen()),
+                          ),
+                          child: Row(
+                            children: [
+                              Expanded(child: _infoRow('GPU', state.gpuType)),
+                              const SizedBox(width: 6),
+                              Icon(Icons.chevron_right_rounded, size: 18, color: DroidTheme.textMuted),
+                            ],
+                          ),
+                        ),
                         _divider(),
                         _infoRow(
                           'Renderer',
