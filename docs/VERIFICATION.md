@@ -18,6 +18,30 @@ Automated checks before every release: `tools/glibc-native/test.sh` (pathhook an
 regressions in a Debian container) and `tools/check-launchers.py` (`bash -n` over the generated
 launchers).
 
+## 1.0.1-fold.106 (2026-11-01)
+
+Changed: first install selects Termux's default mirror (Cloudflare CDN) unless one was chosen,
+skips Recommends and clang (80+ MB), Debian dpkg skips fsync and docs; the installer asks for
+the language of the Linux apps; gettext finds the rootfs translations natively.
+
+Found on Tab S10 FE: a clean install drew mirrors.pku.edu.cn at 19 kB/s (213 MB). Native Debian
+programs stayed English with LANG=cs_CZ.UTF-8 (Czech under proot; Fold 7). Termux ships no
+translations, so XFCE itself stays English.
+
+Tested: bindtextdomain mapping in the container test.
+
+Not tested yet: a clean install on the tablet with the release APK (time, mirror, Czech apps).
+
+## 1.0.1-fold.105 (2026-11-01)
+
+Note: the APK of this release still reports versionName 1.0.1-fold.104 (versionCode 105); the
+version bump was skipped by a failing command chain. The code is the fold.105 change.
+
+Tested on Fold 7 after the update: the native history directory holds all 19 sessions (including
+the old proot ones) and the memory notes. The proot directory link is removed again by Claude Code
+(it deletes symlinks in ~/.claude/projects); a proot session then starts its own directory, which
+the next native start merges.
+
 ## 1.0.1-fold.104 (2026-10-31)
 
 Tested on Fold 7 with a 49" monitor over DeX (3840x984, work area 3840x919), by hand from the
