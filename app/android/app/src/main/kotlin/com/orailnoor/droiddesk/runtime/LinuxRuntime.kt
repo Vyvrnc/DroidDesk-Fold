@@ -3459,6 +3459,10 @@ class LinuxRuntime(private val context: Context) {
             env["VK_ICD_FILENAMES"] = freedrenoIcd.absolutePath
             env["MESA_LOADER_DRIVER_OVERRIDE"] = "zink"
             env["GALLIUM_DRIVER"] = "zink"
+            // Zink presenting through kopper flickered with artefacts in Chromium WebGL on Mesa
+            // 26.2.6 (Fold 7); without it the picture is clean at about 30 % fewer FPS. Debian's
+            // gpu-env does the same.
+            env["LIBGL_KOPPER_DISABLE"] = "true"
         } else if (nativeVirglActive()) {
             // Experimental, opt-in (droiddesk-native-gpu): Termux's Mesa talks to the app's
             // virgl server ($PREFIX/tmp/.virgl_test links to it). No LIBGL_ALWAYS_SOFTWARE and
@@ -4014,6 +4018,58 @@ class LinuxRuntime(private val context: Context) {
      * DEBIAN_SETUP_VERSION (bumped when the script gains something older installs need).
      * Idempotent; log in tmp/debian-setup.log.
      */
+    @Volatile private var mesaSwapRunning = false
+
+    /**
+     * Older installs have TUR's mesa-zink, frozen at Mesa 22.0.5. Termux's main-repo mesa
+     * (26.x) has zink and Turnip for kgsl too; on the Fold 7 the desktop and both browsers work
+     * with it, glmark2 is higher (2026-11-01). Swapped in the background, only when apt would
+     * remove nothing but mesa-zink; a failed try waits a day. Running programs keep the old
+     * libraries until the next desktop start.
+     */
+    private fun swapMesaZinkInBackground() {
+        if (mesaSwapRunning || !File(prefixDir, "var/lib/dpkg/info/mesa-zink.list").exists()) return
+        val stamp = File(prefixDir, "etc/droiddesk/mesa-swap-failed")
+        if (stamp.isFile && System.currentTimeMillis() - stamp.lastModified() < 24L * 3600 * 1000) return
+        mesaSwapRunning = true
+        Thread({
+            try {
+                val log = File(tmpDir, "droiddesk-mesa-swap.log")
+                val script = """
+                    set -u
+                    apt-get update || echo "apt-get update failed, trying with the lists there are"
+                    sim=${'$'}(apt-get -s install mesa 2>&1) || { printf '%s\n' "${'$'}sim"; exit 2; }
+                    others=${'$'}(printf '%s\n' "${'$'}sim" | awk '${'$'}1 == "Remv" && ${'$'}2 != "mesa-zink" { print ${'$'}2 }')
+                    if [ -n "${'$'}others" ]; then echo "would also remove:" ${'$'}others; exit 3; fi
+                    apt-get install -y mesa
+                """.trimIndent()
+                val process = ProcessBuilder(File(binDir, "bash").absolutePath, "-c", script)
+                    .directory(homeDir)
+                    .redirectErrorStream(true)
+                    .redirectOutput(log)
+                    .also {
+                        it.environment().clear()
+                        it.environment().putAll(getTermuxEnv())
+                        it.environment()["DEBIAN_FRONTEND"] = "noninteractive"
+                    }
+                    .start()
+                val code = process.waitFor()
+                val swapped = code == 0 && !File(prefixDir, "var/lib/dpkg/info/mesa-zink.list").exists()
+                Log.i(TAG, "mesa-zink swap finished with $code, swapped=$swapped (log ${log.path})")
+                if (swapped) {
+                    stamp.delete()
+                } else {
+                    stamp.parentFile?.mkdirs()
+                    stamp.writeText("$code\n")
+                }
+            } catch (error: Exception) {
+                Log.w(TAG, "mesa-zink swap failed", error)
+            } finally {
+                mesaSwapRunning = false
+            }
+        }, "mesa-swap").apply { isDaemon = true }.start()
+    }
+
     private fun refreshDebianSetupInBackground() {
         if (debianSetupRunning || debianRootfsMarkers().none(File::exists)) return
         val stamp = File(debianRootfs(baseDir), "etc/droiddesk/setup-version")
@@ -4369,13 +4425,10 @@ class LinuxRuntime(private val context: Context) {
         }
         onProgress?.invoke(0.70, "Installing Mesa graphics packages...")
 
-        // mesa-zink pulls the Vulkan loader selected by the active Termux repo.
-        // Current repositories use vulkan-loader-generic, which provides and
-        // conflicts with the older vulkan-loader-android package name.
-        // With the native virgl opt-in (droiddesk-native-gpu, no Adreno) a repeated setup keeps
-        // Termux's mesa: mesa-zink 22 aborts as a client of virglrenderer-android 1.3.
-        val mesaPackage = if (!hasAdrenoGpu() && nativeGpuMarker.exists()) "mesa" else "mesa-zink"
-        if (!installPackageGroup("pkg install -y $mesaPackage")) {
+        // Termux's main-repo mesa (26.x: zink, Turnip for kgsl, virgl). TUR's mesa-zink is frozen
+        // at 22.0.5 and aborts as a client of virglrenderer-android 1.3; older installs swap it
+        // in swapMesaZinkInBackground.
+        if (!installPackageGroup("pkg install -y mesa")) {
             // Graphics acceleration is optional. A desktop with llvmpipe is much
             // better UX than failing setup because a vendor Vulkan stack is not
             // compatible with the current Mesa package set.
@@ -4773,6 +4826,7 @@ class LinuxRuntime(private val context: Context) {
             writeXfceTweaks()
         }
         refreshDebianSetupInBackground()
+        swapMesaZinkInBackground()
         ensureVirglServerInBackground()
         // The native session's environment is fixed when XFCE starts: give the server a moment
         // to bind its socket, or the whole session would stay on llvmpipe. The packages come with
