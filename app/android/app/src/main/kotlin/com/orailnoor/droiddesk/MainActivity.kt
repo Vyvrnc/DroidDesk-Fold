@@ -182,6 +182,7 @@ class MainActivity : FlutterActivity() {
                         "sdkVersion" to Build.VERSION.SDK_INT,
                         "cpuAbi" to Build.SUPPORTED_ABIS.firstOrNull(),
                         "gpuVendor" to getGpuVendor(),
+                        "gpuRenderer" to gpuRenderer,
                         "graphicsMode" to if (chrootRuntime.hasRoot()) {
                             "Software (llvmpipe)"
                         } else {
@@ -974,6 +975,51 @@ class MainActivity : FlutterActivity() {
     }
 
     // ── Hardware Detection ──
+
+    /** GL_RENDERER of the device GPU ("Adreno (TM) 830", "Samsung Xclipse 540"), read once. */
+    private val gpuRenderer: String by lazy {
+        try {
+            val display = android.opengl.EGL14.eglGetDisplay(android.opengl.EGL14.EGL_DEFAULT_DISPLAY)
+            val version = IntArray(2)
+            if (!android.opengl.EGL14.eglInitialize(display, version, 0, version, 1)) {
+                Log.w("DroidDesk", "GPU renderer: eglInitialize failed")
+                return@lazy ""
+            }
+            val configs = arrayOfNulls<android.opengl.EGLConfig>(1)
+            val count = IntArray(1)
+            val attribs = intArrayOf(
+                android.opengl.EGL14.EGL_RENDERABLE_TYPE, android.opengl.EGL14.EGL_OPENGL_ES2_BIT,
+                android.opengl.EGL14.EGL_SURFACE_TYPE, android.opengl.EGL14.EGL_PBUFFER_BIT,
+                android.opengl.EGL14.EGL_NONE
+            )
+            if (!android.opengl.EGL14.eglChooseConfig(display, attribs, 0, configs, 0, 1, count, 0) || count[0] == 0) {
+                Log.w("DroidDesk", "GPU renderer: no pbuffer config")
+                return@lazy ""
+            }
+            val context = android.opengl.EGL14.eglCreateContext(
+                display, configs[0], android.opengl.EGL14.EGL_NO_CONTEXT,
+                intArrayOf(android.opengl.EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, android.opengl.EGL14.EGL_NONE), 0
+            )
+            val surface = android.opengl.EGL14.eglCreatePbufferSurface(
+                display, configs[0],
+                intArrayOf(android.opengl.EGL14.EGL_WIDTH, 1, android.opengl.EGL14.EGL_HEIGHT, 1, android.opengl.EGL14.EGL_NONE), 0
+            )
+            val renderer = if (android.opengl.EGL14.eglMakeCurrent(display, surface, surface, context)) {
+                android.opengl.GLES20.glGetString(android.opengl.GLES20.GL_RENDERER) ?: ""
+            } else ""
+            android.opengl.EGL14.eglMakeCurrent(
+                display, android.opengl.EGL14.EGL_NO_SURFACE, android.opengl.EGL14.EGL_NO_SURFACE,
+                android.opengl.EGL14.EGL_NO_CONTEXT
+            )
+            android.opengl.EGL14.eglDestroySurface(display, surface)
+            android.opengl.EGL14.eglDestroyContext(display, context)
+            Log.i("DroidDesk", "GPU renderer: $renderer (egl 0x${Integer.toHexString(android.opengl.EGL14.eglGetError())})")
+            renderer.trim()
+        } catch (e: Exception) {
+            Log.w("DroidDesk", "GPU renderer query failed", e)
+            ""
+        }
+    }
 
     private fun getGpuVendor(): String {
         return try {

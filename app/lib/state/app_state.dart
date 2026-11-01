@@ -93,6 +93,10 @@ class AppState extends ChangeNotifier {
   bool get isDEInstalled => _installedDE.isNotEmpty;
 
   String get gpuType {
+    // The GPU's own name (EGL GL_RENDERER); ro.hardware.egl only names the driver vendor,
+    // "samsung" on Exynos/Xclipse.
+    final renderer = _deviceInfo['gpuRenderer']?.toString() ?? '';
+    if (renderer.isNotEmpty) return renderer;
     final vendor = _deviceInfo['gpuVendor']?.toString() ?? '';
     if (vendor.contains('adreno')) return 'Adreno (Snapdragon)';
     if (vendor.contains('mali')) return 'Mali (MediaTek/Exynos)';
