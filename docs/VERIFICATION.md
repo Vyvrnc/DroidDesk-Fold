@@ -18,6 +18,16 @@ Automated checks before every release: `tools/glibc-native/test.sh` (pathhook an
 regressions in a Debian container) and `tools/check-launchers.py` (`bash -n` over the generated
 launchers).
 
+## 1.0.1-fold.107 (2026-11-01)
+
+Fixed: the Claude launchers printed `ln: invalid option -- 'a'` at every start (Tab S10 FE,
+fold.106). The native project key (`-data-user-0-...`) begins with a dash and `ln -s` read it as
+options; now `ln -s --`. So the proot history link was never created; fold.105 blamed Claude Code
+for removing it.
+
+Tested: the failing and the fixed `ln` call with such a key (Git Bash); `check-launchers` passes.
+Not tested on a device before release.
+
 ## 1.0.1-fold.106 (2026-11-01)
 
 Changed:
