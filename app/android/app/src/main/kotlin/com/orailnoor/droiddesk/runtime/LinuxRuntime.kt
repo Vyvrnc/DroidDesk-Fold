@@ -4402,7 +4402,12 @@ class LinuxRuntime(private val context: Context) {
             "lxqt" -> "lxqt qterminal pcmanfm-qt featherpad"
             "mate" -> "mate mate-terminal"
             "kde" -> "plasma-desktop konsole dolphin"
-            else -> "xfce4 xfce4-terminal xfce4-whiskermenu-plugin xfce4-notifyd xfce4-genmon-plugin thunar mousepad"
+            // The setup skips Recommends: the ones the desktop needs are named here (xfdesktop is
+            // only a Recommends of xfce4-session; without it the desktop stayed black, fold.106).
+            // List from a fold.106 install compared with the Recommends of what it had.
+            else -> "xfce4 xfce4-terminal xfce4-whiskermenu-plugin xfce4-notifyd xfce4-genmon-plugin thunar mousepad " +
+                "xfdesktop gvfs tumbler thunar-archive-plugin hicolor-icon-theme desktop-file-utils " +
+                "gsettings-desktop-schemas libcanberra lxde-icon-theme xorg-xauth bash-completion gnupg"
         }
         if (!installPackageGroup("pkg install -y $desktopPackages")) {
             Log.e(TAG, "$selectedDesktop package install failed")
@@ -4428,7 +4433,7 @@ class LinuxRuntime(private val context: Context) {
         // Termux's main-repo mesa (26.x: zink, Turnip for kgsl, virgl). TUR's mesa-zink is frozen
         // at 22.0.5 and aborts as a client of virglrenderer-android 1.3; older installs swap it
         // in swapMesaZinkInBackground.
-        if (!installPackageGroup("pkg install -y mesa")) {
+        if (!installPackageGroup("pkg install -y mesa mesa-vulkan-icd-swrast")) {
             // Graphics acceleration is optional. A desktop with llvmpipe is much
             // better UX than failing setup because a vendor Vulkan stack is not
             // compatible with the current Mesa package set.
@@ -4445,7 +4450,7 @@ class LinuxRuntime(private val context: Context) {
 
         // No clang: the prebuilt socket hook from jniLibs finds its prefix at load time, and the
         // toolchain (clang, llvm, ndk-sysroot) was over 80 MB of every first install.
-        val nativeTools = "git wget curl openssh htop python"
+        val nativeTools = "git wget curl openssh htop python python-ensurepip-wheels"
         onProgress?.invoke(
             0.84,
             "Installing Desktop Essentials tools...",
