@@ -4407,7 +4407,11 @@ class LinuxRuntime(private val context: Context) {
             // List from a fold.106 install compared with the Recommends of what it had.
             else -> "xfce4 xfce4-terminal xfce4-whiskermenu-plugin xfce4-notifyd xfce4-genmon-plugin thunar mousepad " +
                 "xfdesktop gvfs tumbler thunar-archive-plugin hicolor-icon-theme desktop-file-utils " +
-                "gsettings-desktop-schemas libcanberra lxde-icon-theme xorg-xauth bash-completion gnupg"
+                "gsettings-desktop-schemas libcanberra lxde-icon-theme xorg-xauth bash-completion gnupg " +
+                // Their own Recommends (second clean install): GSettings storage, TLS for GIO, the
+                // archive tool behind thunar-archive-plugin and its common formats. gnome-keyring
+                // runs in Debian.
+                "dconf glib-networking file-roller zenity zip 7zip"
         }
         if (!installPackageGroup("pkg install -y $desktopPackages")) {
             Log.e(TAG, "$selectedDesktop package install failed")
