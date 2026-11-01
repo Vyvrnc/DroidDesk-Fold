@@ -704,7 +704,7 @@ class LinuxRuntime(private val context: Context) {
                                 done
                                 rmdir "${'$'}p/${'$'}vkey" 2>/dev/null
                             fi
-                            [ -e "${'$'}p/${'$'}vkey" ] || ln -s "${'$'}key" "${'$'}p/${'$'}vkey"
+                            [ -e "${'$'}p/${'$'}vkey" ] || ln -s -- "${'$'}key" "${'$'}p/${'$'}vkey"
                         fi
                     fi
                     exec claude --messaging-socket-path "${'$'}d/${'$'}${'$'}.sock" "${'$'}@"' claude "${'$'}@"
@@ -771,7 +771,7 @@ class LinuxRuntime(private val context: Context) {
                                 done
                                 rmdir "${'$'}p/${'$'}vkey" 2>/dev/null
                             fi
-                            [ -e "${'$'}p/${'$'}vkey" ] || ln -s "${'$'}key" "${'$'}p/${'$'}vkey"
+                            [ -e "${'$'}p/${'$'}vkey" ] || ln -s -- "${'$'}key" "${'$'}p/${'$'}vkey"
                         fi
                     fi
                     exec claude --messaging-socket-path "${'$'}d/${'$'}${'$'}.sock" "${'$'}@"' claude "${'$'}@"
@@ -980,7 +980,7 @@ class LinuxRuntime(private val context: Context) {
                                 done
                                 rmdir "${'$'}p/${'$'}vkey" 2>/dev/null
                             fi
-                            [ -e "${'$'}p/${'$'}vkey" ] || ln -s "${'$'}key" "${'$'}p/${'$'}vkey"
+                            [ -e "${'$'}p/${'$'}vkey" ] || ln -s -- "${'$'}key" "${'$'}p/${'$'}vkey"
                         fi
                     fi
                     exec claude --messaging-socket-path "${'$'}d/${'$'}${'$'}.sock" "${'$'}@"' claude "${'$'}@"
