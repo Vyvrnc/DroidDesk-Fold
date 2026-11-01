@@ -26,7 +26,8 @@ options; now `ln -s --`. So the proot history link was never created; fold.105 b
 for removing it.
 
 Tested: the failing and the fixed `ln` call with such a key (Git Bash); `check-launchers` passes.
-Not tested on a device before release.
+On the Tab S10 FE (update over fold.106): starting Claude Code from the app created
+`-root-projekty-Claude -> -data-user-0-...`, no error.
 
 ## 1.0.1-fold.106 (2026-11-01)
 
