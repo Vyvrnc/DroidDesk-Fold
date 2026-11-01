@@ -1,0 +1,406 @@
+#!/usr/bin/env python3
+"""DroidDesk GPU report: what the GPU does on this device, as one Markdown file to send us.
+
+Runs from the DroidDesk terminal (Termux side) or from Debian (claude-debian, debian-run).
+It only reads state and starts test programs; it changes no settings.
+
+  droiddesk-gpu-report             environment, OpenGL, Vulkan, WebGL in every browser found
+  droiddesk-gpu-report --bench     plus a short glmark2 run on each side
+  droiddesk-gpu-report --no-browsers
+  droiddesk-gpu-report --browser firefox   only browsers whose name contains this text
+
+Report: ~/droiddesk-gpu-report-<time>.md (the path is printed at the end).
+"""
+import argparse
+import datetime
+import glob
+import http.server
+import json
+import os
+import shlex
+import shutil
+import signal
+import socketserver
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+VERSION = 1
+APP_DATA = "/data/data/com.orailnoor.droiddesk/files"
+PREFIX_CANDIDATES = [os.environ.get("DROIDDESK_PREFIX", ""), os.environ.get("PREFIX", ""),
+                     APP_DATA + "/usr", "/data/user/0/com.orailnoor.droiddesk/files/usr"]
+
+
+def find_prefix():
+    for p in PREFIX_CANDIDATES:
+        if p and os.path.isfile(os.path.join(p, "bin", "bash")) and "com.orailnoor.droiddesk" in p:
+            return p
+    for p in PREFIX_CANDIDATES:
+        if p and os.path.isfile(os.path.join(p, "bin", "bash")) and not p.startswith("/usr"):
+            return p
+    return ""
+
+
+PREFIX = find_prefix()
+IN_TERMUX = bool(os.environ.get("PREFIX")) and os.environ.get("PREFIX") == PREFIX
+DISPLAY = os.environ.get("DISPLAY") or ":0"
+
+
+def termux_argv(cmd):
+    """argv that runs a shell command on the Termux side."""
+    if IN_TERMUX:
+        return ["bash", "-lc", cmd]
+    if not PREFIX:
+        return None
+    env = ["PREFIX=" + PREFIX, "PATH=%s/bin:/system/bin" % PREFIX, "LD_LIBRARY_PATH=%s/lib" % PREFIX,
+           "TMPDIR=%s/tmp" % PREFIX, "HOME=%s/home" % os.path.dirname(PREFIX), "DISPLAY=" + DISPLAY]
+    return [PREFIX + "/bin/env", "-i"] + env + [PREFIX + "/bin/bash", "-lc", cmd]
+
+
+def debian_argv(cmd):
+    """argv that runs a shell command in Debian (native, with the session's GPU setup)."""
+    if not IN_TERMUX and os.path.isfile("/etc/debian_version"):
+        return ["bash", "-lc", cmd]
+    if PREFIX and os.path.isfile(PREFIX + "/bin/debian-run"):
+        return [PREFIX + "/bin/debian-run", "bash", "-lc", cmd]
+    return None
+
+
+SIDES = {"termux": termux_argv, "debian": debian_argv}
+
+
+def run(side, cmd, timeout=60):
+    argv = SIDES[side](cmd)
+    if argv is None:
+        return None, "(%s side not available)" % side
+    env = dict(os.environ, DISPLAY=DISPLAY)
+    try:
+        p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout,
+                           env=env, stdin=subprocess.DEVNULL)
+        return p.returncode, p.stdout.decode("utf-8", "replace")
+    except subprocess.TimeoutExpired as e:
+        out = (e.stdout or b"").decode("utf-8", "replace")
+        return "timeout", out + "\n(timed out after %ss)" % timeout
+    except OSError as e:
+        return "error", str(e)
+
+
+def has(side, name):
+    rc, out = run(side, "command -v %s" % shlex.quote(name), timeout=20)
+    return rc == 0 and out.strip() != ""
+
+
+def tail(text, lines=40):
+    rows = text.rstrip().splitlines()
+    return "\n".join(rows[-lines:])
+
+
+# ── WebGL test page ──
+
+PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><title>DroidDesk WebGL test</title>
+<style>body{margin:0;background:#111;color:#eee;font:16px sans-serif}#c{width:100vw;height:80vh;display:block}</style>
+</head><body><div id="s">DroidDesk WebGL test, please wait about 10 s</div><canvas id="c"></canvas><script>
+const R={ua:navigator.userAgent,steps:[]};
+function post(path,obj){try{fetch(path,{method:'POST',body:JSON.stringify(obj),keepalive:true})}catch(e){}}
+post('loaded',{ua:navigator.userAgent});
+window.onerror=(m)=>{R.steps.push('error: '+m)};
+function info(gl){const d=gl.getExtension('WEBGL_debug_renderer_info');
+ return {vendor:d?gl.getParameter(d.UNMASKED_VENDOR_WEBGL):gl.getParameter(gl.VENDOR),
+  renderer:d?gl.getParameter(d.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER),
+  version:gl.getParameter(gl.VERSION),maxTexture:gl.getParameter(gl.MAX_TEXTURE_SIZE),
+  extensions:(gl.getSupportedExtensions()||[]).length,
+  s3tc:!!gl.getExtension('WEBGL_compressed_texture_s3tc'),
+  etc:!!gl.getExtension('WEBGL_compressed_texture_etc'),
+  astc:!!gl.getExtension('WEBGL_compressed_texture_astc')}}
+function prog(gl,fs){const vs='attribute vec2 p;void main(){gl_Position=vec4(p,0.,1.);}';
+ const mk=(t,s)=>{const o=gl.createShader(t);gl.shaderSource(o,s);gl.compileShader(o);
+  if(!gl.getShaderParameter(o,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(o));return o};
+ const p=gl.createProgram();gl.attachShader(p,mk(gl.VERTEX_SHADER,vs));gl.attachShader(p,mk(gl.FRAGMENT_SHADER,fs));
+ gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(p));
+ gl.useProgram(p);const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);
+ gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+ const a=gl.getAttribLocation(p,'p');gl.enableVertexAttribArray(a);gl.vertexAttribPointer(a,2,gl.FLOAT,false,0,0);return p}
+function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
+async function main(){
+ const t2=document.createElement('canvas').getContext('webgl2');R.webgl2=!!t2;
+ if(t2)R.webgl2Info=info(t2);
+ const c=document.getElementById('c');c.width=c.clientWidth;c.height=c.clientHeight;
+ let lost=false;c.addEventListener('webglcontextlost',()=>{lost=true});
+ const gl=c.getContext('webgl',{preserveDrawingBuffer:true});
+ R.webgl1=!!gl;if(!gl){R.result='no-webgl';post('result',R);return}
+ R.webgl1Info=info(gl);
+ try{
+  prog(gl,'precision mediump float;void main(){gl_FragColor=vec4(0.,1.,0.,1.);}');
+  gl.viewport(0,0,c.width,c.height);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+  const px=new Uint8Array(4);gl.readPixels(c.width>>1,c.height>>1,1,1,gl.RGBA,gl.UNSIGNED_BYTE,px);
+  R.drawCorrect=px[0]<10&&px[1]>245&&px[2]<10;R.pixel=Array.from(px);
+  const p=prog(gl,'precision highp float;uniform float t;uniform vec2 r;void main(){vec2 u=gl_FragCoord.xy/r;float v=0.;'+
+   'for(int i=0;i<64;i++){v+=sin(u.x*float(i)+t)*cos(u.y*float(i)-t);}gl_FragColor=vec4(.5+.5*sin(v),u,1.);}');
+  const ut=gl.getUniformLocation(p,'t'),ur=gl.getUniformLocation(p,'r');
+  await new Promise(done=>{let n=0;const t0=performance.now();
+   function f(now){gl.uniform1f(ut,(now-t0)/1000);gl.uniform2f(ur,c.width,c.height);
+    gl.drawArrays(gl.TRIANGLE_STRIP,0,4);n++;
+    if(now-t0<5000&&!lost)requestAnimationFrame(f);else{R.fps=Math.round(n*1000/(now-t0)*10)/10;R.canvas=[c.width,c.height];done()}}
+   requestAnimationFrame(f)});
+  R.contextLost=lost;R.glError=gl.getError();
+  R.result=lost?'context-lost':(R.drawCorrect?'ok':'wrong-pixels');
+ }catch(e){R.result='exception';R.error=String(e)}
+ document.getElementById('s').textContent='Done: '+R.result+(R.fps?', '+R.fps+' FPS':'');
+ post('result',R)}
+main();
+</script></body></html>"""
+
+
+class Results:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.data = {}
+
+    def put(self, key, value):
+        with self.lock:
+            self.data[key] = value
+
+    def get(self, key):
+        with self.lock:
+            return self.data.get(key)
+
+
+RESULTS = Results()
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        body = PAGE.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        run_id = self.path.split("?")[0].strip("/").split("/")
+        try:
+            value = json.loads(raw.decode("utf-8", "replace") or "{}")
+        except ValueError:
+            value = {"raw": raw[:500].decode("utf-8", "replace")}
+        # Path: /<run>/loaded or /<run>/result (the page posts relative to its URL).
+        if len(run_id) == 2:
+            RESULTS.put(tuple(run_id), value)
+        self.send_response(204)
+        self.end_headers()
+
+
+def start_server():
+    srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+# Browsers: (label, side, command name, how to launch with a fresh profile).
+BROWSERS = [
+    ("Firefox (Termux)", "termux", "firefox", "firefox -no-remote -profile {profile} {url}"),
+    ("Chromium (Termux)", "termux", "chromium-browser",
+     "chromium-browser --user-data-dir={profile} --no-first-run --no-default-browser-check {url}"),
+    ("Firefox ESR (Debian)", "debian", "firefox-esr", "firefox-esr -no-remote -profile {profile} {url}"),
+    ("Firefox (Debian)", "debian", "firefox", "firefox -no-remote -profile {profile} {url}"),
+    ("Chromium (Debian)", "debian", "chromium",
+     "chromium --user-data-dir={profile} --no-first-run --no-default-browser-check {url}"),
+    ("Brave (Debian)", "debian", "brave-browser",
+     "brave-browser --user-data-dir={profile} --no-first-run --no-default-browser-check {url}"),
+    ("Google Chrome (Debian)", "debian", "google-chrome",
+     "google-chrome --user-data-dir={profile} --no-first-run --no-default-browser-check {url}"),
+]
+
+
+def browser_test(label, side, launch, port, timeout=75):
+    run_id = "r%d" % int(time.time() * 1000)
+    url = "http://127.0.0.1:%d/%s/" % (port, run_id)
+    profile = "/tmp/droiddesk-gpu-report-%s" % run_id
+    if side == "termux" and not IN_TERMUX:
+        profile = PREFIX + "/tmp/droiddesk-gpu-report-" + run_id
+    cmd = "mkdir -p %s; exec %s" % (shlex.quote(profile), launch.format(profile=shlex.quote(profile), url=url))
+    argv = SIDES[side](cmd)
+    log = tempfile.TemporaryFile()
+    started = time.time()
+    proc = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                            start_new_session=True, env=dict(os.environ, DISPLAY=DISPLAY))
+    loaded = result = None
+    exit_code = None
+    while time.time() - started < timeout:
+        loaded = loaded or RESULTS.get((run_id, "loaded"))
+        result = RESULTS.get((run_id, "result"))
+        if result is not None:
+            break
+        if proc.poll() is not None:
+            exit_code = proc.returncode
+            time.sleep(2)
+            result = RESULTS.get((run_id, "result"))
+            break
+        time.sleep(0.5)
+    elapsed = round(time.time() - started, 1)
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+        time.sleep(2)
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    log.seek(0)
+    output = log.read().decode("utf-8", "replace")
+    run(side, "rm -rf %s" % shlex.quote(profile), timeout=30)
+    if result is not None:
+        verdict = result.get("result", "?")
+    elif exit_code is not None:
+        verdict = "browser-exited-%s" % exit_code + ("-after-load" if loaded else "-before-load")
+    else:
+        verdict = "timeout-after-load" if loaded else "timeout-no-load"
+    return {"label": label, "verdict": verdict, "seconds": elapsed, "loaded": bool(loaded),
+            "result": result, "log_tail": tail(output, 30)}
+
+
+# ── Report ──
+
+def section(out, title, body, lang=""):
+    out.append("\n### %s\n\n```%s\n%s\n```\n" % (title, lang, body.rstrip() or "(empty)"))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--bench", action="store_true", help="also run a short glmark2 on each side")
+    ap.add_argument("--no-browsers", action="store_true")
+    ap.add_argument("--browser", default="", help="only browsers whose label contains this text")
+    ap.add_argument("--out", default="")
+    args = ap.parse_args()
+
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M")
+    out_path = args.out or os.path.join(os.path.expanduser("~"), "droiddesk-gpu-report-%s.md" % stamp)
+    summary, raw = [], []
+    say = lambda s: print(s, flush=True)
+
+    say("DroidDesk GPU report v%d, writing %s" % (VERSION, out_path))
+    say("Running from: %s, Termux prefix: %s" % ("Termux" if IN_TERMUX else "Debian", PREFIX or "not found"))
+
+    # Environment
+    rc, props = run("termux", "for p in ro.product.manufacturer ro.product.model ro.soc.manufacturer ro.soc.model "
+                    "ro.hardware.egl ro.hardware.vulkan ro.build.version.release; do echo \"$p=$(getprop $p)\"; done",
+                    timeout=20)
+    rc2, state = run("termux",
+                     "ls -l /dev/kgsl-3d0 /dev/dri 2>&1; echo; "
+                     "for f in $PREFIX/etc/droiddesk/native-gpu-virgl; do [ -e $f ] && echo \"termux marker: $f\"; done; "
+                     "ls -l $PREFIX/tmp/.virgl_test 2>&1; true", timeout=20)
+    rc3, dstate = run("debian",
+                      "cat /etc/debian_version; ls /etc/droiddesk/ 2>&1; "
+                      "for f in gpu-off gpu-off-reason gpu-virgl gpu-selftest; do "
+                      "[ -e /etc/droiddesk/$f ] && echo \"$f: $(cat /etc/droiddesk/$f)\"; done; "
+                      "cat /opt/mesa-kgsl/VERSION /opt/mesa-kgsl/version 2>/dev/null; true", timeout=60)
+    section(raw, "Android properties", props)
+    section(raw, "GPU devices and Termux markers", state)
+    section(raw, "Debian GPU state (/etc/droiddesk)", dstate)
+    model = dict(l.split("=", 1) for l in props.splitlines() if "=" in l)
+    summary.append("- Device: %s %s, SoC %s %s, Android %s" % (
+        model.get("ro.product.manufacturer", "?"), model.get("ro.product.model", "?"),
+        model.get("ro.soc.manufacturer", "?"), model.get("ro.soc.model", "?"),
+        model.get("ro.build.version.release", "?")))
+    rc, _ = run("termux", "test -e /dev/kgsl-3d0", timeout=20)
+    summary.append("- Adreno (/dev/kgsl-3d0): %s" % ("yes" if rc == 0 else "no"))
+
+    # OpenGL and Vulkan on both sides
+    for side in ("termux", "debian"):
+        if SIDES[side]("true") is None:
+            summary.append("- %s: not available" % side)
+            continue
+        if has(side, "glxinfo"):
+            rc, out = run(side, "glxinfo -B", timeout=60)
+            section(raw, "glxinfo -B (%s)" % side, out)
+            renderer = next((l.split(":", 1)[1].strip() for l in out.splitlines()
+                             if "OpenGL renderer string" in l), "failed (rc %s)" % rc)
+            version = next((l.split(":", 1)[1].strip() for l in out.splitlines()
+                            if l.strip().startswith("OpenGL version string")
+                            or l.strip().startswith("OpenGL core profile version string")), "")
+            summary.append("- OpenGL (%s): %s %s" % (side, renderer, ("/ " + version) if version else ""))
+        else:
+            summary.append("- OpenGL (%s): glxinfo missing (%s)" % (
+                side, "pkg install mesa-demos" if side == "termux" else "apt install mesa-utils"))
+        if has(side, "vulkaninfo"):
+            rc, out = run(side, "vulkaninfo --summary", timeout=60)
+            section(raw, "vulkaninfo --summary (%s)" % side, tail(out, 60))
+            devs = [l.split("=", 1)[1].strip() for l in out.splitlines() if l.strip().startswith("deviceName")]
+            summary.append("- Vulkan (%s): %s" % (side, ", ".join(devs) or "failed (rc %s)" % rc))
+        else:
+            summary.append("- Vulkan (%s): vulkaninfo missing (%s)" % (
+                side, "pkg install vulkan-tools" if side == "termux" else "apt install vulkan-tools"))
+        if args.bench:
+            for name in ("glmark2", "glmark2-es2"):
+                if has(side, name):
+                    say("glmark2 on %s (up to 3 min)..." % side)
+                    rc, out = run(side, "%s -b build -b texture -b shading:shading=phong -b terrain "
+                                  "-b refract --size 1280x720" % name, timeout=240)
+                    section(raw, "%s (%s)" % (name, side), tail(out, 30))
+                    score = next((l for l in out.splitlines() if "Score" in l), "no score (rc %s)" % rc)
+                    summary.append("- %s (%s): %s" % (name, side, score.strip()))
+                    break
+            else:
+                summary.append("- glmark2 (%s): not installed" % side)
+
+    # Browsers
+    browser_rows = []
+    if not args.no_browsers:
+        srv = start_server()
+        port = srv.server_address[1]
+        for label, side, binary, launch in BROWSERS:
+            if args.browser and args.browser.lower() not in label.lower():
+                continue
+            if SIDES[side]("true") is None or not has(side, binary):
+                continue
+            say("WebGL test: %s (up to 75 s, a browser window opens)..." % label)
+            r = browser_test(label, side, launch, port)
+            browser_rows.append(r)
+            say("  -> %s" % r["verdict"])
+            section(raw, "WebGL: %s" % label, json.dumps(r["result"], indent=1) if r["result"] else "(no result)", "json")
+            section(raw, "Browser output: %s (last lines)" % label, r["log_tail"])
+        srv.shutdown()
+        if not browser_rows:
+            summary.append("- Browsers: none found")
+
+    # Write
+    lines = ["# DroidDesk GPU report", "",
+             "Generated %s by droiddesk-gpu-report v%d (from %s)." % (
+                 datetime.datetime.now().isoformat(timespec="seconds"), VERSION, "Termux" if IN_TERMUX else "Debian"),
+             "", "## Summary", ""] + summary
+    if browser_rows:
+        lines += ["", "## WebGL in browsers", "",
+                  "| Browser | Result | FPS | WebGL2 | Renderer | S3TC | Time |", "|---|---|---|---|---|---|---|"]
+        for r in browser_rows:
+            res = r["result"] or {}
+            inf = res.get("webgl1Info") or {}
+            lines.append("| %s | %s | %s | %s | %s | %s | %ss |" % (
+                r["label"], r["verdict"], res.get("fps", ""), "yes" if res.get("webgl2") else ("no" if res else ""),
+                (inf.get("renderer") or "").replace("|", "/"), "yes" if inf.get("s3tc") else ("no" if inf else ""),
+                r["seconds"]))
+    lines += ["", "## Manual checks (fill in)", "",
+              "| Check | Result | Note |", "|---|---|---|",
+              "| Desktop smooth (windows, scrolling) | | |",
+              "| Electron app (VS Code, Obsidian, ...) | | |",
+              "| 3D app (OrcaSlicer, FreeCAD, Blender) | | |",
+              "| Video (YouTube 1080p in a browser) | | |",
+              "", "## Raw output", ""] + raw
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    say("")
+    say("\n".join(summary))
+    say("")
+    say("Report: %s" % out_path)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

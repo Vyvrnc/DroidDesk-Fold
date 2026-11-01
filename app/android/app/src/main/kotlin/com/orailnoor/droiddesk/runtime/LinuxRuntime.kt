@@ -1713,6 +1713,39 @@ class LinuxRuntime(private val context: Context) {
             }
         }.onFailure { Log.w(TAG, "Writing droiddesk-zones failed: ${it.message}") }
 
+        // GPU report (docs/gpu-test-kit.md): Termux's Python runs it from both sides, Debian
+        // may have no python3.
+        runCatching {
+            val report = File(binDir, "droiddesk-gpu-report.py")
+            copyAssetAtomically("droiddesk/droiddesk-gpu-report", report)
+            val python = File(binDir, "python3").absolutePath
+            File(binDir, "droiddesk-gpu-report").let { command ->
+                command.writeText(
+                    "#!${File(binDir, "bash").absolutePath}\n" +
+                        "exec \"$python\" \"${report.absolutePath}\" \"${'$'}@\"\n",
+                )
+                command.setExecutable(true, false)
+            }
+            val debianBin = File(debianRootfs(baseDir), "usr/local/bin")
+            if (debianBin.isDirectory) {
+                File(debianBin, "droiddesk-gpu-report").let { command ->
+                    command.writeText(
+                        "#!/bin/sh\n" +
+                            "if command -v python3 >/dev/null 2>&1; then\n" +
+                            "    exec python3 \"${report.absolutePath}\" \"${'$'}@\"\n" +
+                            "fi\n" +
+                            "# No python3 in Debian: run it as from the DroidDesk terminal.\n" +
+                            "exec \"${File(binDir, "env").absolutePath}\" -i PREFIX=\"${prefixDir.absolutePath}\" " +
+                            "HOME=\"${homeDir.absolutePath}\" TMPDIR=\"${tmpDir.absolutePath}\" " +
+                            "PATH=\"${binDir.absolutePath}:/system/bin\" DISPLAY=\"${'$'}{DISPLAY:-:0}\" " +
+                            "LD_LIBRARY_PATH=\"${File(prefixDir, "lib").absolutePath}\" " +
+                            "\"${File(binDir, "bash").absolutePath}\" \"${binDir.absolutePath}/droiddesk-gpu-report\" \"${'$'}@\"\n",
+                    )
+                    command.setExecutable(true, false)
+                }
+            }
+        }.onFailure { Log.w(TAG, "Writing droiddesk-gpu-report failed: ${it.message}") }
+
         // USB flash drives and card readers through UsbBridge.
         runCatching {
             val usbClient = File(binDir, "droiddesk-usb.py")
