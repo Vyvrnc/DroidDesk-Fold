@@ -27,10 +27,12 @@ import tempfile
 import threading
 import time
 
-VERSION = 1
-APP_DATA = "/data/data/com.orailnoor.droiddesk/files"
+VERSION = 2
+APP_DATA = "/data/user/0/com.orailnoor.droiddesk/files"
+# In Debian the session keeps Termux's prefix as DD_SAVED_PREFIX.
 PREFIX_CANDIDATES = [os.environ.get("DROIDDESK_PREFIX", ""), os.environ.get("PREFIX", ""),
-                     APP_DATA + "/usr", "/data/user/0/com.orailnoor.droiddesk/files/usr"]
+                     os.environ.get("DD_SAVED_PREFIX", ""), APP_DATA + "/usr",
+                     "/data/data/com.orailnoor.droiddesk/files/usr"]
 
 
 def find_prefix():
@@ -48,15 +50,65 @@ IN_TERMUX = bool(os.environ.get("PREFIX")) and os.environ.get("PREFIX") == PREFI
 DISPLAY = os.environ.get("DISPLAY") or ":0"
 
 
+DESKTOP_PROCESSES = ("xfce4-panel", "xfce4-session", "xfwm4", "xfdesktop")
+
+
+def desktop_environ():
+    """Environment of a running Termux desktop process: the one the desktop's own programs get
+    (X socket dir, Mesa/Vulkan driver paths, LD_PRELOAD hooks). None without a running desktop."""
+    if not PREFIX:
+        return None
+    for pid in sorted((d for d in os.listdir("/proc") if d.isdigit()), key=int):
+        try:
+            with open("/proc/%s/cmdline" % pid, "rb") as f:
+                argv0 = f.read().split(b"\0")[0].decode("utf-8", "replace")
+            if os.path.basename(argv0) not in DESKTOP_PROCESSES:
+                continue
+            with open("/proc/%s/environ" % pid, "rb") as f:
+                env = dict(item.decode("utf-8", "replace").split("=", 1)
+                           for item in f.read().split(b"\0") if b"=" in item)
+        except (OSError, ValueError):
+            continue
+        # Only a Termux-side process (Debian's environment would be the wrong one).
+        if env.get("PREFIX") and os.path.isdir(os.path.join(env["PREFIX"], "bin")):
+            return env
+    return None
+
+
+def fallback_environ():
+    files = os.path.dirname(PREFIX)
+    return {"PREFIX": PREFIX, "PATH": "%s/bin:/system/bin" % PREFIX, "LD_LIBRARY_PATH": "%s/lib" % PREFIX,
+            "TMPDIR": files + "/tmp", "HOME": files + "/home", "DISPLAY": DISPLAY,
+            "VK_ICD_FILENAMES": "%s/share/vulkan/icd.d/freedreno_icd.aarch64.json" % PREFIX}
+
+
+TERMUX_ENV = None
+TERMUX_ENV_SOURCE = ""
+
+
+def termux_env():
+    global TERMUX_ENV, TERMUX_ENV_SOURCE
+    if TERMUX_ENV is None:
+        env = desktop_environ()
+        TERMUX_ENV_SOURCE = "running desktop" if env else "fallback (no Termux desktop process found)"
+        TERMUX_ENV = env or fallback_environ()
+        TERMUX_ENV.setdefault("DISPLAY", DISPLAY)
+    return TERMUX_ENV
+
+
 def termux_argv(cmd):
     """argv that runs a shell command on the Termux side."""
     if IN_TERMUX:
         return ["bash", "-lc", cmd]
     if not PREFIX:
         return None
-    env = ["PREFIX=" + PREFIX, "PATH=%s/bin:/system/bin" % PREFIX, "LD_LIBRARY_PATH=%s/lib" % PREFIX,
-           "TMPDIR=%s/tmp" % PREFIX, "HOME=%s/home" % os.path.dirname(PREFIX), "DISPLAY=" + DISPLAY]
-    return [PREFIX + "/bin/env", "-i"] + env + [PREFIX + "/bin/bash", "-lc", cmd]
+    env = ["%s=%s" % kv for kv in sorted(termux_env().items())]
+    # /system/bin/env: Termux's own env needs Termux's libraries before LD_LIBRARY_PATH is set.
+    return ["/system/bin/env", "-i"] + env + [PREFIX + "/bin/bash", "-lc", cmd]
+
+
+def termux_tmp():
+    return os.environ.get("TMPDIR", "/tmp") if IN_TERMUX else termux_env().get("TMPDIR", os.path.dirname(PREFIX) + "/tmp")
 
 
 def debian_argv(cmd):
@@ -90,6 +142,16 @@ def run(side, cmd, timeout=60):
 def has(side, name):
     rc, out = run(side, "command -v %s" % shlex.quote(name), timeout=20)
     return rc == 0 and out.strip() != ""
+
+
+ERROR_WORDS = ("error", "unable", "failed", "cannot", "can't", "could not", "not found", "no such",
+               "bad interpreter", "denied", "segmentation", "abort")
+
+
+def why(rc, out):
+    """Return code plus the first line of the output that looks like the cause."""
+    line = next((l.strip() for l in out.splitlines() if any(w in l.lower() for w in ERROR_WORDS)), "")
+    return "rc %s%s" % (rc, (": " + line[:160]) if line else "")
 
 
 def tail(text, lines=40):
@@ -223,8 +285,8 @@ def browser_test(label, side, launch, port, timeout=75):
     run_id = "r%d" % int(time.time() * 1000)
     url = "http://127.0.0.1:%d/%s/" % (port, run_id)
     profile = "/tmp/droiddesk-gpu-report-%s" % run_id
-    if side == "termux" and not IN_TERMUX:
-        profile = PREFIX + "/tmp/droiddesk-gpu-report-" + run_id
+    if side == "termux":
+        profile = termux_tmp() + "/droiddesk-gpu-report-" + run_id
     cmd = "mkdir -p %s; exec %s" % (shlex.quote(profile), launch.format(profile=shlex.quote(profile), url=url))
     argv = SIDES[side](cmd)
     log = tempfile.TemporaryFile()
@@ -264,6 +326,10 @@ def browser_test(label, side, launch, port, timeout=75):
         verdict = "browser-exited-%s" % exit_code + ("-after-load" if loaded else "-before-load")
     else:
         verdict = "timeout-after-load" if loaded else "timeout-no-load"
+    if result is None:
+        cause = why(exit_code, output).split(": ", 1)
+        if len(cause) == 2:
+            verdict += " (%s)" % cause[1].replace("|", "/")
     return {"label": label, "verdict": verdict, "seconds": elapsed, "loaded": bool(loaded),
             "result": result, "log_tail": tail(output, 30)}
 
@@ -289,6 +355,10 @@ def main():
 
     say("DroidDesk GPU report v%d, writing %s" % (VERSION, out_path))
     say("Running from: %s, Termux prefix: %s" % ("Termux" if IN_TERMUX else "Debian", PREFIX or "not found"))
+    if not IN_TERMUX and PREFIX:
+        termux_env()
+        say("Termux environment: " + TERMUX_ENV_SOURCE)
+        summary.append("- Run from Debian; Termux-side environment: " + TERMUX_ENV_SOURCE)
 
     # Environment
     rc, props = run("termux", "for p in ro.product.manufacturer ro.product.model ro.soc.manufacturer ro.soc.model "
@@ -323,7 +393,7 @@ def main():
             rc, out = run(side, "glxinfo -B", timeout=60)
             section(raw, "glxinfo -B (%s)" % side, out)
             renderer = next((l.split(":", 1)[1].strip() for l in out.splitlines()
-                             if "OpenGL renderer string" in l), "failed (rc %s)" % rc)
+                             if "OpenGL renderer string" in l), "failed (%s)" % why(rc, out))
             version = next((l.split(":", 1)[1].strip() for l in out.splitlines()
                             if l.strip().startswith("OpenGL version string")
                             or l.strip().startswith("OpenGL core profile version string")), "")
@@ -335,7 +405,7 @@ def main():
             rc, out = run(side, "vulkaninfo --summary", timeout=60)
             section(raw, "vulkaninfo --summary (%s)" % side, tail(out, 60))
             devs = [l.split("=", 1)[1].strip() for l in out.splitlines() if l.strip().startswith("deviceName")]
-            summary.append("- Vulkan (%s): %s" % (side, ", ".join(devs) or "failed (rc %s)" % rc))
+            summary.append("- Vulkan (%s): %s" % (side, ", ".join(devs) or "failed (%s)" % why(rc, out)))
         else:
             summary.append("- Vulkan (%s): vulkaninfo missing (%s)" % (
                 side, "pkg install vulkan-tools" if side == "termux" else "apt install vulkan-tools"))
@@ -346,7 +416,7 @@ def main():
                     rc, out = run(side, "%s -b build -b texture -b shading:shading=phong -b terrain "
                                   "-b refract --size 1280x720" % name, timeout=240)
                     section(raw, "%s (%s)" % (name, side), tail(out, 30))
-                    score = next((l for l in out.splitlines() if "Score" in l), "no score (rc %s)" % rc)
+                    score = next((l for l in out.splitlines() if "Score" in l), "no score (%s)" % why(rc, out))
                     summary.append("- %s (%s): %s" % (name, side, score.strip()))
                     break
             else:

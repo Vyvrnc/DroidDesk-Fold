@@ -37,7 +37,8 @@ Paste this to the agent on the device:
 > 1. Make sure the DroidDesk desktop is running. Run `droiddesk-gpu-report --bench` and wait for
 >    it; browser windows will open and close by themselves. Do not touch them.
 > 2. If it reports missing tools (glxinfo, vulkaninfo, glmark2), ask me before installing
->    anything. Then run it again.
+>    them (test tools only: mesa-utils, vulkan-tools, glmark2 in Debian; mesa-demos,
+>    vulkan-tools, glmark2 in Termux). Then run it again.
 > 3. Do the manual checks in the report's "Manual checks" table with what is installed. Do not
 >    install apps for this, and leave a row empty if the app is missing:
 >    - an Electron app (VS Code, Obsidian, Claude Desktop): does it start, is the window drawn;
@@ -48,6 +49,10 @@ Paste this to the agent on the device:
 >    not edit files outside the report.
 > 5. At the end tell me the report path and a five-line summary: GPU, renderer, which browsers
 >    passed WebGL, what crashed, anything surprising.
+
+Claude Code may ask you to approve running the script (auto mode treats a downloaded script
+as external code). The command shipped with DroidDesk (`droiddesk-gpu-report`) is the same
+file; approve it once.
 
 ## Reading the results
 
@@ -65,7 +70,11 @@ WebGL verdicts:
 | `timeout-after-load` / `timeout-no-load` | it hung |
 
 The `Renderer` column tells which path the browser took: `ANGLE (... Vulkan ...)`, `zink`,
-`virgl` or `llvmpipe` / `SwiftShader` (software).
+`virgl` or `llvmpipe` / `SwiftShader` (software). Firefox hides renderers it does not know
+and shows `Generic Renderer`; its log line `Couldn't sanitize GL_RENDERER` names the real one.
+
+Run from Debian, the kit borrows the environment of the running Termux desktop (X socket,
+Mesa and Vulkan driver paths) for the Termux-side tests; the summary says which it used.
 
 Bench numbers from different Mesa builds are not comparable; the report records the Mesa
 version in "Debian GPU state".
