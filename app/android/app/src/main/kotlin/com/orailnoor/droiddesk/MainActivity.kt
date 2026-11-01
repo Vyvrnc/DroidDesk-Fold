@@ -1013,8 +1013,10 @@ class MainActivity : FlutterActivity() {
             )
             android.opengl.EGL14.eglDestroySurface(display, surface)
             android.opengl.EGL14.eglDestroyContext(display, context)
-            Log.i("DroidDesk", "GPU renderer: $renderer (egl 0x${Integer.toHexString(android.opengl.EGL14.eglGetError())})")
-            renderer.trim()
+            Log.i("DroidDesk", "GPU renderer: $renderer")
+            // Samsung runs GLES through ANGLE: "ANGLE ((Samsung Xclipse 540) on Vulkan 1.3.279)".
+            Regex("""^ANGLE \(\(?(.+?)\)? on Vulkan""").find(renderer)?.groupValues?.get(1)?.trim()
+                ?: renderer.trim()
         } catch (e: Exception) {
             Log.w("DroidDesk", "GPU renderer query failed", e)
             ""
