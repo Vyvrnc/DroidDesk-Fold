@@ -5,6 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:droiddesk/theme/droid_theme.dart';
 import 'package:droiddesk/state/app_state.dart';
 import 'package:droiddesk/services/platform_bridge.dart';
+import 'package:droiddesk/widgets/linux_language_picker.dart';
 
 class DEInstallScreen extends StatefulWidget {
   const DEInstallScreen({super.key});
@@ -13,17 +14,6 @@ class DEInstallScreen extends StatefulWidget {
   State<DEInstallScreen> createState() => _DEInstallScreenState();
 }
 
-/// Languages offered for the Linux apps (glibc locale -> name in that language).
-const _languages = <String, String>{
-  'en_US.UTF-8': 'English',
-  'cs_CZ.UTF-8': 'Čeština',
-  'sk_SK.UTF-8': 'Slovenčina',
-  'de_DE.UTF-8': 'Deutsch',
-  'pl_PL.UTF-8': 'Polski',
-  'fr_FR.UTF-8': 'Français',
-  'es_ES.UTF-8': 'Español',
-  'it_IT.UTF-8': 'Italiano',
-};
 
 class _DEInstallScreenState extends State<DEInstallScreen> {
   bool _started = false;
@@ -36,7 +26,7 @@ class _DEInstallScreenState extends State<DEInstallScreen> {
     // The language comes first: the install sets it up in Debian.
     DroidDeskPlatform.getDesktopLanguage().then((locale) {
       if (!mounted) return;
-      setState(() => _language = _languages.containsKey(locale) ? locale : 'en_US.UTF-8');
+      setState(() => _language = linuxLanguages.containsKey(locale) ? locale : 'en_US.UTF-8');
     });
   }
 
@@ -76,7 +66,7 @@ class _DEInstallScreenState extends State<DEInstallScreen> {
                     ? const Center(child: CircularProgressIndicator())
                     : ListView(
                         children: [
-                          for (final entry in _languages.entries)
+                          for (final entry in linuxLanguages.entries)
                             RadioListTile<String>(
                               value: entry.key,
                               groupValue: _language,

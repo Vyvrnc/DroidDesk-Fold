@@ -4,6 +4,7 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:droiddesk/theme/droid_theme.dart';
 import 'package:droiddesk/state/app_state.dart';
 import 'package:droiddesk/screens/setup/setup_progress.dart';
+import 'package:droiddesk/widgets/linux_language_picker.dart';
 
 /// Welcome screen — first thing the user sees.
 /// Premium, animated landing with the DroidDesk brand.
@@ -109,7 +110,7 @@ class WelcomeScreen extends StatelessWidget {
                 const SizedBox(height: 8),
 
                 Text(
-                  'Ubuntu · XFCE Desktop · Single App',
+                  'Debian · XFCE Desktop · Single App',
                   style: DroidTheme.bodySm.copyWith(
                     color: DroidTheme.secondary,
                     fontWeight: FontWeight.w500,
@@ -149,6 +150,10 @@ class WelcomeScreen extends StatelessWidget {
                 ),
 
                 const Spacer(flex: 2),
+
+                // ── Language of the Linux apps (set up by the install) ──
+                const LinuxLanguagePicker(),
+                const SizedBox(height: 16),
 
                 // ── Get Started Button ──
                 SizedBox(
