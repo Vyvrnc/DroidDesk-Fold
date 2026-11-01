@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <pwd.h>
 #include <grp.h>
+#include <libintl.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -385,6 +386,11 @@ int main(int argc, char **argv) {
     for (struct dirent *de; rootdir && (de = readdir(rootdir));) marker |= !strcmp(de->d_name, "dd-root-marker");
     if (rootdir) closedir(rootdir);
     check(marker, "opendir / lists the rootfs");
+    /* gettext catalogs: the directory a program binds is the rootfs one. */
+    char localedir[PATH_MAX];
+    snprintf(localedir, sizeof localedir, "%s/usr/share/locale", getenv("DD_ROOTFS"));
+    const char *bound = bindtextdomain("dd-test", "/usr/share/locale");
+    check(bound && !strcmp(bound, localedir), "bindtextdomain maps the locale directory");
     /* A trailing slash is no missing component (meson install: os.makedirs("include/EGL/")). */
     check(!mkdir("/opt/trail-dir/", 0755) && !mkdir("/opt/trail-dir/sub/", 0755) &&
           !access("/opt/trail-dir/sub", F_OK), "mkdir with a trailing slash");

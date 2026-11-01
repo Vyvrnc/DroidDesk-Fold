@@ -25,6 +25,7 @@
 #include <grp.h>
 #include <pthread.h>
 #include <ftw.h>
+#include <libintl.h>
 #include <signal.h>
 #include <time.h>
 #include <utime.h>
@@ -541,6 +542,14 @@ ssize_t readlink(const char *p, char *b, size_t n) { if (*self_exe && is_proc_se
 ssize_t readlinkat(int d, const char *p, char *b, size_t n) { if (*self_exe && is_proc_self_exe(p)) return copy_self_exe(b, n);
     REAL(readlinkat, ssize_t, int, const char *, char *, size_t); return real_readlinkat(d, mapd(d, p, 1), b, n); }
 char *realpath(const char *p, char *r) { REAL(realpath, char *, const char *, char *); return unmap(real_realpath(map(p, 0), r)); }
+/* gettext opens its catalogs with libc-internal calls, so translations were never found
+ * natively (ls --help, apt in English with LANG=cs_CZ.UTF-8, Fold 7). Programs name the
+ * directory here; give libc the rootfs path. */
+char *bindtextdomain(const char *domain, const char *dir) {
+    REAL(bindtextdomain, char *, const char *, const char *);
+    const char *m = dir ? mapped(dir, pathbuf, 0) : NULL;
+    return real_bindtextdomain(domain, m ? m : dir);
+}
 int mkdir(const char *p, mode_t m) { REAL(mkdir, int, const char *, mode_t); return real_mkdir(map(p, 1), m); }
 int unlink(const char *p) { REAL(unlink, int, const char *); return real_unlink(map(p, 1)); }
 int rename(const char *a, const char *b) { REAL(rename, int, const char *, const char *); char second[PATH_MAX];
