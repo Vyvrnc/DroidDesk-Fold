@@ -66,8 +66,10 @@ const _xclipse = GpuFamily(
     GpuCheck('WebGL in Chromium', GpuStatus.caveat,
         'Worked in an older test after a virgl fix; not retested on fold.106',
         'Tab S10 FE, 2026-10-28'),
-    GpuCheck('Debian apps (OpenGL)', GpuStatus.broken,
-        'With "droiddesk-gpu on" in Debian, OpenGL fails to start (X error); keep it off', _tab),
+    GpuCheck('Debian apps (OpenGL)', GpuStatus.caveat,
+        'With "droiddesk-gpu on": virgl with OpenGL 4.3. Heavy 3D is faster, light scenes slower '
+            'than software (glxgears 192 vs 622 FPS); glxinfo itself fails with an X error',
+        _tab),
     GpuCheck('Vulkan', GpuStatus.software, 'Software only (lavapipe)', _tab),
     GpuCheck('Electron apps (VS Code, Obsidian)', GpuStatus.software,
         'Run with the GPU off (it crashed on virgl)', 'Tab S10 FE, 2026-10-26'),

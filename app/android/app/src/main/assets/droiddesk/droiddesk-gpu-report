@@ -27,7 +27,7 @@ import tempfile
 import threading
 import time
 
-VERSION = 2
+VERSION = 3
 APP_DATA = "/data/user/0/com.orailnoor.droiddesk/files"
 # In Debian the session keeps Termux's prefix as DD_SAVED_PREFIX.
 PREFIX_CANDIDATES = [os.environ.get("DROIDDESK_PREFIX", ""), os.environ.get("PREFIX", ""),
@@ -401,6 +401,13 @@ def main():
         else:
             summary.append("- OpenGL (%s): glxinfo missing (%s)" % (
                 side, "pkg install mesa-demos" if side == "termux" else "apt install mesa-utils"))
+        # glxinfo never maps its window; Debian's Mesa 25 on virgl then fails with BadMatch
+        # (X_GetImage) although programs with a visible window work. glxgears draws in one.
+        if has(side, "glxgears"):
+            rc, out = run(side, "timeout 7 glxgears", timeout=30)
+            section(raw, "glxgears 5 s (%s)" % side, tail(out, 6))
+            fps = [l.strip() for l in out.splitlines() if "FPS" in l]
+            summary.append("- glxgears (%s): %s" % (side, fps[0] if fps else "no frames (%s)" % why(rc, out)))
         if has(side, "vulkaninfo"):
             rc, out = run(side, "vulkaninfo --summary", timeout=60)
             section(raw, "vulkaninfo --summary (%s)" % side, tail(out, 60))

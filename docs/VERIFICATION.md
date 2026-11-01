@@ -47,8 +47,11 @@ Tested on Tab S10 FE, clean install (`pm clear`, user 0):
 - settings show "Samsung Xclipse 540";
 - GPU kit, virgl off: Termux llvmpipe GL 4.6, Firefox 159 WebGL ok at 2.1 FPS. Virgl on
   (`droiddesk-native-gpu on`): Termux virgl over ANGLE/Vulkan (GL 2.1, GLES 3.1), Firefox WebGL ok
-  at 56.9 FPS. Debian with `droiddesk-gpu on`: glxinfo fails with BadMatch (X_GetImage), native and
-  under proot (Debian Mesa 25.0.7), not fixed. Both switched off again after the test.
+  at 56.9 FPS. Debian with `droiddesk-gpu on`: virgl works (eglinfo renderer virgl/ANGLE, glxgears
+  192 FPS against 622 on llvmpipe), but `glxinfo -B` fails with BadMatch (X_GetImage), native and
+  under proot: it never maps its window, and Debian's Mesa 25.0.7 reads it back (Termux's Mesa
+  26.2.6 does not). The GPU kit (v3) adds a glxgears run for that reason. Both switched off again
+  after the test.
 
 Tested on Fold 7 (Android 17) with the GPU kit, from Debian:
 - Debian: zink on Turnip, GL 4.6, Mesa 26.2.6; Vulkan Adreno 830;
