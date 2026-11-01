@@ -1037,6 +1037,14 @@ class LinuxRuntime(private val context: Context) {
                 bash -s <<'DROIDDESK_DEBIAN_SETUP'
             set -e
             export DEBIAN_FRONTEND=noninteractive
+            # dpkg under proot pays for every fsync and unpacks docs nobody reads here: skip
+            # both (copyright files stay), keep translations. apt retries slow mirrors and
+            # does not fetch package description translations.
+            mkdir -p /etc/dpkg/dpkg.cfg.d /etc/apt/apt.conf.d
+            printf '%s\n' force-unsafe-io > /etc/dpkg/dpkg.cfg.d/droiddesk-unsafe-io
+            printf '%s\n' 'path-exclude=/usr/share/doc/*' 'path-include=/usr/share/doc/*/copyright' \
+                'path-exclude=/usr/share/man/*' 'path-exclude=/usr/share/info/*' > /etc/dpkg/dpkg.cfg.d/droiddesk-nodoc
+            printf '%s\n' 'Acquire::Retries "3";' 'Acquire::Languages "none";' > /etc/apt/apt.conf.d/90droiddesk
             apt-get update
             apt-get install -y git procps less bash-completion fontconfig tzdata locales fzf jq vim curl ca-certificates dbus-x11 xz-utils pulseaudio-utils libnotify-bin tmux proxychains4 xclip libxcb-keysyms1 ripgrep wmctrl xdotool x11-utils
             # Debian's own session bus and keyring (droiddesk-session-bus, started by the app):
@@ -4215,6 +4223,30 @@ class LinuxRuntime(private val context: Context) {
             return false
         }
 
+        // First install only: without Recommends (python pulled clang, llvm, make and the NDK
+        // sysroot, 80+ MB) and with retries for slow mirrors. Removed again afterwards, so
+        // later pkg installs behave as in Termux.
+        val setupAptConf = File(prefixDir, "etc/apt/apt.conf.d/90droiddesk-setup")
+        runCatching {
+            setupAptConf.parentFile?.mkdirs()
+            setupAptConf.writeText(
+                "APT::Install-Recommends \"false\";\n" +
+                    "Acquire::Retries \"3\";\n" +
+                    "Acquire::http::Timeout \"30\";\n" +
+                    "Acquire::https::Timeout \"30\";\n",
+            )
+        }
+        // Without a chosen mirror group pkg draws from all mirrors, China included: the tablet
+        // downloaded at 19 kB/s from mirrors.pku.edu.cn (213 MB, hours). Use Termux's default,
+        // the Cloudflare CDN, unless a mirror was chosen (termux-change-repo).
+        val chosenMirrors = File(prefixDir, "etc/termux/chosen_mirrors")
+        val defaultMirror = File(prefixDir, "etc/termux/mirrors/default")
+        if (defaultMirror.isFile && !chosenMirrors.exists()) {
+            chosenMirrors.delete() // a dangling link also makes pkg draw from all mirrors
+            runCatching { android.system.Os.symlink(defaultMirror.absolutePath, chosenMirrors.absolutePath) }
+                .onFailure { Log.w(TAG, "Selecting the default Termux mirror failed: ${it.message}") }
+        }
+        try {
         patchShebangs()
         patchElfRunpaths(prefixDir)
         compileSocketHook()
@@ -4298,7 +4330,9 @@ class LinuxRuntime(private val context: Context) {
             installPackageGroup("pkg install -y mesa-vulkan-icd-freedreno")
         }
 
-        val nativeTools = "git wget curl openssh htop python clang"
+        // No clang: the prebuilt socket hook from jniLibs finds its prefix at load time, and the
+        // toolchain (clang, llvm, ndk-sysroot) was over 80 MB of every first install.
+        val nativeTools = "git wget curl openssh htop python"
         onProgress?.invoke(
             0.84,
             "Installing Desktop Essentials tools...",
@@ -4327,6 +4361,9 @@ class LinuxRuntime(private val context: Context) {
         onProgress?.invoke(1.0, "Native Linux setup complete")
         Log.i(TAG, "Native Termux $selectedDesktop installation complete")
         return true
+        } finally {
+            setupAptConf.delete()
+        }
     }
 
     fun installOptionalApp(
