@@ -3298,7 +3298,8 @@ class LinuxRuntime(private val context: Context) {
                 Log.e(TAG, "Error compiling natively: ${e.message}")
             }
         } else {
-            Log.w(TAG, "clang binary not found yet. Cannot compile socket_hook.c.")
+            // The prebuilt hook from jniLibs is used; clang is not part of the setup any more.
+            Log.i(TAG, "No clang: keeping the prebuilt libsocket_hook.so")
         }
     }
 
@@ -3500,8 +3501,34 @@ class LinuxRuntime(private val context: Context) {
 
     // ── Native Package Installation ──
 
+    /**
+     * A setup killed in the middle of apt (an OTA reboot on the ScreenMate One, 2026-11-02) left
+     * extended_states truncated: apt-get update still worked, every install failed with "Unable to
+     * parse package file .../extended_states", and each retry hit the same wall. Finishes what dpkg
+     * left half done and moves an unreadable extended_states aside (it only holds the
+     * auto-installed flags; apt starts a new one).
+     */
+    private fun repairPackageState() {
+        val script = """
+            timeout --signal=TERM --kill-after=5s 90s dpkg --configure -a >/dev/null 2>&1 ||
+                echo "dpkg --configure -a failed"
+            out=${'$'}(apt-get check 2>&1) && exit 0
+            printf '%s\n' "${'$'}out" | tail -3
+            states=${'$'}PREFIX/var/lib/apt/extended_states
+            if printf '%s' "${'$'}out" | grep -q extended_states && [ -e "${'$'}states" ]; then
+                mv -f "${'$'}states" "${'$'}states.broken-${'$'}(date +%Y%m%d%H%M%S)" &&
+                    echo "moved unreadable extended_states aside"
+                apt-get check >/dev/null 2>&1 && echo "apt state repaired"
+            fi
+            exit 0
+        """.trimIndent()
+        val output = executeCommand(script)
+        if (output.isNotBlank()) Log.i(TAG, "Package state check: ${output.trim().take(400)}")
+    }
+
     private fun installRepoPackages(): Boolean {
         val pkgs = listOf("x11-repo", "tur-repo")
+        repairPackageState()
 
         // Ensure main package list is up to date before downloading the repo packages.
         if (executeCommand("apt-get update").startsWith("Error:")) {
