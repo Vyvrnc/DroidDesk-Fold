@@ -18,6 +18,19 @@ Automated checks before every release: `tools/glibc-native/test.sh` (pathhook an
 regressions in a Debian container) and `tools/check-launchers.py` (`bash -n` over the generated
 launchers).
 
+## 1.0.1-fold.108 (2026-11-02)
+
+Fixed: a setup interrupted inside apt could not recover. On the ScreenMate One (Adreno 610,
+Android Automotive 14) an OTA reboot killed the first setup of fold.107; afterwards every
+install failed with "Unable to parse package file .../extended_states" and each retry stopped
+at x11-repo/tur-repo. Before the first install step the setup now runs `dpkg --configure -a`
+and, when `apt-get check` names extended_states, moves the file aside
+(`extended_states.broken-<time>`; it only holds the auto-installed flags).
+
+Tested: the repair script on a deliberately corrupted extended_states in a Debian trixie
+container (apt-get check fails, file moved aside, apt-get check passes); `check-launchers`.
+Not tested on the ScreenMate (no adb root since its OTA; needs a person at the device).
+
 ## 1.0.1-fold.107 (2026-11-01)
 
 Fixed: the Claude launchers printed `ln: invalid option -- 'a'` at every start (Tab S10 FE,
