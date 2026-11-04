@@ -31,6 +31,11 @@ Tested: the repair script on a deliberately corrupted extended_states in a Debia
 container (apt-get check fails, file moved aside, apt-get check passes); `check-launchers`.
 Not tested on the ScreenMate (no adb root since its OTA; needs a person at the device).
 
+Also: `droiddesk-net` explains EPERM (found on the Fold 7 with Tailscale as the default network:
+Android forbids binding to eth0 while a VPN without bypass covers the app) and `status` warns
+when the default network is a VPN. Tested: the hint text from the module (py_compile); not on a
+device.
+
 ## 1.0.1-fold.107 (2026-11-01)
 
 Fixed: the Claude launchers printed `ln: invalid option -- 'a'` at every start (Tab S10 FE,
