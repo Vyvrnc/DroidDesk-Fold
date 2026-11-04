@@ -46,12 +46,22 @@ def request(line):
     return client, client.makefile("r", encoding="utf-8", errors="replace")
 
 
+VPN_HINT = ("\n  Android forbids binding to another network while a VPN that does not allow bypass covers\n"
+            "  DroidDesk (Fold 7 with Tailscale, 2026-11-04). Exclude DroidDesk in the VPN app\n"
+            "  (Tailscale: Settings, split tunneling / excluded apps; Linux in DroidDesk then has no\n"
+            "  tailnet) or disconnect the VPN, and turn off \"Block connections without VPN\".")
+
+
+def explain(message):
+    return message + (VPN_HINT if "EPERM" in message else "")
+
+
 def simple(line):
     client, reader = request(line)
     answer = reader.readline().strip()
     client.close()
     if answer != "ok":
-        sys.exit("droiddesk-net: " + (answer[4:] if answer.startswith("err ") else answer or "no answer"))
+        sys.exit("droiddesk-net: " + explain(answer[4:] if answer.startswith("err ") else answer or "no answer"))
 
 
 def read_status():
@@ -93,6 +103,9 @@ def status():
     print("Pravidla:" if rules else "Pravidla: žádná (vše jde výchozí sítí)")
     for cidr, iface in rules:
         print(f"  {cidr:<20} -> {iface}")
+    if any(net["transport"] == "vpn" and net["default"] for net in nets) and any(net["enabled"] for net in nets):
+        print("Pozor: výchozí síť je VPN. Když proxy hlásí EPERM, vyřaď DroidDesk ve VPN aplikaci\n"
+              "(Tailscale: split tunneling / vyloučené aplikace) nebo VPN odpoj.")
 
 
 def run(argv):
@@ -129,7 +142,7 @@ def ping(argv):
             break
         if line.startswith("err "):
             failed = True
-            print("droiddesk-net: " + line[4:], file=sys.stderr)
+            print("droiddesk-net: " + explain(line[4:]), file=sys.stderr)
         else:
             print(line, flush=True)
             if line.startswith("0/"):
@@ -150,7 +163,7 @@ def forward(argv):
     client, reader = request(f"forward {protocol} {local_port} {via} {host} {port}")
     answer = reader.readline().strip()
     if not answer.startswith("ok"):
-        sys.exit("droiddesk-net: " + (answer[4:] if answer.startswith("err ") else answer or "no answer"))
+        sys.exit("droiddesk-net: " + explain(answer[4:] if answer.startswith("err ") else answer or "no answer"))
     print(f"127.0.0.1:{answer.split()[1]}/{protocol} -> {host}:{port} (via {via}); Ctrl+C ends it", flush=True)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     try:
